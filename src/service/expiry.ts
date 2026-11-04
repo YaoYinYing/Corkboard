@@ -30,25 +30,32 @@ export interface ExpireBodiesOptions {
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 5000;
 
-function randomId(prefix: string): string {
-  const raw = crypto.getRandomValues(new Uint8Array(16));
-  let binary = "";
-  for (const byte of raw) binary += String.fromCharCode(byte);
-  return `${prefix}${btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
+// Deterministic per-message id makes the audit row idempotent and lets the
+// worker reconcile a transition whose audit insert failed.
+export function expiryAuditId(messageId: string): string {
+  return `evt_expire_${messageId}`;
 }
 
-// Sanitized: identifiers and outcome only, never content.
+// Sanitized: identifiers and outcome only, never content. INSERT OR IGNORE
+// keeps the first (truthful) actor/timestamp if the row already exists.
 async function auditExpiry(
   deps: ExpiryDeps,
   projectId: string,
+  messageId: string,
   speakerId: string | null,
   accountId: string | null,
 ): Promise<void> {
   await deps.db.run(
-    `INSERT INTO audit_events
+    `INSERT OR IGNORE INTO audit_events
        (id, actor_account_id, actor_speaker_id, project_id, operation, outcome, request_id, created_at)
      VALUES (?, ?, ?, ?, 'message.expire', 'success', NULL, ?)`,
-    [randomId("evt_"), accountId, speakerId, projectId, deps.now().toISOString()],
+    [
+      expiryAuditId(messageId),
+      accountId,
+      speakerId,
+      projectId,
+      deps.now().toISOString(),
+    ],
   );
 }
 
@@ -125,7 +132,13 @@ export async function expireMessageBody(
   }
 
   if (message.body_state === "expired") {
-    // Retry a crash-interrupted cleanup, but never fail the idempotent call.
+    // Retry a crash-interrupted audit and cleanup, but never fail the
+    // idempotent call: the destructive transition already succeeded.
+    try {
+      await auditExpiry(deps, projectId, messageId, principal.speakerId, principal.accountId);
+    } catch {
+      // The cleanup worker reconciles the missing audit row.
+    }
     try {
       await deleteExpiredBodyBlob(deps, projectId, messageId);
     } catch {
@@ -156,9 +169,9 @@ export async function expireMessageBody(
     if (current?.body_state !== "expired") throw new AppError("NOT_FOUND");
   } else {
     try {
-      await auditExpiry(deps, projectId, principal.speakerId, principal.accountId);
+      await auditExpiry(deps, projectId, messageId, principal.speakerId, principal.accountId);
     } catch {
-      throw new AppError("UNAVAILABLE");
+      // The transition is durable; return success and let the worker reconcile.
     }
   }
 
@@ -188,6 +201,7 @@ export async function expireDueBodies(
 ): Promise<ExpireBodiesSummary> {
   const limit = validateLimit(options.limit);
   const nowIso = deps.now().toISOString();
+  const examined = new Set<string>();
   const summary: ExpireBodiesSummary = {
     examined: 0,
     expired: 0,
@@ -195,12 +209,8 @@ export async function expireDueBodies(
     failures: 0,
   };
 
-  const due = await deps.db.all<{
-    id: string;
-    project_id: string;
-    sender_speaker_id: string;
-  }>(
-    `SELECT id, project_id, sender_speaker_id
+  const due = await deps.db.all<{ id: string; project_id: string }>(
+    `SELECT id, project_id
        FROM messages
       WHERE body_state = 'ready'
         AND body_expires_at IS NOT NULL
@@ -209,9 +219,9 @@ export async function expireDueBodies(
       LIMIT ?`,
     [nowIso, limit],
   );
-  summary.examined += due.length;
 
   for (const row of due) {
+    examined.add(row.id);
     try {
       const result = await deps.db.run(
         `UPDATE messages SET body_state = 'expired'
@@ -226,7 +236,8 @@ export async function expireDueBodies(
       continue;
     }
     try {
-      await auditExpiry(deps, row.project_id, row.sender_speaker_id, null);
+      // Worker-initiated expiry is a system action, not the sender's.
+      await auditExpiry(deps, row.project_id, row.id, null, null);
     } catch {
       summary.failures += 1;
     }
@@ -243,9 +254,9 @@ export async function expireDueBodies(
       LIMIT ?`,
     [limit],
   );
-  summary.examined += orphans.length;
 
   for (const row of orphans) {
+    examined.add(row.id);
     try {
       if (await deleteExpiredBodyBlob(deps, row.project_id, row.id)) {
         summary.blobsDeleted += 1;
@@ -255,5 +266,27 @@ export async function expireDueBodies(
     }
   }
 
+  // Repair expired tombstones whose audit insert failed after the transition.
+  const unaudited = await deps.db.all<{ id: string; project_id: string }>(
+    `SELECT m.id, m.project_id
+       FROM messages m
+       LEFT JOIN audit_events a ON a.id = 'evt_expire_' || m.id
+      WHERE m.body_state = 'expired'
+        AND a.id IS NULL
+      ORDER BY m.project_id ASC, m.seq ASC
+      LIMIT ?`,
+    [limit],
+  );
+
+  for (const row of unaudited) {
+    examined.add(row.id);
+    try {
+      await auditExpiry(deps, row.project_id, row.id, null, null);
+    } catch {
+      summary.failures += 1;
+    }
+  }
+
+  summary.examined = examined.size;
   return summary;
 }

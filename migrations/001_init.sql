@@ -155,6 +155,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_project_received_at
   ON messages (project_id, received_at);
 CREATE INDEX IF NOT EXISTS idx_messages_project_body_state_seq
   ON messages (project_id, body_state, seq);
+CREATE INDEX IF NOT EXISTS idx_messages_body_state_expires
+  ON messages (body_state, body_expires_at);
 CREATE INDEX IF NOT EXISTS idx_message_receipts_speaker_message
   ON message_receipts (speaker_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_project_memberships_speaker_project

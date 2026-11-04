@@ -66,6 +66,12 @@ manager or treat it as a backup secret. Rules:
 - `audit_events` records credential issuance/revocation, membership grant/removal,
   body-integrity failures, and successful body expiry (`message.expire`), with
   identifiers and outcome only and no body content.
+- Expiry audit rows use a deterministic id derived from the message id and
+  `INSERT OR IGNORE`. The HTTP endpoint records the authenticated principal; the
+  operator-run worker records a **system actor** (null account and speaker), not the
+  message sender. The transition is authoritative: the endpoint returns success even
+  if the audit insert fails, the already-expired path retries the insert, and the
+  worker reconciles expired messages whose deterministic row is still missing.
 - Body retention enforcement is **opt-in per message** via `body_expires_at`, either
   through the authenticated `POST .../expire` endpoint or the operator-run
   `expire-bodies` cleanup command. There is no scheduler daemon and no automatic

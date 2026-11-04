@@ -29,6 +29,13 @@ intersection of credential scopes and the membership capability set. Defaults:
 A credential with `message.send` but no `project.read` cannot list projects or read
 project metadata. There is no implicit scope.
 
+The bootstrap CLI `issue-key` accepts `--scopes <comma-separated>`; without it the
+default remains `project.read`, `message.read`, `message.send`, `receipt.write`.
+Every requested scope must be known and be a subset of the speaker's **active
+membership capabilities** for `--project`. Empty lists, duplicates, and unknown or
+ungranted scopes are rejected. This is how an operator issues the `project.edit`
+credential used by the expire endpoint.
+
 Effective rights also require an **active account, active speaker, active project, and
 active membership**; suspended or disabled principals are denied even with a live
 credential. Decision order: no valid credential → `UNAUTHENTICATED`; not a member or
@@ -128,10 +135,15 @@ Body:
   payload and verified again after decryption; it is not in the AAD or outer header.
 - `reply_to_id`: optional; must exist in the same project (tombstones allowed).
 - `client_sent_at`: optional untrusted metadata, stored for diagnostics only.
-- `body_expires_at`: optional RFC 3339 timestamp with an explicit UTC offset. It must
-  be strictly after the server `received_at`, valid, and no more than 366 days ahead;
-  otherwise `VALIDATION_ERROR` before any write. Stored normalized to UTC. `null` or
-  omission means no expiry. It participates in the idempotency payload, so the same
+- `body_expires_at`: optional strict RFC 3339 **UTC** timestamp. Accepted form: four-digit
+  year, two-digit month and day, `T`, `HH:MM:SS`, an optional `.` plus 1–3 fractional
+  digits, and `Z`; the date must be a real calendar date, hours are 00–23, and
+  minutes and seconds are 00–59.
+  Offsets (`+hh:mm`), lowercase `z`, hour `24`, leap second `60`, and impossible
+  dates (for example Feb 30 or Feb 29 in a non-leap year) are rejected. It must be
+  strictly after the server `received_at` and no more than 366 days ahead; otherwise
+  `VALIDATION_ERROR` before any write. Stored normalized to UTC milliseconds. `null`
+  or omission means no expiry. It participates in the idempotency payload, so the same
   key with a different expiry is `CONFLICT`.
 - `speaker_id`, `received_at`, `seq`, `committed_at`, and compression fields are
   server-written; if supplied they are rejected with `VALIDATION_ERROR`.
@@ -144,9 +156,10 @@ Response `201`:
   "committed_at": "...", "body_state": "ready", "digest": "sha256:<plaintext hex>" }
 ```
 
-Repeating the same key with the same payload returns the same result (`200`), even if
-the body has since expired. A different payload under the same key, including a
-different `body_expires_at`, returns `CONFLICT`.
+Repeating the same key with the same payload returns `200` with the same
+`message_id`, `seq`, `committed_at`, and `digest`; `body_state` reflects the current
+committed state (for example `expired`), not a cached `ready`. A different payload
+under the same key, including a different `body_expires_at`, returns `CONFLICT`.
 
 ### `GET /api/v1/projects/:projectId/messages`
 
@@ -232,9 +245,14 @@ Requires `project.edit` plus membership. Ordinary member capabilities do not inc
    (credential or membership) → `FORBIDDEN`.
 2. Unknown, never committed (pending/provisional), or `failed` → `NOT_FOUND`.
 3. Already `expired` → idempotent `200`.
-4. Otherwise atomically mark `ready → expired` in one conditional UPDATE, record an
-   audit event (`message.expire`, `success`, actor speaker/project, no content), then
-   best-effort delete the ciphertext and mark the `body_objects` row deleted.
+4. Otherwise atomically mark `ready → expired` in one conditional UPDATE, then
+   best-effort record an audit event (`message.expire`, `success`, actor
+   speaker/project, no content), delete the ciphertext, and mark the `body_objects`
+   row deleted. The audit row uses a deterministic id derived from the message id and
+   `INSERT OR IGNORE`, so it is written once. Because the destructive transition is
+   the authority, the endpoint returns `200` even if the audit insert fails; the
+   already-expired path retries the insert, and the operator-run worker reconciles any
+   still-missing row (with a system actor).
 
 Returns `{ "message_id": "msg_...", "body_state": "expired" }`. Metadata, sequence,
 sender, timestamps and receipts are retained; subsequent body fetches return
@@ -256,7 +274,7 @@ cleanup command (see `deployments.md`) for due `body_expires_at` values.
 | `type` | 32 ASCII chars, `^[a-z][a-z0-9_.-]{0,31}$` |
 | `language` | canonical BCP 47 |
 | `body_digest` | `sha256:` + 64 lowercase hex characters |
-| `body_expires_at` | RFC 3339 timestamp with offset; after `received_at`, ≤366 days ahead |
+| `body_expires_at` | strict RFC 3339 UTC `Z`; real calendar date; seconds 00–59; optional 1–3 fraction digits; after `received_at`; ≤366 days ahead |
 | `Idempotency-Key` | 1–128 non-space printable ASCII (0x21–0x7E) |
 | List `limit` | 1–100 |
 | Request body | 64 KiB (first slice; attachments separate and not implemented) |

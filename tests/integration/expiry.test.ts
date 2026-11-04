@@ -6,6 +6,7 @@ import { AppError, type ErrorCode } from "../../src/domain/errors.ts";
 import type { Principal } from "../../src/service/auth.ts";
 import {
   deleteExpiredBodyBlob,
+  expiryAuditId,
   expireDueBodies,
   expireMessageBody,
   type ExpiryDeps,
@@ -19,6 +20,7 @@ import {
   type SendMessageInput,
 } from "../../src/service/messages.ts";
 import type { BlobStore } from "../../src/storage/blobs.ts";
+import type { SqlDatabase, SqlValue } from "../../src/storage/db.ts";
 import { createServiceFixture, type ServiceFixture } from "../helpers/service-fixture.ts";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -126,6 +128,20 @@ test("body_expires_at validation rejects past, over-366-day and malformed values
     "not a timestamp",
     "2026-11-03",
     123,
+    // Strict UTC subset: offsets, hour 24, leap second, 4-digit fractions,
+    // missing seconds, lowercase z, and impossible calendar dates are rejected.
+    "2026-11-04T12:00:00+01:00",
+    "2026-11-04T12:00:00-05:00",
+    "2026-11-04T24:00:00Z",
+    "2026-11-04T12:00:60Z",
+    "2026-11-04T12:00:00.1234Z",
+    "2026-11-04T12:00Z",
+    "2026-11-04t12:00:00z",
+    "2026-11-31T12:00:00Z",
+    "2026-12-00T12:00:00Z",
+    "2026-13-01T12:00:00Z",
+    "2027-02-30T12:00:00Z",
+    "2027-02-29T12:00:00Z",
   ];
   for (const [index, value] of invalid.entries()) {
     await expectCode(
@@ -147,6 +163,21 @@ test("body_expires_at validation rejects past, over-366-day and malformed values
   });
   const metadata = await getMessage(fx.deps, alice.principal, "proj_1", accepted.messageId);
   assert.equal(metadata.bodyExpiresAt, boundary);
+
+  // 1-3 fractional digits are accepted and preserved as milliseconds.
+  const withMillis = new Date(base.getTime() + HOUR_MS)
+    .toISOString()
+    .replace(".000Z", ".123Z");
+  const precise = await send(fx, alice.principal, "proj_1", "millis", "precise", {
+    bodyExpiresAt: withMillis,
+  });
+  const preciseMetadata = await getMessage(
+    fx.deps,
+    alice.principal,
+    "proj_1",
+    precise.messageId,
+  );
+  assert.equal(preciseMetadata.bodyExpiresAt, withMillis);
 });
 
 test("expired bodies keep sequence and metadata while fetch and receipt fail", async (t) => {
@@ -288,6 +319,16 @@ test("expire endpoint orders membership, scope, state and success correctly", as
     "NOT_FOUND",
   );
 
+  const failed = await send(fx, alice.principal, "proj_1", "key-3", "failed body");
+  await fx.db.run(
+    "UPDATE messages SET seq = NULL, committed_at = NULL, body_state = 'failed' WHERE id = ?",
+    [failed.messageId],
+  );
+  await expectCode(
+    expireMessageBody(fx.deps, alice.principal, "proj_1", failed.messageId),
+    "NOT_FOUND",
+  );
+
   // Owner success transitions atomically and deletes the ciphertext.
   const result = await expireMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId);
   assert.deepEqual(result, { messageId: sent.messageId, bodyState: "expired" });
@@ -387,12 +428,36 @@ test("cleanup worker expires due rows, deletes blobs and leaves future or unexpi
 
   fx.setNow(new Date(base.getTime() + 3 * HOUR_MS));
   const summary = await expireDueBodies(expiryDeps(fx), { limit: 500 });
+  // examined counts distinct messages: the two phase-1 rows are also the two
+  // phase-2 orphans and must not be double-counted.
   assert.deepEqual(summary, {
-    examined: 4,
+    examined: 2,
     expired: 2,
     blobsDeleted: 2,
     failures: 0,
   });
+
+  const audits = await fx.db.all<{
+    id: string;
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+    operation: string;
+  }>(
+    `SELECT id, actor_account_id, actor_speaker_id, operation
+       FROM audit_events WHERE operation = 'message.expire' ORDER BY id`,
+  );
+  assert.equal(audits.length, 2);
+  for (const audit of audits) {
+    assert.equal(audit.actor_account_id, null);
+    assert.equal(audit.actor_speaker_id, null);
+  }
+  assert.deepEqual(
+    audits.map((audit) => audit.id).sort(),
+    [
+      `evt_expire_${dueOne.messageId}`,
+      `evt_expire_${dueTwo.messageId}`,
+    ].sort(),
+  );
 
   for (const message of [dueOne, dueTwo]) {
     const row = await fx.db.first<{ body_state: string; seq: number }>(
@@ -450,6 +515,7 @@ test("cleanup worker retries an expired orphan after a blob delete failure", asy
   // The transition is durable before the failed delete; the message is expired
   // while the blob row still records the ciphertext.
   const first = await expireDueBodies(expiryDeps(fx, flaky), {});
+  assert.equal(first.examined, 1);
   assert.equal(first.expired, 1);
   assert.equal(first.blobsDeleted, 0);
   assert.equal(first.failures, 1);
@@ -465,6 +531,7 @@ test("cleanup worker retries an expired orphan after a blob delete failure", asy
   assert.notEqual(await fx.blobs.get(storageKey), undefined);
 
   const second = await expireDueBodies(expiryDeps(fx, flaky), {});
+  assert.equal(second.examined, 1);
   assert.equal(second.expired, 0);
   assert.equal(second.blobsDeleted, 1);
   assert.equal(second.failures, 0);
@@ -486,6 +553,274 @@ test("cleanup worker bounds its limit", async (t) => {
       "VALIDATION_ERROR",
     );
   }
+});
+
+function withAuditFailure(
+  db: SqlDatabase,
+  state: { fail: boolean },
+): SqlDatabase {
+  return {
+    exec: (sql) => db.exec(sql),
+    all: <T>(sql: string, params?: readonly SqlValue[]) => db.all<T>(sql, params),
+    first: <T>(sql: string, params?: readonly SqlValue[]) => db.first<T>(sql, params),
+    run: (sql: string, params?: readonly SqlValue[]) => {
+      if (state.fail && sql.includes("INSERT OR IGNORE INTO audit_events")) {
+        return Promise.reject(new Error("injected audit insert failure"));
+      }
+      return db.run(sql, params);
+    },
+  };
+}
+
+function withBodyObjectRace(
+  db: SqlDatabase,
+  onObjectLookup: () => Promise<void>,
+  state: { fired: boolean },
+): SqlDatabase {
+  return {
+    exec: (sql) => db.exec(sql),
+    all: <T>(sql: string, params?: readonly SqlValue[]) => db.all<T>(sql, params),
+    first: async <T>(sql: string, params?: readonly SqlValue[]) => {
+      if (!state.fired && sql.includes("FROM body_objects")) {
+        state.fired = true;
+        await onObjectLookup();
+      }
+      return db.first<T>(sql, params);
+    },
+    run: (sql: string, params?: readonly SqlValue[]) => db.run(sql, params),
+  };
+}
+
+test("a removed membership cannot expire messages", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "removed caller");
+
+  // The principal is authenticated while the membership is active, then the
+  // membership is revoked before the request is authorized.
+  const principal = await fx.authenticate(alice.token);
+  await fx.db.run(
+    "UPDATE project_memberships SET removed_at = ? WHERE project_id = ? AND speaker_id = ?",
+    [fx.deps.now().toISOString(), "proj_1", alice.speakerId],
+  );
+
+  await expectCode(
+    expireMessageBody(fx.deps, principal, "proj_1", sent.messageId),
+    "NOT_FOUND",
+  );
+  const row = await fx.db.first<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE id = ?",
+    [sent.messageId],
+  );
+  assert.equal(row?.body_state, "ready");
+});
+
+test("a blob-delete failure still returns endpoint success", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const expiry = new Date(fx.deps.now().getTime() + HOUR_MS).toISOString();
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "delete failure", {
+    bodyExpiresAt: expiry,
+  });
+  const storageKey = await blobKeyFor(fx, sent.messageId);
+
+  const failing: BlobStore = {
+    put: (key, bytes) => fx.blobs.put(key, bytes),
+    get: (key) => fx.blobs.get(key),
+    delete: () => Promise.reject(new Error("injected blob delete failure")),
+  };
+
+  const result = await expireMessageBody(
+    { ...fx.deps, blobs: failing },
+    alice.principal,
+    "proj_1",
+    sent.messageId,
+  );
+  assert.deepEqual(result, { messageId: sent.messageId, bodyState: "expired" });
+  const object = await fx.db.first<{ state: string; storage_key: string | null }>(
+    `SELECT b.state, b.storage_key FROM body_objects b
+       JOIN messages m ON m.body_object_id = b.id WHERE m.id = ?`,
+    [sent.messageId],
+  );
+  assert.notEqual(object?.state, "deleted");
+  assert.equal(object?.storage_key, storageKey);
+  assert.notEqual(await fx.blobs.get(storageKey), undefined);
+});
+
+test("endpoint audit failure returns success and the worker repairs the audit row", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "audit repair");
+
+  const state = { fail: true };
+  const failingDb = withAuditFailure(fx.deps.db, state);
+  const result = await expireMessageBody(
+    { ...fx.deps, db: failingDb },
+    alice.principal,
+    "proj_1",
+    sent.messageId,
+  );
+  assert.deepEqual(result, { messageId: sent.messageId, bodyState: "expired" });
+
+  const missing = await fx.db.first<{ id: string }>(
+    "SELECT id FROM audit_events WHERE id = ?",
+    [expiryAuditId(sent.messageId)],
+  );
+  assert.equal(missing, undefined);
+
+  state.fail = false;
+  const summary = await expireDueBodies(expiryDeps(fx), {});
+  assert.equal(summary.failures, 0);
+  const audit = await fx.db.first<{
+    id: string;
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+    operation: string;
+    outcome: string;
+    project_id: string;
+  }>(
+    `SELECT id, actor_account_id, actor_speaker_id, operation, outcome, project_id
+       FROM audit_events WHERE id = ?`,
+    [expiryAuditId(sent.messageId)],
+  );
+  assert.deepEqual(audit, {
+    id: expiryAuditId(sent.messageId),
+    actor_account_id: null,
+    actor_speaker_id: null,
+    operation: "message.expire",
+    outcome: "success",
+    project_id: "proj_1",
+  });
+});
+
+test("the already-expired endpoint path retries a missing audit row", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "audit retry");
+
+  const state = { fail: true };
+  await expireMessageBody(
+    { ...fx.deps, db: withAuditFailure(fx.deps.db, state) },
+    alice.principal,
+    "proj_1",
+    sent.messageId,
+  );
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE id = ?", [expiryAuditId(sent.messageId)]))
+      .length,
+    0,
+  );
+
+  const again = await expireMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId);
+  assert.deepEqual(again, { messageId: sent.messageId, bodyState: "expired" });
+  const audit = await fx.db.first<{
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+  }>(
+    "SELECT actor_account_id, actor_speaker_id FROM audit_events WHERE id = ?",
+    [expiryAuditId(sent.messageId)],
+  );
+  assert.deepEqual(audit, {
+    actor_account_id: "acct_alice",
+    actor_speaker_id: "spk_alice",
+  });
+});
+
+test("mark_read racing a concurrent expiry returns BODY_EXPIRED with no receipt", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "receipt race");
+
+  const state = { fired: false };
+  const racing: BlobStore = {
+    put: (key, bytes) => fx.blobs.put(key, bytes),
+    get: async (key) => {
+      if (!state.fired) {
+        state.fired = true;
+        // Simulate expiry after markRead's initial state check but before its
+        // receipt INSERT.
+        await fx.db.run("UPDATE messages SET body_state = 'expired' WHERE id = ?", [
+          sent.messageId,
+        ]);
+      }
+      return fx.blobs.get(key);
+    },
+    delete: (key) => fx.blobs.delete(key),
+  };
+
+  await expectCode(
+    markRead({ ...fx.deps, blobs: racing }, alice.principal, "proj_1", sent.messageId),
+    "BODY_EXPIRED",
+  );
+  assert.equal((await fx.db.all("SELECT message_id FROM message_receipts")).length, 0);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation LIKE 'message.receipt%'")).length,
+    0,
+  );
+});
+
+test("body fetch racing expiry cleanup returns BODY_EXPIRED without an integrity audit", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "fetch race");
+  const object = await fx.db.first<{ id: string }>(
+    "SELECT body_object_id AS id FROM messages WHERE id = ?",
+    [sent.messageId],
+  );
+  assert.ok(object !== undefined);
+
+  const state = { fired: false };
+  const racingDb = withBodyObjectRace(
+    fx.deps.db,
+    async () => {
+      await fx.db.run("UPDATE messages SET body_state = 'expired' WHERE id = ?", [
+        sent.messageId,
+      ]);
+      await fx.db.run(
+        "UPDATE body_objects SET state = 'deleted', storage_key = NULL WHERE id = ?",
+        [object.id],
+      );
+    },
+    state,
+  );
+
+  await expectCode(
+    getMessageBody(
+      { ...fx.deps, db: racingDb },
+      alice.principal,
+      "proj_1",
+      sent.messageId,
+    ),
+    "BODY_EXPIRED",
+  );
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'message.body.read'")).length,
+    0,
+  );
+});
+
+test("due-expiry query uses the body_state/expires index", async (t) => {
+  const fx = await withFixture(t);
+  const plan = await fx.db.all<{ detail: string }>(
+    `EXPLAIN QUERY PLAN
+     SELECT id FROM messages
+      WHERE body_state = 'ready'
+        AND body_expires_at IS NOT NULL
+        AND body_expires_at <= ?
+      ORDER BY project_id ASC, seq ASC
+      LIMIT ?`,
+    ["2026-11-04T12:00:00.000Z", 500],
+  );
+  assert.ok(
+    plan.some((row) => row.detail.includes("idx_messages_body_state_expires")),
+    JSON.stringify(plan),
+  );
 });
 
 test("expire HTTP route exposes the endpoint and authorization ordering", async (t) => {
@@ -541,6 +876,14 @@ test("expire HTTP route exposes the endpoint and authorization ordering", async 
   assert.equal(sent.status, 201);
   const sentBody = (await sent.json()) as { message_id: string };
   const path = `/api/v1/projects/proj_1/messages/${sentBody.message_id}/expire`;
+
+  const unauthenticated = await call(path, { method: "POST" });
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(unauthenticated.headers.get("www-authenticate"), "Bearer");
+  assert.equal(
+    ((await unauthenticated.json()) as { error: { code: string } }).error.code,
+    "UNAUTHENTICATED",
+  );
 
   const nonMember = await call(path, { method: "POST", token: bob.token });
   assert.equal(nonMember.status, 404);

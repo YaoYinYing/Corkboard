@@ -5,10 +5,62 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "graphem
 const UTF8_ENCODER = new TextEncoder();
 const TYPE_IDENTIFIER = /^[a-z][a-z0-9_.-]{0,31}$/;
 const PRINTABLE_ASCII = /^[\x21-\x7e]{1,128}$/;
-// RFC 3339 timestamp with an explicit offset; stored normalized to UTC.
-const RFC3339_TIMESTAMP =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+// Accepted subset: RFC 3339 UTC `Z` only, no offsets, seconds 00-59 (no leap
+// second), and 1-3 fractional digits when present. Components are validated by
+// round-trip so impossible calendar dates cannot roll over.
+const RFC3339_UTC_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
 const MAX_BODY_EXPIRY_AHEAD_MS = 366 * 24 * 60 * 60 * 1000;
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function parseUtcTimestamp(value: string): Date | undefined {
+  const match = RFC3339_UTC_TIMESTAMP.exec(value);
+  if (match === null) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ?? "";
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth(year, month) ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    return undefined;
+  }
+  const milliseconds = fraction === "" ? 0 : Number(fraction.padEnd(3, "0"));
+
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, milliseconds);
+  // Rollover (for example Feb 30) changes a component; reject it explicitly.
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day ||
+    date.getUTCHours() !== hour ||
+    date.getUTCMinutes() !== minute ||
+    date.getUTCSeconds() !== second ||
+    date.getUTCMilliseconds() !== milliseconds
+  ) {
+    return undefined;
+  }
+  return date;
+}
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string") {
@@ -88,12 +140,15 @@ export function validateBodyDigest(value: unknown): string {
 // of an already accepted request are allowed to carry a now-past expiry.
 export function normalizeBodyExpiresAt(value: unknown): string | null {
   if (value === undefined || value === null) return null;
-  if (typeof value !== "string" || !RFC3339_TIMESTAMP.test(value)) {
+  if (typeof value !== "string") {
     throw new AppError("VALIDATION_ERROR", "body_expires_at must be an RFC 3339 UTC timestamp");
   }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new AppError("VALIDATION_ERROR", "body_expires_at must be a valid timestamp");
+  const parsed = parseUtcTimestamp(value);
+  if (parsed === undefined) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "body_expires_at must be a valid RFC 3339 UTC timestamp with seconds 00-59",
+    );
   }
   return parsed.toISOString();
 }

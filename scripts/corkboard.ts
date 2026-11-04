@@ -35,6 +35,7 @@ const OPTIONS = {
   credential: { type: "string" },
   owner: { type: "boolean" },
   "expires-at": { type: "string" },
+  scopes: { type: "string" },
   limit: { type: "string" },
 } as const;
 
@@ -262,9 +263,28 @@ async function revokeKeyCommand(values: Values): Promise<void> {
   console.log(`credential revoked: ${credentialId}`);
 }
 
+function parseIssuedScopes(raw: string | undefined): Scope[] {
+  if (raw === undefined) return [...DEFAULT_CAPABILITIES];
+  const parts = raw.split(",");
+  if (parts.length === 0 || parts.some((part) => part === "")) {
+    throw new Error("--scopes must be a comma-separated list of scopes");
+  }
+  const requested = new Set<Scope>();
+  for (const part of parts) {
+    if (!(SCOPES as readonly string[]).includes(part)) {
+      throw new Error(`unknown scope: ${part}`);
+    }
+    const scope = part as Scope;
+    if (requested.has(scope)) throw new Error(`duplicate scope: ${scope}`);
+    requested.add(scope);
+  }
+  return SCOPES.filter((scope) => requested.has(scope));
+}
+
 async function issueKeyCommand(values: Values): Promise<void> {
   const speakerId = requireValue(values.speaker, "--speaker");
   const projectId = requireValue(values.project, "--project");
+  const requestedScopes = parseIssuedScopes(values.scopes);
 
   let expiresAt: string | null = null;
   const rawExpiry = values["expires-at"];
@@ -277,8 +297,8 @@ async function issueKeyCommand(values: Values): Promise<void> {
   const pepper = pepperFromEnv();
 
   await withDb(async (db) => {
-    const membership = await db.first<{ present: number }>(
-      `SELECT 1 AS present
+    const membership = await db.first<{ capabilities: string }>(
+      `SELECT m.capabilities
          FROM project_memberships m
          JOIN projects p ON p.id = m.project_id
          JOIN speakers s ON s.id = m.speaker_id
@@ -289,6 +309,26 @@ async function issueKeyCommand(values: Values): Promise<void> {
     );
     if (membership === undefined) {
       throw new Error("an active project membership is required to issue a key");
+    }
+
+    let granted: unknown;
+    try {
+      granted = JSON.parse(membership.capabilities);
+    } catch {
+      granted = [];
+    }
+    const allowed = new Set(
+      Array.isArray(granted)
+        ? granted.filter(
+            (value): value is Scope =>
+              typeof value === "string" && (SCOPES as readonly string[]).includes(value),
+          )
+        : [],
+    );
+    for (const scope of requestedScopes) {
+      if (!allowed.has(scope)) {
+        throw new Error(`scope not granted by the speaker's active membership: ${scope}`);
+      }
     }
 
     const { token, publicPrefix } = generateSpeakerToken();
@@ -302,7 +342,7 @@ async function issueKeyCommand(values: Values): Promise<void> {
         speakerId,
         publicPrefix,
         await hashSecret(token, pepper),
-        JSON.stringify(DEFAULT_CAPABILITIES),
+        JSON.stringify(requestedScopes),
         expiresAt,
         new Date().toISOString(),
       ],
@@ -372,7 +412,7 @@ async function main(): Promise<void> {
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|revoke-key|expire-bodies|serve> [options]; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|revoke-key|expire-bodies|serve> [options]; issue-key accepts --scopes <comma-separated>; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }

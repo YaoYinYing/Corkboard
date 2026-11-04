@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,9 @@ import {
   authorizeProject,
   type ServiceDeps,
 } from "../../src/service/auth.ts";
+import { expireMessageBody } from "../../src/service/expiry.ts";
+import { getMessageBody, sendMessage } from "../../src/service/messages.ts";
+import { LocalBlobStore } from "../../src/storage/blobs/local.ts";
 import { MemoryBlobStore } from "../../src/storage/blobs/memory.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
 
@@ -229,6 +233,183 @@ test("expire-bodies wires the cleanup command and accepts --data-dir", (t) => {
   const tooLarge = run(["expire-bodies", "--data-dir", dataDir, "--limit", "5001"]);
   assert.notEqual(tooLarge.status, 0);
   assert.match(tooLarge.stderr, /limit/);
+});
+
+test("issue-key --scopes grants a project.edit key that can expire a body", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const pepper = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  const env = {
+    CORKBOARD_DATA_DIR: dataDir,
+    CORKBOARD_CREDENTIAL_PEPPER: pepper,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const projectId = run(
+    ["create-project", "--account", accountId, "--title", "Ops"],
+    env,
+  ).stdout.trim();
+  const speakerId = run(
+    ["create-speaker", "--account", accountId, "--name", "Codex"],
+    env,
+  ).stdout.trim();
+  const owner = run(
+    ["add-member", "--project", projectId, "--speaker", speakerId, "--owner"],
+    env,
+  );
+  assert.equal(owner.status, 0, owner.stderr);
+
+  const editKey = run(
+    [
+      "issue-key",
+      "--speaker",
+      speakerId,
+      "--project",
+      projectId,
+      "--scopes",
+      "project.edit",
+    ],
+    env,
+  );
+  assert.equal(editKey.status, 0, editKey.stderr);
+  const editToken = editKey.stdout.trim();
+  const defaultKey = run(["issue-key", "--speaker", speakerId, "--project", projectId], env);
+  assert.equal(defaultKey.status, 0, defaultKey.stderr);
+  const defaultToken = defaultKey.stdout.trim();
+
+  // Unknown, duplicate, and empty scope lists are rejected.
+  for (const [scopes, message] of [
+    ["project.edit,bogus", /unknown scope/],
+    ["project.edit,project.edit", /duplicate scope/],
+    ["", /comma-separated/],
+  ] as const) {
+    const rejected = run(
+      ["issue-key", "--speaker", speakerId, "--project", projectId, "--scopes", scopes],
+      env,
+    );
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, message);
+  }
+
+  // A non-owner member cannot receive a scope its membership does not grant.
+  const memberSpeaker = run(
+    ["create-speaker", "--account", accountId, "--name", "Member"],
+    env,
+  ).stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", memberSpeaker], env).status,
+    0,
+  );
+  const notGranted = run(
+    [
+      "issue-key",
+      "--speaker",
+      memberSpeaker,
+      "--project",
+      projectId,
+      "--scopes",
+      "project.edit",
+    ],
+    env,
+  );
+  assert.notEqual(notGranted.status, 0);
+  assert.match(notGranted.stderr, /not granted/);
+
+  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    const rows = await db.all<{ scope_json: string }>(
+      "SELECT scope_json FROM credentials WHERE speaker_id = ?",
+      [speakerId],
+    );
+    assert.ok(
+      rows.some((row) => JSON.stringify(JSON.parse(row.scope_json)) === '["project.edit"]'),
+      "the --scopes credential stores exactly the requested set",
+    );
+
+    const deps: ServiceDeps = {
+      db,
+      blobs: new LocalBlobStore(join(dataDir, "blobs")),
+      keys: await inMemoryKeyProvider(crypto.getRandomValues(new Uint8Array(32))),
+      pepper: new Uint8Array(Buffer.from(pepper, "base64")),
+      serviceId: "svc_test",
+      now: () => new Date(),
+    };
+    const sendPrincipal = await authenticateBearer(deps, `Bearer ${defaultToken}`);
+    const editPrincipal = await authenticateBearer(deps, `Bearer ${editToken}`);
+    assert.deepEqual([...editPrincipal.scopes], ["project.edit"]);
+
+    const text = "cli expiry body";
+    const sent = await sendMessage(deps, sendPrincipal, projectId, "cli-expiry", {
+      summary: "cli expiry",
+      type: "request",
+      language: "en",
+      text,
+      bodyDigest: `sha256:${createHash("sha256").update(text).digest("hex")}`,
+    });
+
+    // A CLI token without project.edit is FORBIDDEN.
+    await assert.rejects(
+      expireMessageBody(deps, sendPrincipal, projectId, sent.messageId),
+      (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+    );
+
+    const expired = await expireMessageBody(deps, editPrincipal, projectId, sent.messageId);
+    assert.deepEqual(expired, { messageId: sent.messageId, bodyState: "expired" });
+    await assert.rejects(
+      getMessageBody(deps, sendPrincipal, projectId, sent.messageId),
+      (error: unknown) => error instanceof AppError && error.code === "BODY_EXPIRED",
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("expire-bodies exits non-zero when a blob delete fails", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  const timestamp = new Date().toISOString();
+  const storageKey = "B".repeat(20);
+  try {
+    await db.run(
+      "INSERT INTO accounts (id, email, status, created_at) VALUES (?1, ?2, 'active', ?3)",
+      ["acct_failure", "failure@example.test", timestamp],
+    );
+    await db.run(
+      "INSERT INTO speakers (id, owner_account_id, display_name, status, created_at) VALUES (?1, ?2, ?3, 'active', ?4)",
+      ["spk_failure", "acct_failure", "Failure", timestamp],
+    );
+    await db.run(
+      "INSERT INTO projects (id, owner_account_id, title, status, next_seq, created_at) VALUES (?1, ?2, ?3, 'active', 1, ?4)",
+      ["proj_failure", "acct_failure", "Failure", timestamp],
+    );
+    await db.run(
+      "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?1, ?2, ?3, 'ready', ?4)",
+      ["obj_failure", "proj_failure", storageKey, timestamp],
+    );
+    await db.run(
+      `INSERT INTO messages
+         (id, project_id, seq, sender_speaker_id, summary, type, language,
+          received_at, committed_at, body_state, body_object_id)
+       VALUES (?1, ?2, 1, ?3, 'summary', 'request', 'en', ?4, ?4, 'expired', ?5)`,
+      ["msg_failure", "proj_failure", "spk_failure", timestamp, "obj_failure"],
+    );
+  } finally {
+    db.close();
+  }
+
+  // A directory at the blob path makes unlink fail with a non-ENOENT error.
+  mkdirSync(join(dataDir, "blobs", storageKey), { recursive: true, mode: 0o700 });
+
+  const result = run(["expire-bodies", "--data-dir", dataDir]);
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), {
+    examined: 1,
+    expired: 0,
+    blobsDeleted: 0,
+    failures: 1,
+  });
 });
 
 test("issue-key rejects a speaker without an active membership", (t) => {

@@ -168,9 +168,13 @@ Implemented for the Node.js/SQLite deployment. Default `body_expires_at` is `NUL
 automatic deletion). Expiry is two-stage and idempotent:
 
 1. `ready → expired` with one conditional `UPDATE ... WHERE body_state = 'ready'`.
-   The transition is audited (`message.expire`, success, identifiers only). Metadata,
-   sequence, sender, timestamps and receipts are retained as a tombstone; body fetches
-   return `BODY_EXPIRED` and no new receipt is possible.
+   The transition is audited (`message.expire`, success, identifiers only) under a
+   deterministic id derived from the message id with `INSERT OR IGNORE`; the endpoint
+   records the authenticated principal and the worker a system actor. The transition
+   is authoritative, so the endpoint returns success even if the audit insert fails;
+   the already-expired path retries it and the worker reconciles missing rows.
+   Metadata, sequence, sender, timestamps and receipts are retained as a tombstone;
+   body fetches return `BODY_EXPIRED` and no new receipt is possible.
 2. Ciphertext deletion only after the message is durably `expired`. The blob is
    deleted (a missing blob counts as success) and the `body_objects` row is marked
    `state = 'deleted'`, `storage_key = NULL`. A crash or delete failure leaves the

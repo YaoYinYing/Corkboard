@@ -709,6 +709,18 @@ async function auditIntegrityFailure(
   return new AppError("INTEGRITY_FAILURE");
 }
 
+async function messageBecameExpired(
+  deps: ServiceDeps,
+  projectId: string,
+  messageId: string,
+): Promise<boolean> {
+  const row = await deps.db.first<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE id = ? AND project_id = ?",
+    [messageId, projectId],
+  );
+  return row?.body_state === "expired";
+}
+
 async function openVerifiedBody(
   deps: ServiceDeps,
   principal: Principal,
@@ -726,10 +738,18 @@ async function openVerifiedBody(
     object.storage_key === null ||
     typeof object.ciphertext_digest !== "string"
   ) {
+    // Expiry may have cleaned this object after the route's state check. That
+    // is not corruption: report the tombstone without an integrity audit.
+    if (await messageBecameExpired(deps, projectId, messageId)) {
+      throw new AppError("BODY_EXPIRED");
+    }
     throw await auditIntegrityFailure(deps, principal, projectId, operation);
   }
   const envelope = await deps.blobs.get(object.storage_key);
   if (envelope === undefined) {
+    if (await messageBecameExpired(deps, projectId, messageId)) {
+      throw new AppError("BODY_EXPIRED");
+    }
     throw await auditIntegrityFailure(deps, principal, projectId, operation);
   }
   try {
@@ -821,10 +841,12 @@ export async function markRead(
     "message.receipt.write",
   );
 
-  await deps.db.run(
+  const inserted = await deps.db.run(
     `INSERT OR IGNORE INTO message_receipts (message_id, speaker_id, read_at)
      SELECT ?1, ?2, ?3
-      WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?1 AND project_id = ?4)`,
+      WHERE EXISTS (
+        SELECT 1 FROM messages
+         WHERE id = ?1 AND project_id = ?4 AND body_state = 'ready')`,
     [messageId, principal.speakerId, deps.now().toISOString(), projectId],
   );
   const receipt = await deps.db.first<{ read_at: string }>(
@@ -833,6 +855,14 @@ export async function markRead(
       WHERE r.message_id = ? AND r.speaker_id = ? AND m.project_id = ?`,
     [messageId, principal.speakerId, projectId],
   );
-  if (receipt === undefined) throw new AppError("UNAVAILABLE");
-  return { messageId, speakerId: principal.speakerId, readAt: receipt.read_at };
+  if (receipt !== undefined) {
+    return { messageId, speakerId: principal.speakerId, readAt: receipt.read_at };
+  }
+  if (inserted.changes === 0) {
+    // A concurrent expiry can win between the state check and this INSERT.
+    if (await messageBecameExpired(deps, projectId, messageId)) {
+      throw new AppError("BODY_EXPIRED");
+    }
+  }
+  throw new AppError("UNAVAILABLE");
 }
