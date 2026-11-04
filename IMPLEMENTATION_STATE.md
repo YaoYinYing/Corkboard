@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–G implemented and pushed |
+| Phase | 0 complete; vertical slices A–G implemented and pushed; slice H implemented at this tree, review pending |
 | Last pushed checkpoint | `3d3dc25` (rate limiting, audited tree `52bf6b7`) on `origin/main`; CI run 41869946548 |
-| Branch | `main` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7` |
-| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, attachments, structured observability |
+| Branch | `slice-h-metrics` (committed locally; not pushed) |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security/contract review pending on this tree |
+| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, attachments, queue-to-commit and per-project observability |
 
 ## Checkpoint history
 
@@ -450,6 +450,45 @@ pushed.
   and volumetric abuse). The Node adapter still reads an in-cap body before the core
   runs, so a rate-limited request's bytes reach the adapter but are never parsed by the
   application.
+
+## Vertical slice H — structured request metrics (implemented at this tree; review pending)
+
+- **Registry.** `src/app/metrics.ts` is a Web-standard, dependency-free, in-memory
+  registry. It records total requests, fixed route labels, HTTP status counts, stable
+  error codes from the Corkboard response envelope (including `RATE_LIMITED`), and
+  request duration in cumulative buckets at 5, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+  and 10000 ms plus `+Inf`. Snapshot arrays are sorted and the final bucket equals the
+  latency count.
+- **Fixed cardinality.** `routeLabelFor` maps path shape to `/healthz`, `/mcp`,
+  `/metrics`, the `/api/v1` templates with `:projectId`/`:messageId` placeholders, or
+  `unknown`. Raw pathnames, query strings, object IDs, bodies, summaries, tokens,
+  speaker/account IDs, and IPs are never stored. `/mcp` counts every transport HTTP
+  request under one label; tool names and arguments are not read.
+- **Operator endpoint.** `GET /metrics` is disabled by default. `CORKBOARD_METRICS_TOKEN`
+  unset/empty returns the ordinary unknown-route `404`; a configured token requires an
+  exact constant-time `Authorization: Bearer <token>` and missing/wrong tokens also
+  return `404`. The token must be at least 32 characters; a shorter value throws in
+  `startServer` before the data directory is created, opened, chmodded, or migrated.
+  Responses carry `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+- **Instrumentation.** `createApp` records every response it produces, including
+  successes, application errors, `429 RATE_LIMITED`, and `/mcp`. The Node adapter
+  records adapter-only responses (64 KiB body rejection and unexpected 503) with the
+  same fixed labels. Auth/authz/error ordering is unchanged. `/metrics` does not
+  authenticate a speaker and never touches the per-credential limiter.
+- **Docs.** `docs/api.md` (shape, auth, labels, limitations), `docs/architecture.md`,
+  `docs/security-operations.md`, `docs/deployments.md` (env table and operator usage),
+  `docs/mcp.md`, `TODO.md` (implemented subset only), and `LESSIONS.md` are updated.
+- **Tests.** New `tests/integration/metrics.test.ts` (9 tests) covers disabled
+  404 behavior, exact token auth with no echo/log, REST success/error/429 and MCP
+  initialize/tool counters with fixed labels, deterministic bucket boundaries (direct
+  registry and injected app clock), no content/ID/token leakage with consistent totals,
+  env parsing and startup refusal before filesystem creation, and no rate-limit bucket
+  consumption by `/metrics` or `/healthz`.
+- **Limitations.** Metrics are process-local in memory: they reset on restart, are not
+  shared across processes or Workers isolates, and have no persistence or history.
+  There are no per-project authorized views and no queue-to-commit histogram; latency is
+  HTTP request duration only. Disabling the endpoint stops neither counting nor memory
+  use (the registry is bounded by the fixed label/status/error sets).
 
 ## Implemented and verified at this tree
 

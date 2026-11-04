@@ -52,6 +52,7 @@ Environment:
 | `HOST` | no | listen host; default `127.0.0.1` |
 | `CORKBOARD_RATE_LIMIT_PER_MINUTE` | no | authenticated requests/minute per credential; default `120`, `0` disables |
 | `CORKBOARD_RATE_LIMIT_BURST` | no | token-bucket burst size 1–1000; default `30` |
+| `CORKBOARD_METRICS_TOKEN` | no | enables operator-only `GET /metrics`; at least 32 characters, unset/empty disables |
 | `CORKBOARD_BOOTSTRAP_PASSWORD` | no | owner bootstrap password, environment only |
 
 Rate limiting is per credential and **process-local**. Invalid limiter values stop
@@ -63,6 +64,26 @@ application does not read forwarding headers.
 CORKBOARD_RATE_LIMIT_PER_MINUTE=120 CORKBOARD_RATE_LIMIT_BURST=30 \
   NODE_ENV=production node dist/scripts/corkboard.js serve
 ```
+
+Metrics are optional and operator-only. Set `CORKBOARD_METRICS_TOKEN` to a random value
+of **at least 32 characters** (keep it out of argv and logs) to enable `GET /metrics`.
+Unset or empty disables the route with `404`. A configured token shorter than 32
+characters stops startup before the data directory is created. Requests must send
+`Authorization: Bearer <token>`; missing/wrong tokens also receive `404`, so the
+endpoint is not discoverable without the token. The snapshot is process-local, resets on
+restart, and is not aggregated across processes or Workers; scrape it per process. The
+endpoint is not keyed by the per-credential rate limiter. Treat the token as a secret
+and rotate it by restarting with a new value.
+
+```sh
+CORKBOARD_METRICS_TOKEN="$(head -c 32 /dev/urandom | base64)" \
+  NODE_ENV=production node dist/scripts/corkboard.js serve
+curl -sS -H "Authorization: Bearer $CORKBOARD_METRICS_TOKEN" http://127.0.0.1:8787/metrics
+```
+
+The second line reads the token from the operator's environment; do not paste a real
+token into shell history or documentation. See [`api.md`](./api.md#get-metrics-operator-only)
+for the exact JSON shape and limitations.
 
 The slice-A server makes no outbound requests, so `HTTP_PROXY`/`HTTPS_PROXY` are not
 read. If a proxy is configured in the developer environment, never log its value.

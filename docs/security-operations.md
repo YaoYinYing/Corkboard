@@ -332,6 +332,32 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
   body, summary, or credential verifier is logged or returned. Request logs record the
   actor ids and stable error code already described under **Logging and audit**.
 
+## Operator metrics endpoint
+
+- `GET /metrics` is disabled unless `CORKBOARD_METRICS_TOKEN` is set. The token is a
+  secret: supply it through the environment or a `0600` secrets file, never argv, a URL,
+  a log line, or a chat transcript. It must be at least 32 characters; a shorter value
+  fails startup before the data directory is created or opened. Rotate it by restarting
+  with a new value.
+- The endpoint requires exactly `Authorization: Bearer <token>` and compares the
+  presented value in constant time. Missing and wrong tokens receive the ordinary
+  unknown-route `404 NOT_FOUND`, not `401`/`403`, so its existence is not disclosed.
+  The response does not echo the token and the request log never contains it.
+- The snapshot contains counters and timing only: total requests, fixed route labels,
+  HTTP status counts, stable Corkboard error codes (including `RATE_LIMITED`), and
+  cumulative latency buckets. It never contains bodies, summaries, tokens, keys,
+  request/response bodies, query strings, raw pathnames, project/message/speaker/account
+  IDs, or IPs. `/mcp` requests are counted under the `/mcp` label; tool names and
+  arguments are not read.
+- `GET /metrics` does not authenticate a speaker and is not keyed by the per-credential
+  rate limiter; it neither consumes nor affects user buckets. Protect it with the token
+  and network policy (bind to loopback or the reverse proxy); it is operator-only, not a
+  public health endpoint.
+- Metrics are **process-local and in-memory**. They reset on restart, are not shared
+  across processes or Workers isolates, and have no persistence or history. Scrape each
+  process separately; do not treat them as billable or audited records. There is no
+  per-project authorized view and no queue-to-commit histogram in this slice.
+
 ## Known limits
 
 - The operator can read all message bodies.
@@ -339,5 +365,7 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
   comprehensive erasure.
 - Rate limiting is per-process and per-credential; there is no distributed/global
   limiter and no application-level per-IP limiting (delegated to the reverse proxy).
+- Metrics are per-process in-memory counters with no persistence, aggregation, or
+  per-project views; the latency histogram is request duration, not queue-to-commit.
 - No web session layer yet; bootstrap, credential issuance/revocation, and membership
   grant/removal are CLI-only in slice A.

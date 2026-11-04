@@ -9,6 +9,11 @@ import {
   type RateLimitConfig,
 } from "./rate-limit.ts";
 import {
+  MetricsRegistry,
+  metricsAuthorized,
+  routeLabelFor,
+} from "./metrics.ts";
+import {
   authenticateBearer,
   authorizeProject,
   type Principal,
@@ -59,6 +64,12 @@ export interface CreateAppOptions {
   rateLimitMaxKeys?: number;
   /** Test seam for idle bucket eviction. */
   rateLimitIdleMs?: number;
+  /** Process-local registry; a fresh one is created when omitted. */
+  metrics?: MetricsRegistry;
+  /** Enables `GET /metrics`; omitted or undefined disables it (404). */
+  metricsToken?: string;
+  /** Injectable clock (milliseconds) for deterministic latency tests. */
+  metricsNow?: () => number;
 }
 
 interface RequestContext {
@@ -365,6 +376,8 @@ async function route(
   context: RequestContext,
   mcp: ReturnType<typeof createMcpEndpoint>,
   limiter: RateLimiter,
+  metrics: MetricsRegistry,
+  metricsToken: string | undefined,
 ): Promise<Response> {
   const url = new URL(request.url);
   const segments = url.pathname.split("/").filter((segment) => segment !== "");
@@ -383,6 +396,18 @@ async function route(
   if (segments.length === 1 && segments[0] === "healthz") {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
     return json(200, { status: "ok" });
+  }
+
+  if (segments.length === 1 && segments[0] === "metrics") {
+    // Disabled and unauthorized requests are indistinguishable from an unknown
+    // route, so the endpoint's existence is not disclosed. It is operator-only
+    // and never touches the per-credential rate limiter.
+    if (metricsToken === undefined) return notFound(requestId);
+    if (!metricsAuthorized(request.headers.get("authorization"), metricsToken)) {
+      return notFound(requestId);
+    }
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    return json(200, metrics.snapshot());
   }
 
   const isApi = segments[0] === "api" && segments[1] === "v1";
@@ -509,13 +534,24 @@ export function createApp(
     ...(options.rateLimitMaxKeys === undefined ? {} : { maxKeys: options.rateLimitMaxKeys }),
     ...(options.rateLimitIdleMs === undefined ? {} : { idleMs: options.rateLimitIdleMs }),
   });
+  const metrics = options.metrics ?? new MetricsRegistry();
+  const clock = options.metricsNow ?? ((): number => performance.now());
   return async (request: Request): Promise<Response> => {
-    const started = performance.now();
+    const started = clock();
     const requestId = randomRequestId();
     const context: RequestContext = {};
     let response: Response;
     try {
-      response = await route(deps, request, requestId, context, mcp, limiter);
+      response = await route(
+        deps,
+        request,
+        requestId,
+        context,
+        mcp,
+        limiter,
+        metrics,
+        options.metricsToken,
+      );
     } catch (error) {
       if (error instanceof AppError) {
         response = errorResponse(error, requestId);
@@ -525,17 +561,28 @@ export function createApp(
       }
     }
 
+    // Path only: query values such as search text are never logged. The same
+    // pathname is reduced to a fixed route label for metrics.
+    const pathname = new URL(request.url).pathname;
+    const durationMs = clock() - started;
     const entry: RequestLogEntry = {
       requestId,
       method: request.method.toUpperCase(),
-      // Path only: query values such as search text are never logged.
-      path: new URL(request.url).pathname,
+      path: pathname,
       status: response.status,
-      durationMs: Math.round(performance.now() - started),
+      durationMs: Math.round(durationMs),
     };
+    let errorCode: string | undefined;
     if (response.status >= 400) {
-      const code = await errorCodeFrom(response);
-      if (code !== undefined) entry.errorCode = code;
+      errorCode = await errorCodeFrom(response);
+      if (errorCode !== undefined) entry.errorCode = errorCode;
+    }
+    // Metrics include successes, application errors, and 429s. A registry
+    // failure must not change the response.
+    try {
+      metrics.recordRequest(routeLabelFor(pathname), response.status, errorCode, durationMs);
+    } catch {
+      // Recording is best effort.
     }
     if (context.principal !== undefined) {
       entry.speakerId = context.principal.speakerId;

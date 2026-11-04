@@ -319,6 +319,36 @@ unauthenticated requests are never keyed.
   decision; no authentication or authorization semantics change. Per-IP limiting is
   deferred to the reverse proxy because bearer tokens are 256-bit random values.
 
+## Process-local request metrics
+
+`src/app/metrics.ts` contains a Web-standard, dependency-free metrics registry created
+per `createApp` (the Node adapter also creates one so it can record responses that never
+reach the core, such as the 64 KiB body-limit rejection). Every response recorded by
+the app wrapper increments one total, one fixed route label, one HTTP status, and (for
+error responses in the standard Corkboard envelope) one stable error code. It also
+records request duration into cumulative histogram buckets at 5, 25, 50, 100, 250, 500,
+1000, 2500, 5000, and 10000 ms plus a `+Inf` bucket.
+
+Cardinality is fixed. `routeLabelFor` maps path shape to one of a small set of
+templates (`/healthz`, `/mcp`, `/metrics`, the `/api/v1` routes with `:projectId` and
+`:messageId` placeholders, or `unknown`); it never retains a raw pathname, query, or
+object ID. `/mcp` counts initialize, tool, and other transport HTTP requests under one
+label; tool names and arguments are not read. Error codes come from the server-authored
+response envelope, not from client input. No bodies, summaries, tokens, IDs, or IPs are
+stored.
+
+`GET /metrics` is operator-only. It is disabled unless `CORKBOARD_METRICS_TOKEN` is set
+to at least 32 characters; a shorter value fails startup before filesystem writes.
+Disabled, missing-token, and wrong-token requests all return the ordinary unknown-route
+`404`, so the endpoint cannot be discovered. A valid token sees a stable JSON snapshot
+with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. The route does not
+authenticate a speaker and does not touch the per-credential limiter.
+
+The registry is process-local and in-memory: values reset on restart and are not shared
+across processes or Workers isolates. There is no persistence, no per-project
+authorized view, and no queue-to-commit histogram; the histogram measures HTTP request
+duration only. These are documented limitations, not hidden behavior.
+
 ## Deliberate deferments
 
 WebSockets/presence, agent launchers, file reservations, true E2EE, per-project

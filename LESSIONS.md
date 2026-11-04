@@ -6,6 +6,24 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — Metrics need fixed labels and a nonexistent-looking disabled route
+
+- **Failure pattern:** Recording raw pathnames or method strings lets any caller grow an
+  in-memory metric map without bound and stores object IDs that may be sensitive.
+  Returning `401`/`405` for a disabled or unauthenticated `/metrics` endpoint also
+  discloses that the route exists, and skipping configuration validation until after
+  the data directory is created leaves filesystem side effects for a rejected start.
+- **Fix:** `routeLabelFor` reduces paths to a closed set of templates (`unknown` for
+  everything else), `/mcp` is one label with no tool content, and error codes come only
+  from the server-authored envelope. `metricsConfigFromEnv` runs beside the limiter
+  parser before any filesystem work, and the endpoint returns the ordinary `404` for
+  disabled, missing-token, and wrong-token requests; only a valid operator token can
+  reach the method check. Token comparison is constant-time.
+- **Prevents:** Unbounded metric cardinality, content/ID leakage, endpoint discovery,
+  and startup that creates data before rejecting invalid metrics configuration.
+- **Remove when:** Metrics move to a platform collector that enforces bounded labels and
+  an authenticated, explicitly registered scrape endpoint before application startup.
+
 ## 2026-11-04 — Rate-limit after auth, and give REST and MCP one bucket
 
 - **Failure pattern:** Limiting before authentication lets unauthenticated traffic

@@ -90,6 +90,12 @@ over-limit request returns HTTP `429` with the standard Corkboard envelope
 and **no `mcp-session-id` is created**. Limits default to 120 requests/minute with burst
 30 and are process-local; see [`api.md`](./api.md#rate-limits).
 
+The optional process-local metrics registry counts every `/mcp` HTTP request
+(initialize, tool calls, `GET`, `DELETE`) under the single `/mcp` route label. It does
+not read or record JSON-RPC method names, tool names, tool arguments, session ids, or
+tool results. See [`api.md`](./api.md#get-metrics-operator-only) for the operator-only
+endpoint and its limitations.
+
 ## Tools
 
 Exactly six tools are exposed. No admin, key, membership, project-create/edit, expiry,

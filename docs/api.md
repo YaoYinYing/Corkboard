@@ -140,9 +140,10 @@ authorization semantics.
   The body contains no token, message content, or summary. An over-limit `/mcp`
   request returns this HTTP envelope before any MCP protocol handling or session
   creation, and no `mcp-session-id`.
-- `GET /healthz` and unauthenticated requests are **not keyed**. Bearer tokens are
-  256-bit random values, so guessing one is not a practical attack; per-IP limiting for
-  unauthenticated traffic and volumetric abuse is deferred to the reverse proxy.
+- `GET /healthz`, `GET /metrics`, and unauthenticated requests are **not keyed**. Bearer
+  tokens are 256-bit random values, so guessing one is not a practical attack; per-IP
+  limiting for unauthenticated traffic and volumetric abuse is deferred to the reverse
+  proxy. The operator-only `GET /metrics` never reads or consumes a credential bucket.
 - Limits are **process-local**: buckets live in memory, are not shared across
   processes or Workers isolates, and reset on restart. The key map is bounded to 10,000
   credentials, with entries idle for 2 minutes evicted. This is not distributed or
@@ -153,6 +154,68 @@ authorization semantics.
 ### `GET /healthz`
 
 Public. Returns `{ "status": "ok" }`. No configuration, credentials, or private data.
+
+### `GET /metrics` (operator-only)
+
+Disabled by default. If `CORKBOARD_METRICS_TOKEN` is unset or empty, the route returns
+the ordinary unknown-route `404 NOT_FOUND`; there is no existence leak. When configured,
+it requires exactly `Authorization: Bearer <token>` (constant-time comparison). A
+missing or wrong token also returns `404 NOT_FOUND`, not `401`/`403`. The token must be
+at least 32 characters; a shorter or otherwise invalid value fails startup before the
+data directory is created or opened.
+
+A successful response is `200` with a stable JSON snapshot and
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
+`Content-Type: application/json; charset=utf-8`:
+
+```json
+{
+  "requests": { "total": 42 },
+  "routes": [
+    { "route": "/api/v1/me", "count": 10 },
+    { "route": "/api/v1/projects/:projectId/messages", "count": 4 }
+  ],
+  "statuses": [ { "status": 200, "count": 40 }, { "status": 404, "count": 2 } ],
+  "errors": [ { "code": "NOT_FOUND", "count": 2 } ],
+  "latency_ms": {
+    "count": 42,
+    "sum": 1234,
+    "buckets": [
+      { "le_ms": 5, "count": 1 },
+      { "le_ms": 25, "count": 3 },
+      { "le_ms": 50, "count": 4 },
+      { "le_ms": 100, "count": 5 },
+      { "le_ms": 250, "count": 6 },
+      { "le_ms": 500, "count": 7 },
+      { "le_ms": 1000, "count": 9 },
+      { "le_ms": 2500, "count": 12 },
+      { "le_ms": 5000, "count": 20 },
+      { "le_ms": 10000, "count": 30 },
+      { "le_ms": null, "count": 42 }
+    ]
+  }
+}
+```
+
+`le_ms: null` is the `+Inf` bucket (duration greater than 10000 ms). Buckets are
+cumulative, ordered low to high; the final bucket always equals `latency_ms.count`.
+`routes` and `errors` are sorted by label/code; `statuses` by numeric status.
+
+Counters cover every response produced by the app, including errors and `429`
+`RATE_LIMITED`, with error codes extracted from the standard Corkboard envelope. `/mcp`
+is one route label; each initialize, tool call, and other `/mcp` HTTP request increments
+it. No tool name or tool-argument content is read. Route labels are fixed templates:
+`/healthz`, `/mcp`, `/metrics`, `/api/v1/me`, `/api/v1/projects`,
+`/api/v1/projects/:projectId`, `/api/v1/projects/:projectId/messages`,
+`/api/v1/projects/:projectId/messages/:messageId`, and the `/body`, `/read`, `/expire`
+variants; every other path is `unknown`. Raw pathnames, query strings, project/message
+IDs, speaker/account IDs, bodies, summaries, tokens, and IPs are never included.
+
+Limitations: the registry is **process-local in memory**. It resets on restart, is not
+shared across processes or Workers isolates, keeps no persistence or history, and has
+no per-project authorized views. The latency histogram measures request duration, not
+queue-to-commit delay (no queue-to-commit histogram is implemented). Disabling the
+endpoint does not stop the counters; it only hides the route.
 
 ### `GET /api/v1/me`
 

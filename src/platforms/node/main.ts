@@ -12,6 +12,11 @@ import {
   type RequestLogEntry,
 } from "../../app/handlers.ts";
 import { rateLimitConfigFromEnv } from "../../app/rate-limit.ts";
+import {
+  MetricsRegistry,
+  metricsConfigFromEnv,
+  routeLabelFor,
+} from "../../app/metrics.ts";
 import { keyProviderFromEnv } from "../../crypto/keys.ts";
 import type { ServiceDeps } from "../../service/auth.ts";
 import { LocalBlobStore } from "../../storage/blobs/local.ts";
@@ -71,6 +76,14 @@ function declaredBodyLength(request: IncomingMessage): number | null {
   if (raw === undefined) return null;
   const length = Number(Array.isArray(raw) ? raw[0] : raw);
   return Number.isSafeInteger(length) && length >= 0 ? length : null;
+}
+
+function requestPathname(request: IncomingMessage): string {
+  try {
+    return new URL(request.url ?? "/", "http://localhost").pathname;
+  } catch {
+    return "/";
+  }
 }
 
 async function toWebRequest(request: IncomingMessage): Promise<Request> {
@@ -143,6 +156,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   // Invalid limiter configuration fails startup before the data directory is
   // created, opened, or chmodded.
   const rateLimit = rateLimitConfigFromEnv(env);
+  // Parsed with the limiter, before anything is created or opened. A too-short
+  // token fails startup rather than silently disabling or weakening the endpoint.
+  const metricsConfig = metricsConfigFromEnv(env);
 
   const blobDir = join(dataDir, "blobs");
   const databasePath = join(dataDir, "corkboard.sqlite");
@@ -175,8 +191,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       serviceId: "corkboard",
       now: () => new Date(),
     };
+    const metrics = new MetricsRegistry();
     const app = createApp(deps, {
       rateLimit,
+      metrics,
+      ...(metricsConfig === undefined ? {} : { metricsToken: metricsConfig.token }),
       // JSON lines for the service log; no headers, tokens, bodies or IPs.
       logger: (entry: RequestLogEntry): void => {
         process.stdout.write(`${JSON.stringify(entry)}\n`);
@@ -184,14 +203,30 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     });
 
     const server = createServer((request, response) => {
+      // The core records every request it sees; adapter-level rejections never
+      // reach it, so they are recorded here with the same fixed route labels.
+      const started = performance.now();
       void toWebRequest(request)
         .then(app)
         .then((webResponse) => writeWebResponse(response, webResponse))
         .catch((error: unknown) => {
           if (error instanceof BodyTooLargeError) {
-            void writeWebResponse(response, requestTooLargeResponse());
+            const webResponse = requestTooLargeResponse();
+            metrics.recordRequest(
+              routeLabelFor(requestPathname(request)),
+              webResponse.status,
+              "REQUEST_TOO_LARGE",
+              performance.now() - started,
+            );
+            void writeWebResponse(response, webResponse);
             return;
           }
+          metrics.recordRequest(
+            routeLabelFor(requestPathname(request)),
+            503,
+            "UNAVAILABLE",
+            performance.now() - started,
+          );
           if (!response.headersSent) response.statusCode = 503;
           response.end();
         });
