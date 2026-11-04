@@ -150,7 +150,9 @@ written) is not prevented; no stronger guarantee is claimed. See
   owner's session survives). The registry is capped at 1024 sessions with
   least-recently-used eviction and a lazy 30-minute idle TTL swept on the next
   authenticated `/mcp` request; eviction closes the transport/server. There is no
-  cross-process persistence and no additional rate limiting.
+  cross-process persistence. `/mcp` shares the per-credential rate-limit bucket with
+  REST, and an over-limit request returns HTTP `429 RATE_LIMITED` before any session is
+  created.
 - Every `/mcp` response, including SDK JSON and protocol errors, carries
   `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 - Every tool reuses the service authorization path and per-request credential/grant/
@@ -309,11 +311,33 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
 5. Notify affected users honestly, including that server-readable encryption does not
    protect previously read plaintext.
 
+## Rate limiting and abuse controls
+
+- Authenticated `/api/v1` and `/mcp` requests are limited per credential with an
+  in-memory token bucket: default 120 requests/minute with burst 30. Configure with
+  `CORKBOARD_RATE_LIMIT_PER_MINUTE` (`0` disables) and `CORKBOARD_RATE_LIMIT_BURST`
+  (1–1000); invalid values stop startup. Limiting happens after authentication and
+  before body parsing, so an over-limit request creates no MCP session and no handler
+  effect.
+- Limits are **process-local and not shared** across processes or Workers isolates.
+  Each process enforces its own buckets; a restart resets them. This is not distributed
+  rate limiting. If you run several processes, the effective aggregate limit is roughly
+  the per-process limit times the process count.
+- Tracked credentials are bounded (10,000); an entry idle for 2 minutes is evicted.
+- Unauthenticated requests are not keyed. Bearer tokens are 256-bit random values, so
+  token guessing is impractical; apply **per-IP connection/request limits, body-size
+  limits, and volumetric abuse controls at the reverse proxy** instead. The application
+  does not trust forwarding headers or enforce IP limits itself.
+- A `429` carries only `RATE_LIMITED`, a `request_id`, and `Retry-After`; no token,
+  body, summary, or credential verifier is logged or returned. Request logs record the
+  actor ids and stable error code already described under **Logging and audit**.
+
 ## Known limits
 
 - The operator can read all message bodies.
 - Hard deletion of metadata/backups is not implemented; expiry is a tombstone, not
   comprehensive erasure.
-- Rate limiting and abuse controls are not implemented in the first slice.
+- Rate limiting is per-process and per-credential; there is no distributed/global
+  limiter and no application-level per-IP limiting (delegated to the reverse proxy).
 - No web session layer yet; bootstrap, credential issuance/revocation, and membership
   grant/removal are CLI-only in slice A.

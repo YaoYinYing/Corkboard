@@ -6,6 +6,22 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — Rate-limit after auth, and give REST and MCP one bucket
+
+- **Failure pattern:** Limiting before authentication lets unauthenticated traffic
+  consume or probe buckets, and separate REST/MCP limiters let one credential double its
+  effective rate. Limiting after body parsing also spends the work the limit is meant to
+  refuse, and an over-limit MCP `initialize` can still create a session.
+- **Fix:** `authenticate()` runs the injected-clock token bucket immediately after
+  `authenticateBearer` returns a `Principal`; `createApp` constructs a single
+  `RateLimiter` shared by the REST routes and the MCP endpoint, keyed by `credentialId`.
+  The bucket is checked before body parsing and before `mcp.handle`. `/healthz` and
+  unauthenticated requests never reach it.
+- **Prevents:** Unauthenticated bucket consumption, per-surface limit bypass, and
+  side effects (sessions, handler work) from a request that is already over limit.
+- **Remove when:** Limiting moves to a shared gateway that runs before the application
+  and keys on a verified credential (still keep the 429 no-session test).
+
 ## 2026-11-04 — A “read-only” SQLite open can still create WAL sidecars
 
 - **Failure:** `new DatabaseSync(path, { readOnly: true })` on a WAL-mode database whose

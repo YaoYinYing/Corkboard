@@ -117,6 +117,37 @@ before response-shape decisions such as body state. An unknown route returns 404
 `NOT_FOUND`; a known path with an unsupported method returns 405 with an `Allow` header
 and code `NOT_FOUND`.
 
+## Rate limits
+
+Limiting is **additional denial only**: it runs after successful authentication and
+before request-body parsing or handler work, and it never changes authentication or
+authorization semantics.
+
+- Applies to authenticated `/api/v1/...` and `/mcp` requests (including `initialize`
+  and tool calls), keyed by the authenticated `credentialId`. REST and MCP share one
+  bucket per credential.
+- Defaults: **120 requests/minute sustained, burst 30**. `CORKBOARD_RATE_LIMIT_PER_MINUTE`
+  (integer; `0` disables) and `CORKBOARD_RATE_LIMIT_BURST` (integer 1–1000) override them.
+  Invalid values fail startup with a configuration error.
+- Exceeding the limit returns HTTP `429` with the normal envelope and
+  `Retry-After: <seconds>` (integer ≥ 1) and `Cache-Control: no-store`:
+
+  ```json
+  { "error": { "code": "RATE_LIMITED", "message": "Too many requests",
+    "request_id": "req_..." } }
+  ```
+
+  The body contains no token, message content, or summary. An over-limit `/mcp`
+  request returns this HTTP envelope before any MCP protocol handling or session
+  creation, and no `mcp-session-id`.
+- `GET /healthz` and unauthenticated requests are **not keyed**. Bearer tokens are
+  256-bit random values, so guessing one is not a practical attack; per-IP limiting for
+  unauthenticated traffic and volumetric abuse is deferred to the reverse proxy.
+- Limits are **process-local**: buckets live in memory, are not shared across
+  processes or Workers isolates, and reset on restart. The key map is bounded to 10,000
+  credentials, with entries idle for 2 minutes evicted. This is not distributed or
+  global rate limiting.
+
 ## Endpoints
 
 ### `GET /healthz`

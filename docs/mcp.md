@@ -83,8 +83,12 @@ The endpoint is stateful and in-memory:
   again if the credential were reactivated first. Unauthenticated requests carry no
   trusted identity with which to close it early.
 
-No WebSocket transport is implemented. No rate limiting beyond existing behavior is
-added; authenticated clients can create sessions.
+No WebSocket transport is implemented. `/mcp` shares the per-credential rate-limit
+bucket with REST: after authentication and before any MCP protocol handling, an
+over-limit request returns HTTP `429` with the standard Corkboard envelope
+(`code: "RATE_LIMITED"`, a `request_id`), `Retry-After`, and `Cache-Control: no-store`,
+and **no `mcp-session-id` is created**. Limits default to 120 requests/minute with burst
+30 and are process-local; see [`api.md`](./api.md#rate-limits).
 
 ## Tools
 
@@ -166,8 +170,9 @@ Invalid tool arguments (wrong type, missing required field, unknown field) are i
 schema errors produced by the SDK before the tool handler runs. They do not reach the
 service layer and create no write. Unexpected exceptions are mapped to `UNAVAILABLE`.
 
-HTTP-level failures before the SDK (for example `401` authentication or `413` request
-size) use the normal Corkboard JSON error envelope.
+HTTP-level failures before the SDK (for example `401` authentication, `429` rate
+limiting, or `413` request size) use the normal Corkboard JSON error envelope. A `429`
+is returned before session creation and carries `Retry-After`.
 
 ## Logging and privacy
 

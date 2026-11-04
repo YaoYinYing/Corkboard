@@ -50,7 +50,19 @@ Environment:
 | `CORKBOARD_REQUIRE_PRIVATE_FS` | no | `1` enables the same verification without `NODE_ENV` |
 | `PORT` | no | defaults to `8787` |
 | `HOST` | no | listen host; default `127.0.0.1` |
+| `CORKBOARD_RATE_LIMIT_PER_MINUTE` | no | authenticated requests/minute per credential; default `120`, `0` disables |
+| `CORKBOARD_RATE_LIMIT_BURST` | no | token-bucket burst size 1–1000; default `30` |
 | `CORKBOARD_BOOTSTRAP_PASSWORD` | no | owner bootstrap password, environment only |
+
+Rate limiting is per credential and **process-local**. Invalid limiter values stop
+startup. Because unauthenticated requests are not keyed, set per-IP request/connection
+limits, body-size limits, and volumetric abuse controls at the reverse proxy; the
+application does not read forwarding headers.
+
+```sh
+CORKBOARD_RATE_LIMIT_PER_MINUTE=120 CORKBOARD_RATE_LIMIT_BURST=30 \
+  NODE_ENV=production node dist/scripts/corkboard.js serve
+```
 
 The slice-A server makes no outbound requests, so `HTTP_PROXY`/`HTTPS_PROXY` are not
 read. If a proxy is configured in the developer environment, never log its value.
@@ -197,6 +209,9 @@ evicted first), and a session idle for **30 minutes** is evicted on the next
 authenticated `/mcp` request (lazy sweep, no timer). Eviction closes the transport/server.
 Sessions are lost on restart and are not shared across processes; clients must
 initialize again. There is no cross-process session persistence.
+
+`/mcp` shares the per-credential rate-limit bucket with REST. An over-limit request
+returns HTTP `429 RATE_LIMITED` with `Retry-After` before any MCP session is created.
 
 ## Cloudflare Workers (planned)
 

@@ -1,8 +1,13 @@
 // Platform-neutral HTTP handlers over Web Request/Response. Every data route
 // reuses the service authorization layer; no parallel authz path exists here.
 import { SCOPES, type Scope } from "../domain/authz.ts";
-import { AppError, type ErrorCode } from "../domain/errors.ts";
+import { AppError, RateLimitError, type ErrorCode } from "../domain/errors.ts";
 import { createMcpEndpoint } from "../mcp/http.ts";
+import {
+  DEFAULT_RATE_LIMIT,
+  RateLimiter,
+  type RateLimitConfig,
+} from "./rate-limit.ts";
 import {
   authenticateBearer,
   authorizeProject,
@@ -46,6 +51,14 @@ export interface RequestLogEntry {
 
 export interface CreateAppOptions {
   logger?: (entry: RequestLogEntry) => void;
+  /** Per-credential limits; defaults to 120/minute with burst 30. */
+  rateLimit?: RateLimitConfig;
+  /** Injectable clock (milliseconds) for deterministic limiter tests. */
+  rateLimitNow?: () => number;
+  /** Test seam for the bounded bucket map. */
+  rateLimitMaxKeys?: number;
+  /** Test seam for idle bucket eviction. */
+  rateLimitIdleMs?: number;
 }
 
 interface RequestContext {
@@ -84,11 +97,12 @@ function errorBody(code: ErrorCode, message: string, requestId: string): unknown
 }
 
 function errorResponse(error: AppError, requestId: string): Response {
-  return json(
-    error.httpStatus,
-    errorBody(error.code, error.message, requestId),
-    error.code === "UNAUTHENTICATED" ? { "www-authenticate": "Bearer" } : {},
-  );
+  const extra: Record<string, string> = {};
+  if (error.code === "UNAUTHENTICATED") extra["www-authenticate"] = "Bearer";
+  if (error instanceof RateLimitError) {
+    extra["retry-after"] = String(error.retryAfterSeconds);
+  }
+  return json(error.httpStatus, errorBody(error.code, error.message, requestId), extra);
 }
 
 // Adapters that reject an oversized stream before building a Request use the
@@ -109,12 +123,18 @@ async function authenticate(
   deps: ServiceDeps,
   request: Request,
   context: RequestContext,
+  limiter: RateLimiter,
 ): Promise<Principal> {
   const principal = await authenticateBearer(
     deps,
     request.headers.get("authorization") ?? undefined,
   );
   context.principal = principal;
+  // Limit only authenticated principals, after auth and before any handler or
+  // body parsing. Unauthenticated requests are never keyed; bearer tokens are
+  // 256-bit, so per-IP limiting is left to the reverse proxy.
+  const decision = limiter.check(principal.credentialId);
+  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
   return principal;
 }
 
@@ -344,6 +364,7 @@ async function route(
   requestId: string,
   context: RequestContext,
   mcp: ReturnType<typeof createMcpEndpoint>,
+  limiter: RateLimiter,
 ): Promise<Response> {
   const url = new URL(request.url);
   const segments = url.pathname.split("/").filter((segment) => segment !== "");
@@ -355,7 +376,7 @@ async function route(
     if (method !== "POST" && method !== "GET" && method !== "DELETE") {
       return methodNotAllowed("POST, GET, DELETE", requestId);
     }
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     return mcp.handle(request, principal);
   }
 
@@ -369,13 +390,13 @@ async function route(
 
   if (segments.length === 3 && segments[2] === "me") {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     return handleMe(deps, principal);
   }
 
   if (segments.length === 3 && segments[2] === "projects") {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     return handleProjectList(deps, principal, url);
   }
 
@@ -384,7 +405,7 @@ async function route(
 
   if (segments.length === 4) {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     return handleProjectDetail(deps, principal, projectId);
   }
 
@@ -394,7 +415,7 @@ async function route(
     if (method !== "GET" && method !== "POST") {
       return methodNotAllowed("GET, POST", requestId);
     }
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     if (method === "POST") {
       return handleSendMessage(deps, principal, projectId, request);
     }
@@ -408,7 +429,7 @@ async function route(
   const messageId = segments[5] ?? "";
   if (segments.length === 6) {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     const message = await getMessage(deps, principal, projectId, messageId);
     const receipts = await deps.db.all<{ speaker_id: string; read_at: string }>(
       `SELECT r.speaker_id, r.read_at
@@ -429,7 +450,7 @@ async function route(
 
   if (segments.length === 7 && segments[6] === "body") {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     const body = await getMessageBody(deps, principal, projectId, messageId);
     return json(200, {
       message_id: body.messageId,
@@ -441,7 +462,7 @@ async function route(
 
   if (segments.length === 7 && segments[6] === "read") {
     if (method !== "POST") return methodNotAllowed("POST", requestId);
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     const receipt = await markRead(deps, principal, projectId, messageId);
     return json(200, {
       message_id: receipt.messageId,
@@ -452,7 +473,7 @@ async function route(
 
   if (segments.length === 7 && segments[6] === "expire") {
     if (method !== "POST") return methodNotAllowed("POST", requestId);
-    const principal = await authenticate(deps, request, context);
+    const principal = await authenticate(deps, request, context, limiter);
     const result = await expireMessageBody(deps, principal, projectId, messageId);
     return json(200, {
       message_id: result.messageId,
@@ -483,13 +504,18 @@ export function createApp(
   options: CreateAppOptions = {},
 ): (request: Request) => Promise<Response> {
   const mcp = createMcpEndpoint(deps, { maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
+  const limiter = new RateLimiter(options.rateLimit ?? DEFAULT_RATE_LIMIT, {
+    ...(options.rateLimitNow === undefined ? {} : { now: options.rateLimitNow }),
+    ...(options.rateLimitMaxKeys === undefined ? {} : { maxKeys: options.rateLimitMaxKeys }),
+    ...(options.rateLimitIdleMs === undefined ? {} : { idleMs: options.rateLimitIdleMs }),
+  });
   return async (request: Request): Promise<Response> => {
     const started = performance.now();
     const requestId = randomRequestId();
     const context: RequestContext = {};
     let response: Response;
     try {
-      response = await route(deps, request, requestId, context, mcp);
+      response = await route(deps, request, requestId, context, mcp, limiter);
     } catch (error) {
       if (error instanceof AppError) {
         response = errorResponse(error, requestId);

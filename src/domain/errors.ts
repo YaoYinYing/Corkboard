@@ -56,3 +56,14 @@ export class AppError extends Error {
     this.httpStatus = httpStatusFor(code);
   }
 }
+
+// Carries the Retry-After hint without widening AppError for every caller.
+export class RateLimitError extends AppError {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super("RATE_LIMITED");
+    this.name = "RateLimitError";
+    this.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterSeconds));
+  }
+}
