@@ -1,7 +1,7 @@
 // Read-only operator diagnostics. No repair mode, no migrations, no writes to
 // the data or blob directory, and no message content or key material in output.
 import { lstatSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { isValidBlobKey } from "../storage/blobs.ts";
 import {
   expectedMigrationVersions,
@@ -12,6 +12,7 @@ import {
 
 export type DoctorIssueCode =
   | "SCHEMA_INCOMPLETE"
+  | "SCHEMA_AHEAD"
   | "DATABASE_INTEGRITY_FAILED"
   | "BLOB_MISSING"
   | "BLOB_ORPHANED"
@@ -29,6 +30,9 @@ export interface DoctorReport {
     applied: number[];
     expected: number[];
     missing: number[];
+    // Applied versions outside the shipped set. Malformed non-integer rows are
+    // reported as strings rather than dropped.
+    unexpected: Array<number | string>;
     complete: boolean;
   };
   key_presence: {
@@ -72,6 +76,9 @@ export interface DoctorOptions {
   stuckMinutes: number;
   now?: () => Date;
   env?: Readonly<Record<string, string | undefined>>;
+  // Test seam for deterministic read-failure simulation; production uses the
+  // module's read-only opener.
+  openReadOnly?: (path: string) => Promise<ReadOnlySqlDatabase>;
 }
 
 export class DoctorError extends Error {
@@ -118,6 +125,13 @@ function keyPresence(
   };
 }
 
+// Human output is line-oriented and may be viewed in a terminal. Replace C0/C1
+// controls (including ESC, CR, LF, and DEL) so DB-derived text cannot rewrite
+// the display. JSON output keeps standard JSON escaping.
+export function sanitizeForTerminal(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
+}
+
 function mapDatabaseError(error: unknown): DoctorError {
   const message = error instanceof Error ? error.message : "";
   if (/locked|busy/i.test(message)) {
@@ -144,6 +158,7 @@ async function inspectDatabase(
 ): Promise<{
   schema: DoctorReport["schema_versions"];
   schemaIssueCount: number;
+  integrityOk: boolean;
   database: NonNullable<DoctorReport["database"]>;
   blobCrossCheck: {
     referenced: string[];
@@ -157,79 +172,114 @@ async function inspectDatabase(
   const missingTables = expectedTables.filter((table) => !present.has(table));
 
   const applied: number[] = [];
+  const unexpected: Array<number | string> = [];
+  const expectedSet = new Set(expected);
   if (present.has("schema_migrations")) {
-    const rows = await db.all<{ version: number }>(
+    const rows = await db.all<{ version: unknown }>(
       "SELECT version FROM schema_migrations ORDER BY version",
     );
-    applied.push(...rows.map((row) => Number(row.version)));
+    for (const row of rows) {
+      const numeric = Number(row.version);
+      if (Number.isSafeInteger(numeric) && numeric > 0) {
+        if (!applied.includes(numeric)) applied.push(numeric);
+        if (!expectedSet.has(numeric)) unexpected.push(numeric);
+      } else {
+        // Defensive: a tampered row may be non-positive, non-integer, or
+        // non-numeric. It is still ahead/unknown, never silently dropped.
+        unexpected.push(
+          typeof row.version === "string" ? row.version : String(row.version),
+        );
+      }
+    }
+    applied.sort((a, b) => a - b);
   }
   const appliedSet = new Set(applied);
   const missing = expected.filter((version) => !appliedSet.has(version));
-  const complete = missing.length === 0 && missingTables.length === 0;
+  const incomplete = missing.length > 0 || missingTables.length > 0;
+  const complete = !incomplete && unexpected.length === 0;
 
   const integrityRows = await db.all<{ integrity_check: string }>(
     "PRAGMA integrity_check",
   );
-  const integrity =
-    integrityRows.length === 0
+  const integrityOk =
+    integrityRows.length > 0 &&
+    integrityRows.every((row) => row.integrity_check === "ok");
+  const integrity = integrityOk
+    ? "ok"
+    : integrityRows.length === 0
       ? "unknown"
-      : integrityRows.every((row) => row.integrity_check === "ok")
-        ? "ok"
-        : integrityRows
-            .map((row) => row.integrity_check.replace(/\s*\n\s*/g, "; "))
-            .join("; ");
+      : integrityRows
+          .map((row) => row.integrity_check.replace(/\s*\n\s*/g, "; "))
+          .join("; ");
 
   let counts: NonNullable<DoctorReport["database"]>["counts"] = null;
   let blobCrossCheck: { referenced: string[]; expiredPendingDeletion: number } | null =
     null;
 
   if (complete) {
-    const messageCounts = await db.first<{
-      messages: number;
-      ready: number;
-      pending: number;
-      expired: number;
-      failed: number;
-    }>(
-      `SELECT COUNT(*) AS messages,
-              COALESCE(SUM(CASE WHEN body_state = 'ready' THEN 1 ELSE 0 END), 0) AS ready,
-              COALESCE(SUM(CASE WHEN body_state = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
-              COALESCE(SUM(CASE WHEN body_state = 'expired' THEN 1 ELSE 0 END), 0) AS expired,
-              COALESCE(SUM(CASE WHEN body_state = 'failed' THEN 1 ELSE 0 END), 0) AS failed
-         FROM messages`,
-    );
-    counts = {
-      messages: Number(messageCounts?.messages ?? 0),
-      ready: Number(messageCounts?.ready ?? 0),
-      pending: Number(messageCounts?.pending ?? 0),
-      expired: Number(messageCounts?.expired ?? 0),
-      failed: Number(messageCounts?.failed ?? 0),
-      receipts: await count(db, "message_receipts"),
-      credentials: await count(db, "credentials"),
-      grants: await count(db, "credential_project_grants"),
-    };
+    try {
+      const messageCounts = await db.first<{
+        messages: number;
+        ready: number;
+        pending: number;
+        expired: number;
+        failed: number;
+      }>(
+        `SELECT COUNT(*) AS messages,
+                COALESCE(SUM(CASE WHEN body_state = 'ready' THEN 1 ELSE 0 END), 0) AS ready,
+                COALESCE(SUM(CASE WHEN body_state = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+                COALESCE(SUM(CASE WHEN body_state = 'expired' THEN 1 ELSE 0 END), 0) AS expired,
+                COALESCE(SUM(CASE WHEN body_state = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+           FROM messages`,
+      );
+      counts = {
+        messages: Number(messageCounts?.messages ?? 0),
+        ready: Number(messageCounts?.ready ?? 0),
+        pending: Number(messageCounts?.pending ?? 0),
+        expired: Number(messageCounts?.expired ?? 0),
+        failed: Number(messageCounts?.failed ?? 0),
+        receipts: await count(db, "message_receipts"),
+        credentials: await count(db, "credentials"),
+        grants: await count(db, "credential_project_grants"),
+      };
 
-    // Internal only: the full key set is needed for exact missing/orphan counts,
-    // but keys are never printed. Output remains counts plus bounded samples.
-    const referencedRows = await db.all<{ storage_key: string }>(
-      "SELECT storage_key FROM body_objects WHERE storage_key IS NOT NULL",
-    );
-    const pendingDeletion = await db.first<{ n: number }>(
-      `SELECT COUNT(*) AS n
-         FROM messages m
-         JOIN body_objects b ON b.id = m.body_object_id
-        WHERE m.body_state = 'expired'
-          AND (b.state IS NULL OR b.state <> 'deleted')`,
-    );
-    blobCrossCheck = {
-      referenced: referencedRows.map((row) => row.storage_key),
-      expiredPendingDeletion: Number(pendingDeletion?.n ?? 0),
-    };
+      // Internal only: the full key set is needed for exact missing/orphan
+      // counts, but keys are never printed. Output remains counts plus bounded
+      // samples.
+      const referencedRows = await db.all<{ storage_key: string }>(
+        "SELECT storage_key FROM body_objects WHERE storage_key IS NOT NULL",
+      );
+      const pendingDeletion = await db.first<{ n: number }>(
+        `SELECT COUNT(*) AS n
+           FROM messages m
+           JOIN body_objects b ON b.id = m.body_object_id
+          WHERE m.body_state = 'expired'
+            AND (b.state IS NULL OR b.state <> 'deleted')`,
+      );
+      blobCrossCheck = {
+        referenced: referencedRows.map((row) => row.storage_key),
+        expiredPendingDeletion: Number(pendingDeletion?.n ?? 0),
+      };
+    } catch (error) {
+      // A non-ok integrity result is enough to report; unreadable counts stay
+      // null (not measured). A read failure on an integrity-ok database cannot
+      // produce a trustworthy report and remains an inspection failure (exit 2).
+      if (integrityOk) throw error;
+      counts = null;
+      blobCrossCheck = null;
+    }
   }
 
   return {
-    schema: { applied, expected, missing, complete },
+    schema: {
+      applied,
+      expected,
+      missing,
+      unexpected,
+      complete,
+    },
     schemaIssueCount: missing.length + missingTables.length,
+    integrityOk,
     database: { integrity, counts },
     blobCrossCheck,
   };
@@ -345,12 +395,16 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const expected = expectedMigrationVersions();
   const expectedTables = expectedSchemaTables();
   const key = keyPresence(env);
+  // Normalize before every filesystem check; a trailing `/`, `//`, or `/.`
+  // must not turn a symlink into an apparently real directory.
+  const dataDir = resolve(options.dataDir);
 
   let db: ReadOnlySqlDatabase | undefined;
   let schema: DoctorReport["schema_versions"] = {
     applied: [],
     expected,
     missing: [...expected],
+    unexpected: [],
     complete: false,
   };
   let database: DoctorReport["database"] = null;
@@ -362,20 +416,28 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     samples: null,
   };
   let schemaIssueCount = expected.length;
+  let unexpectedCount = 0;
 
-  const dataDirEntry = lstatOrUndefined(options.dataDir);
-  if (dataDirEntry !== undefined && !dataDirEntry.isDirectory()) {
-    throw new DoctorError("data directory is not a directory");
+  const dataDirEntry = lstatOrUndefined(dataDir);
+  if (dataDirEntry !== undefined) {
+    if (dataDirEntry.isSymbolicLink()) {
+      throw new DoctorError("data directory is a symbolic link; refusing to follow");
+    }
+    if (!dataDirEntry.isDirectory()) {
+      throw new DoctorError("data directory is not a directory");
+    }
   }
-  const databasePath = join(options.dataDir, "corkboard.sqlite");
+  const databasePath = join(dataDir, "corkboard.sqlite");
   const databaseEntry = lstatOrUndefined(databasePath);
 
   if (databaseEntry !== undefined) {
-    if (!databaseEntry.isFile()) {
-      throw new DoctorError("database file is not a regular file");
+    if (databaseEntry.isSymbolicLink() || !databaseEntry.isFile()) {
+      throw new DoctorError(
+        "database path is not a regular file (including a symlink)",
+      );
     }
     try {
-      db = await openSqliteDatabaseReadOnly(databasePath);
+      db = await (options.openReadOnly ?? openSqliteDatabaseReadOnly)(databasePath);
     } catch (error) {
       throw mapDatabaseError(error);
     }
@@ -383,12 +445,21 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       const inspected = await inspectDatabase(db, expected, expectedTables);
       schema = inspected.schema;
       schemaIssueCount = inspected.schemaIssueCount;
+      unexpectedCount = inspected.schema.unexpected.length;
       database = inspected.database;
       blobCrossCheck = inspected.blobCrossCheck;
-      if (inspected.schema.complete) {
-        provisional = await inspectProvisional(db, options.stuckMinutes, now);
-      } else {
-        provisional = { stuck_minutes: options.stuckMinutes, count: null, samples: null };
+      if (inspected.database.counts !== null) {
+        try {
+          provisional = await inspectProvisional(db, options.stuckMinutes, now);
+        } catch (error) {
+          // A non-ok integrity result already justifies a partial report.
+          if (inspected.integrityOk) throw error;
+          provisional = {
+            stuck_minutes: options.stuckMinutes,
+            count: null,
+            samples: null,
+          };
+        }
       }
     } catch (error) {
       throw mapDatabaseError(error);
@@ -398,7 +469,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   }
 
   const blobInspection = inspectBlobs(
-    options.dataDir,
+    dataDir,
     blobCrossCheck?.referenced ?? null,
     blobCrossCheck?.expiredPendingDeletion ?? null,
   );
@@ -410,7 +481,15 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     (key.credential_pepper && key.credential_pepper_valid ? 0 : 1);
 
   const issues: DoctorIssue[] = [];
-  if (!schema.complete) issues.push({ code: "SCHEMA_INCOMPLETE", count: Math.max(1, schemaIssueCount) });
+  if (schemaIssueCount > 0) {
+    issues.push({
+      code: "SCHEMA_INCOMPLETE",
+      count: Math.max(1, schemaIssueCount),
+    });
+  }
+  if (unexpectedCount > 0) {
+    issues.push({ code: "SCHEMA_AHEAD", count: unexpectedCount });
+  }
   if (integrityFailed > 0) {
     issues.push({ code: "DATABASE_INTEGRITY_FAILED", count: integrityFailed });
   }
@@ -446,8 +525,12 @@ export function formatDoctorReport(report: DoctorReport): string[] {
   const applied = report.schema_versions.applied.join(",") || "none";
   const expected = report.schema_versions.expected.join(",") || "none";
   const missing = report.schema_versions.missing.join(",") || "none";
+  const unexpected =
+    report.schema_versions.unexpected
+      .map((version) => sanitizeForTerminal(String(version)))
+      .join(",") || "none";
   lines.push(
-    `schema: applied ${applied}; expected ${expected}; missing ${missing}; ${report.schema_versions.complete ? "complete" : "incomplete"}`,
+    `schema: applied ${applied}; expected ${expected}; missing ${missing}; unexpected ${unexpected}; ${report.schema_versions.complete ? "complete" : "incomplete"}`,
   );
 
   const key = report.key_presence;
@@ -460,9 +543,11 @@ export function formatDoctorReport(report: DoctorReport): string[] {
   if (report.database === null) {
     lines.push("database: absent (not initialized)");
   } else {
-    lines.push(`database: integrity ${report.database.integrity}`);
+    lines.push(
+      `database: integrity ${sanitizeForTerminal(report.database.integrity)}`,
+    );
     if (report.database.counts === null) {
-      lines.push("counts: unavailable (schema incomplete)");
+      lines.push("counts: unavailable (schema incomplete or unreadable)");
     } else {
       const c = report.database.counts;
       lines.push(
@@ -484,7 +569,10 @@ export function formatDoctorReport(report: DoctorReport): string[] {
       (samples === null || samples.length === 0
         ? ""
         : `; sample ${samples
-            .map((sample) => `${sample.id} (${sample.age_seconds}s)`)
+            .map(
+              (sample) =>
+                `${sanitizeForTerminal(sample.id)} (${sample.age_seconds}s)`,
+            )
             .join(", ")}`),
   );
   lines.push(

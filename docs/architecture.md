@@ -249,8 +249,10 @@ path for privacy requests is not implemented and is documented as a limit.
 dedicated read-only opener (`openSqliteDatabaseReadOnly`) that does not create
 directories, chmod files, change journal mode, or apply migrations, so it can inspect an
 absent or partial installation without initializing it. It compares `schema_migrations`
-with the migration files bundled in the build and requires every table those migrations
-create, runs `PRAGMA integrity_check`, counts message/receipt/credential/grant rows,
+with the migration files bundled in the build, requires every table those migrations
+create, and reports a version newer than the bundled set as `SCHEMA_AHEAD`; the normal
+opener refuses such a database before applying anything. It runs `PRAGMA integrity_check`,
+counts message/receipt/credential/grant rows,
 reconciles blob files against non-null `body_objects.storage_key`, and samples pending
 rows older than the configured threshold. Blob entries are matched as opaque keys;
 symlinks and other non-file entries are never followed. Output is counts and bounded

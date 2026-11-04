@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -20,9 +21,17 @@ import { generateSpeakerToken, hashSecret } from "../../src/auth/credentials.ts"
 import { inMemoryKeyProvider } from "../../src/crypto/keys.ts";
 import { SCOPES } from "../../src/domain/authz.ts";
 import { authenticateBearer, type ServiceDeps } from "../../src/service/auth.ts";
+import {
+  formatDoctorReport,
+  runDoctor,
+  type DoctorReport,
+} from "../../src/service/doctor.ts";
 import { markRead, sendMessage } from "../../src/service/messages.ts";
 import { LocalBlobStore } from "../../src/storage/blobs/local.ts";
-import { openSqliteDatabase } from "../../src/storage/db.ts";
+import {
+  openSqliteDatabase,
+  openSqliteDatabaseReadOnly,
+} from "../../src/storage/db.ts";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const sourceCli = fileURLToPath(new URL("../../scripts/corkboard.ts", import.meta.url));
@@ -310,8 +319,6 @@ function trialCorruption(
         integrity_check: string;
       }>;
       if (rows.length === 1 && rows[0]?.integrity_check === "ok") return "ok";
-      // A reportable corruption must leave doctor's own count queries readable.
-      db.prepare("SELECT COUNT(*) AS n FROM messages").get();
       return "non-ok";
     } catch {
       return "throws";
@@ -354,7 +361,13 @@ function findCorruptions(
 }
 
 interface DoctorJson {
-  schema_versions: { applied: number[]; expected: number[]; missing: number[]; complete: boolean };
+  schema_versions: {
+    applied: number[];
+    expected: number[];
+    missing: number[];
+    unexpected: Array<number | string>;
+    complete: boolean;
+  };
   key_presence: {
     root_key: boolean;
     credential_pepper: boolean;
@@ -444,7 +457,10 @@ test("doctor reports a clean instance with a sent/read message", (t) => {
 
     const human = runCli(sourceCli, ["doctor", "--data-dir", dataDir], env);
     assert.equal(human.status, 0, human.stderr);
-    assert.match(human.stdout, /schema: applied 1,2; expected 1,2; missing none; complete/);
+    assert.match(
+      human.stdout,
+      /schema: applied 1,2; expected 1,2; missing none; unexpected none; complete/,
+    );
     assert.match(human.stdout, /counts: messages 1 \(ready 1/);
     assert.match(human.stdout, /issues: none/);
     assert.equal(human.stdout.includes(SUMMARY), false);
@@ -681,6 +697,7 @@ test("doctor reports a non-ok integrity check and exits 2 when it throws", (t) =
     assert.ok((issue?.count ?? 0) >= 1);
     assert.equal(reportResult.stdout.includes(SUMMARY), false);
     assert.equal(reportResult.stdout.includes(BODY), false);
+    assert.equal(reportResult.stdout.includes("\u001b"), false, "no raw ESC");
     assert.equal(existsSync(join(reportDir, "corkboard.sqlite-wal")), false);
     assert.equal(existsSync(join(reportDir, "corkboard.sqlite-shm")), false);
 
@@ -856,3 +873,318 @@ test("doctor does not apply migration 002 to a v1 database", (t) => {
     assert.equal(existsSync(`${dbPath}-shm`), false);
   })();
 });
+
+test("doctor reports SCHEMA_AHEAD when the database has a newer version", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  return (async () => {
+    await seedSentAndRead(dataDir);
+    const dbPath = join(dataDir, "corkboard.sqlite");
+    const db = await openSqliteDatabase(dbPath);
+    try {
+      await db.run(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        [99, new Date().toISOString()],
+      );
+      await db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      db.close();
+    }
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+
+    const result = runCli(
+      sourceCli,
+      ["doctor", "--data-dir", dataDir, "--json"],
+      withoutCorkboardEnv(keyEnv()),
+    );
+    assert.equal(result.status, 1, result.stderr);
+    const report = parseJson(result);
+    assert.deepEqual(report.schema_versions.applied, [1, 2, 99]);
+    assert.deepEqual(report.schema_versions.unexpected, [99]);
+    assert.deepEqual(report.schema_versions.missing, []);
+    assert.equal(report.schema_versions.complete, false);
+    const codes = report.issues.map((issue) => issue.code);
+    assert.ok(codes.includes("SCHEMA_AHEAD"), "SCHEMA_AHEAD is reported");
+    assert.equal(codes.includes("SCHEMA_INCOMPLETE"), false);
+    assert.equal(report.database?.counts, null, "ahead schema counts are not trusted");
+  })();
+});
+
+test("opening a newer database refuses without applying migrations", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  return (async () => {
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    const dbPath = join(dataDir, "corkboard.sqlite");
+    const legacy = new DatabaseSync(dbPath);
+    try {
+      legacy.exec(readFileSync(join(repoRoot, "migrations", "001_init.sql"), "utf8"));
+      const insert = legacy.prepare(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+      );
+      insert.run(1, new Date().toISOString());
+      insert.run(99, new Date().toISOString());
+      legacy.exec("PRAGMA journal_mode = WAL");
+      legacy.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      legacy.close();
+    }
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+
+    await assert.rejects(
+      openSqliteDatabase(dbPath),
+      (error: unknown) =>
+        error instanceof Error &&
+        /newer than this server supports/.test(error.message),
+    );
+
+    // Migration 002 must not have been applied after the refusal.
+    const after = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const versions = after
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .all() as Array<{ version: number }>;
+      assert.deepEqual(
+        versions.map((row) => row.version),
+        [1, 99],
+        "no migration row was added",
+      );
+      const tables = after
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'credential_project_grants'",
+        )
+        .all();
+      assert.equal(tables.length, 0, "migration 002 was not applied");
+    } finally {
+      after.close();
+    }
+  })();
+});
+
+test("doctor reports integrity failure even when count queries throw", (t) => {
+  const root = tempDir(t);
+  return (async () => {
+    const baseDir = join(root, "base");
+    const dbPath = await seedProbeDatabase(baseDir);
+    const scratch = join(root, "scratch");
+    mkdirSync(scratch, { recursive: true, mode: 0o700 });
+    const corruptions = findCorruptions(dbPath, scratch);
+
+    const dataDir = join(root, "corrupt-data");
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    const corruptPath = join(dataDir, "corkboard.sqlite");
+    writeFileSync(corruptPath, corruptions.report);
+    // The DB is genuinely corrupt (non-ok integrity). Inject a read failure for
+    // the count query, because SQLite's COUNT(*) remains readable for every
+    // byte-flip corruption we could reproduce deterministically.
+    const real = await openSqliteDatabaseReadOnly(corruptPath);
+    const failing: typeof real = {
+      all: (sql, params) => {
+        if (sql.includes("FROM messages")) return Promise.reject(new Error("count read failure"));
+        return real.all(sql, params);
+      },
+      first: (sql, params) => {
+        if (sql.includes("COUNT(*) AS messages")) {
+          return Promise.reject(new Error("count read failure"));
+        }
+        return real.first(sql, params);
+      },
+      close: () => real.close(),
+    };
+
+    const report = await runDoctor({
+      dataDir,
+      stuckMinutes: 60,
+      env: keyEnv(),
+      openReadOnly: async () => failing,
+    });
+    assert.notEqual(report.database?.integrity, "ok");
+    assert.equal(report.database?.counts, null);
+    assert.equal(report.blobs.referenced, null);
+    assert.equal(report.blobs.orphaned, null);
+    assert.equal(report.blobs.missing, null);
+    assert.equal(report.blobs.expired_pending_deletion, null);
+    assert.equal(report.provisional.count, null);
+    assert.equal(report.provisional.samples, null);
+    assert.ok(
+      report.issues.some((issue) => issue.code === "DATABASE_INTEGRITY_FAILED"),
+    );
+  })();
+});
+
+test("doctor normalizes and rejects symlinked data and database paths", (t) => {
+  const root = tempDir(t);
+  const realData = join(root, "real-data");
+  return (async () => {
+    await seedSentAndRead(realData);
+    const linkedData = join(root, "linked-data");
+    symlinkSync(realData, linkedData, "dir");
+    const env = withoutCorkboardEnv(keyEnv());
+
+    for (const suffix of ["/", "//", "/.", "///"]) {
+      const result = runCli(
+        sourceCli,
+        ["doctor", "--data-dir", `${linkedData}${suffix}`, "--json"],
+        env,
+      );
+      assert.equal(result.status, 2, `suffix ${JSON.stringify(suffix)}: ${result.stderr}`);
+      assert.match(result.stderr, /symbolic link/);
+    }
+
+    // A symlinked database file is rejected as a non-regular path.
+    const dbTarget = join(root, "db-target.sqlite");
+    writeFileSync(dbTarget, readFileSync(join(realData, "corkboard.sqlite")));
+    const dbLinkDir = join(root, "db-link-data");
+    mkdirSync(dbLinkDir, { recursive: true, mode: 0o700 });
+    symlinkSync(dbTarget, join(dbLinkDir, "corkboard.sqlite"));
+    const dbLink = runCli(
+      sourceCli,
+      ["doctor", "--data-dir", dbLinkDir, "--json"],
+      env,
+    );
+    assert.equal(dbLink.status, 2);
+    assert.match(dbLink.stderr, /not a regular file \(including a symlink\)/);
+  })();
+});
+
+test("doctor sanitizes control characters in DB-derived human output", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  return (async () => {
+    await seed(dataDir, {});
+    const dbPath = join(dataDir, "corkboard.sqlite");
+    const db = await openSqliteDatabase(dbPath);
+    try {
+      await db.run(
+        `INSERT INTO messages
+           (id, project_id, sender_speaker_id, summary, type, language, received_at, body_state)
+         VALUES (?, ?, ?, ?, 'request', 'en', ?, 'pending')`,
+        [
+          "msg_\u001b[31m\u0007\r\npending",
+          "proj_1",
+          "spk_1",
+          SUMMARY,
+          "2020-01-01T00:00:00.000Z",
+        ],
+      );
+      await db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      db.close();
+    }
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+
+    const result = runCli(
+      sourceCli,
+      ["doctor", "--data-dir", dataDir],
+      withoutCorkboardEnv(keyEnv()),
+    );
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout.includes("\u001b"), false, "no raw ESC");
+    assert.equal(result.stdout.includes("\u0007"), false, "no raw BEL");
+    assert.equal(result.stdout.includes("\r"), false, "no raw CR");
+    assert.match(result.stdout, /msg_\?\[31m\?\?\?pending/);
+
+    // Formatter-level: an integrity message with controls is sanitized too.
+    const report: DoctorReport = {
+      schema_versions: {
+        applied: [1, 2],
+        expected: [1, 2],
+        missing: [],
+        unexpected: [],
+        complete: true,
+      },
+      key_presence: {
+        root_key: true,
+        credential_pepper: true,
+        root_key_valid: true,
+        credential_pepper_valid: true,
+        key_version: "v1",
+      },
+      database: { integrity: "bad\u001b[31m\nnext", counts: null },
+      blobs: {
+        files: 0,
+        referenced: null,
+        orphaned: null,
+        missing: null,
+        expired_pending_deletion: null,
+        blob_dir_non_files: 0,
+      },
+      provisional: { stuck_minutes: 60, count: null, samples: null },
+      issues: [],
+    };
+    const human = formatDoctorReport(report).join("\n");
+    assert.equal(human.includes("\u001b"), false);
+    assert.equal(human.includes("\r"), false);
+    assert.ok(human.includes("bad?[31m?next"), "control characters replaced");
+  })();
+});
+
+test(
+  "doctor exits 2 for a locked database",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const root = tempDir(t);
+    const dataDir = join(root, "data");
+    return (async () => {
+      mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+      const dbPath = join(dataDir, "corkboard.sqlite");
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.exec(readFileSync(join(repoRoot, "migrations", "001_init.sql"), "utf8"));
+        db.exec(
+          readFileSync(
+            join(repoRoot, "migrations", "002_credential_project_grants.sql"),
+            "utf8",
+          ),
+        );
+        const insert = db.prepare(
+          "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        );
+        insert.run(1, new Date().toISOString());
+        insert.run(2, new Date().toISOString());
+        db.exec("BEGIN EXCLUSIVE");
+        const result = runCli(
+          sourceCli,
+          ["doctor", "--data-dir", dataDir],
+          withoutCorkboardEnv(keyEnv()),
+        );
+        assert.equal(result.status, 2);
+        assert.match(result.stderr, /database is busy or locked/);
+        assert.equal(/^\s+at /m.test(result.stderr), false, "no stack trace");
+      } finally {
+        try {
+          db.exec("ROLLBACK");
+        } catch {
+          // The lock may already be gone.
+        }
+        db.close();
+      }
+    })();
+  },
+);
+
+test(
+  "doctor exits 2 for an unreadable data directory",
+  { skip: process.platform === "win32" || process.getuid?.() === 0 },
+  (t) => {
+    const root = tempDir(t);
+    const dataDir = join(root, "data");
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    chmodSync(dataDir, 0o000);
+    try {
+      const result = runCli(
+        sourceCli,
+        ["doctor", "--data-dir", dataDir],
+        withoutCorkboardEnv(keyEnv()),
+      );
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /cannot read the data directory/);
+      assert.equal(/^\s+at /m.test(result.stderr), false, "no stack trace");
+    } finally {
+      chmodSync(dataDir, 0o700);
+    }
+  },
+);

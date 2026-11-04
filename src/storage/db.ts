@@ -16,6 +16,17 @@ import { DatabaseSync } from "node:sqlite";
 
 export type SqlValue = string | number | null;
 
+// Refuse to open an installation migrated by a newer build: the older server
+// does not know the newer schema and must not write against it.
+export class SchemaTooNewError extends Error {
+  readonly code = "SCHEMA_TOO_NEW";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SchemaTooNewError";
+  }
+}
+
 export interface SqlDatabase {
   exec(sql: string): Promise<void>;
   all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]>;
@@ -64,13 +75,31 @@ function applyMigrations(db: DatabaseSync): void {
   db.exec(
     "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
   );
+  const migrations = listMigrations(migrationsDirectory());
+  const highestBundled = migrations.reduce(
+    (highest, migration) => Math.max(highest, migration.version),
+    0,
+  );
+  // Fail before applying anything when the database was migrated by a newer
+  // server. An older binary does not understand the newer schema.
+  const appliedVersions = db
+    .prepare("SELECT version FROM schema_migrations")
+    .all() as Array<{ version: unknown }>;
+  for (const row of appliedVersions) {
+    const version = Number(row.version);
+    if (Number.isSafeInteger(version) && version > highestBundled) {
+      throw new SchemaTooNewError(
+        `database schema version ${version} is newer than this server supports (highest bundled version ${highestBundled}); refusing to open`,
+      );
+    }
+  }
   const isApplied = db.prepare(
     "SELECT version FROM schema_migrations WHERE version = ?1",
   );
   const record = db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
   );
-  for (const migration of listMigrations(migrationsDirectory())) {
+  for (const migration of migrations) {
     if (isApplied.get(migration.version) !== undefined) continue;
     // Each migration and its version row commit atomically. BEGIN IMMEDIATE
     // serializes concurrent upgraders; the in-transaction re-check makes a

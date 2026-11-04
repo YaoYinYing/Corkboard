@@ -295,45 +295,62 @@ pushed.
   chmods, switches journal mode, or applies migrations. A clean WAL database without
   sidecars is opened `immutable` so no `-wal`/`-shm` files are created; with both
   sidecars present it reads the live WAL. A lone sidecar, or a symlinked/non-regular
-  sidecar, is rejected as a crash/redirect state rather than repaired or followed. A live
+  sidecar, is rejected as a crash/redirect state rather than repaired or followed; the
+  data directory is `resolve()`-normalized and a symlinked data directory or database
+  path is rejected, so trailing `/`, `//`, and `/.` cannot disguise a redirect. A live
   read may rewrite the existing `-shm` coordination bytes; database and blob content are
-  unchanged.
-- **Report.** `src/service/doctor.ts` reports: applied/expected/missing schema versions
-  and completeness against every table created by the bundled migrations
+  unchanged. The sidecar check is not a lock, so a concurrent checkpoint can recreate a
+  sidecar between check and open and the first read may need a retry.
+- **Schema newer than the server.** `applyMigrations` reads every applied version before
+  the migration loop and throws `SchemaTooNewError` when any applied version exceeds the
+  highest bundled version, so the server/CLI refuses an installation from a newer build
+  without applying anything. Doctor reports the same condition as `SCHEMA_AHEAD` with
+  `unexpected` versions and `complete: false` (exit `1`); non-positive/non-integer rows
+  are defensively treated as unexpected.
+- **Report.** `src/service/doctor.ts` reports: applied/expected/missing/unexpected schema
+  versions and completeness against every table created by the bundled migrations
   (`expectedSchemaTables`); `CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER`
   presence plus 32-byte base64 shape (booleans only) and key version `v1`;
   `PRAGMA integrity_check`; message/ready/pending/expired/failed, receipt, credential and
   grant counts; blob file, referenced, orphaned, missing, expired-pending-deletion and
   non-file counts; the configurable stuck-pending count with at most ten ID/age samples;
-  and stable issue codes (`SCHEMA_INCOMPLETE`, `DATABASE_INTEGRITY_FAILED`,
-  `BLOB_MISSING`, `BLOB_ORPHANED`, `EXPIRED_BLOB_PENDING`, `STUCK_PENDING`,
-  `KEY_MISSING`). Unmeasurable values are `null`, not zero.
+  and stable issue codes (`SCHEMA_INCOMPLETE`, `SCHEMA_AHEAD`,
+  `DATABASE_INTEGRITY_FAILED`, `BLOB_MISSING`, `BLOB_ORPHANED`, `EXPIRED_BLOB_PENDING`,
+  `STUCK_PENDING`, `KEY_MISSING`). Unmeasurable values are `null`, not zero. A non-ok
+  integrity result still produces a report (counts/blobs null where unreadable, exit 1);
+  only open/schema-read failures that prevent a report exit 2. Human output sanitizes
+  DB-derived controls (C0/C1, DEL) so sample IDs and integrity text cannot drive the
+  terminal.
 - **Safety.** An absent data directory or database reports `database: null` and
   `SCHEMA_INCOMPLETE` without initialization and exits `1`; only an existing but
-  unreadable/non-directory path exits `2`. Symlinks and non-file blob entries are never
-  followed (counted as `blob_dir_non_files`); invalid-named regular files are ignored.
-  No query selects summaries or bodies, and no key/token/secret value is selected or
-  printed. Exit `0` clean, `1` issues, `2` inspection impossible (invalid arguments,
-  unreadable/non-directory data path, busy/locked database, inconsistent/symlinked WAL
-  sidecars) with a stable message and no stack trace. Output is bounded, but
-  reconciliation reads all referenced storage keys internally and `integrity_check`
-  scans the database.
+  unreadable/non-directory/symlinked path exits `2`. Symlinks and non-file blob entries
+  are never followed (counted as `blob_dir_non_files`); invalid-named regular files are
+  ignored. No query selects summaries or bodies, and no key/token/secret value is
+  selected or printed. Exit `0` clean, `1` issues, `2` inspection impossible (invalid
+  arguments, symlinked/unreadable/non-directory data path, database path not a regular
+  file including a symlink, busy/locked database, inconsistent/symlinked WAL sidecars)
+  with a stable message and no stack trace. Output is bounded, but reconciliation reads
+  all referenced storage keys internally, `integrity_check` scans the database, and the
+  version lists grow with `schema_migrations` rows.
 - **Tests.** New `tests/integration/doctor.test.ts` covers a clean sent/read instance,
   orphan/missing/expired-pending/stuck counts with bounded samples, symlink
   non-following and invalid names, absent directory/database non-initialization with
   null "not measured" values, invalid arguments and no-stack exit 2, byte-for-byte
-  read-only behavior, deterministic non-ok and throwing integrity corruption, a missing
-  core table, symlinked WAL sidecars, a live uncheckpointed WAL with unchanged
-  DB/WAL/blob hashes, a v1-only database proving migration 002 is not applied, and an
-  unconditional rebuild before the built-CLI run.
-- **Tests/commands.** 213 total, 212 pass, 1 skipped (live D1 marker). `npm run check`
+  read-only behavior, deterministic non-ok and throwing integrity corruption, a partial
+  report when counts fail after a non-ok integrity result, a missing core table,
+  symlinked WAL sidecars, a live uncheckpointed WAL with unchanged DB/WAL/blob hashes, a
+  v1-only database proving migration 002 is not applied, `SCHEMA_AHEAD` for version 99,
+  startup refusal for version 99 without applying migration 002, normalized trailing-form
+  symlink rejection, control-character sanitization, locked-database and unreadable-
+  directory exit 2, and an unconditional rebuild before the built-CLI run.
+- **Tests/commands.** 220 total, 219 pass, 1 skipped (live D1 marker). `npm run check`
   and `npm run build` pass. A built-CLI smoke against a seeded directory reported the
   expected orphan/missing/expired/stuck counts, exit 1, no content/key output, and
   created no data-directory files.
 - **Limitations.** No destructive repair/fix mode, no backup-integrity verification, and
   no D1/Workers equivalent. `PRAGMA integrity_check` is SQLite-specific, a live read may
-  rewrite `-shm` coordination bytes, and an integrity check that cannot run exits `2`
-  instead of reporting.
+  rewrite `-shm` coordination bytes, sidecar detection has a narrow check/open TOCTOU,
+  and an integrity check that cannot run exits `2` instead of reporting.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
 
@@ -599,8 +616,12 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Slice-F limitations: `doctor` is report-only with no repair/fix mode; it does not
   verify backup integrity and has no D1/Workers implementation (`PRAGMA
   integrity_check` is SQLite-specific). It fetches referenced storage keys internally
-  to reconcile blobs but prints only counts and bounded samples. An integrity check
-  that cannot run (corrupt/unreadable file) exits 2 rather than producing a report.
+  to reconcile blobs but prints only counts and bounded samples; version lists grow with
+  `schema_migrations` rows. An integrity check that cannot run (corrupt/unreadable file)
+  exits 2 rather than producing a report, while a non-ok result reports with unmeasured
+  fields null. A live read may rewrite `-shm`, and sidecar detection has a narrow
+  check/open TOCTOU. The normal opener now refuses a database migrated by a newer
+  server; doctor only reports `SCHEMA_AHEAD`.
 - Production filesystem verification covers directories and files present at startup;
   WAL/SHM sidecars are checked when present and are created `0600` by the adapter. It
   does not detect a mode change made by another privileged process after startup.
