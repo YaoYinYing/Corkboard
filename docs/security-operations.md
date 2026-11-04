@@ -72,11 +72,13 @@ manager or treat it as a backup secret. Rules:
   message sender. The transition is authoritative: the endpoint returns success even
   if the audit insert fails, the already-expired path retries the insert, and the
   worker reconciles expired messages whose deterministic row is still missing.
-- Body retention enforcement is **opt-in per message** via `body_expires_at`, either
-  through the authenticated `POST .../expire` endpoint or the operator-run
-  `expire-bodies` cleanup command. There is no scheduler daemon and no automatic
-  rotation or deletion of messages without an expiry. Expiry leaves a metadata
-  tombstone; it is not comprehensive erasure and does not rewrite backups.
+- Body retention has two distinct paths. Scheduled TTL retention is **opt-in per
+  message** via `body_expires_at` and is enforced only when the operator runs
+  `expire-bodies`. Explicit administrative expiry via `POST .../expire` can expire any
+  committed `ready` message, whether or not it has an expiry timestamp. There is no
+  scheduler daemon and no automatic rotation or deletion of messages without an expiry.
+  Expiry leaves a metadata tombstone; it is not comprehensive erasure and does not
+  rewrite backups.
 
 ## Environment separation
 

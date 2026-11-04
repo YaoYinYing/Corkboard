@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; **vertical slices A and B implemented** (slice B checkpoint pending) |
-| Checkpoint | Slice A `b5c421d` (audited tree `048065f`); slice B candidate on branch `slice-b-expiry` |
-| Branch | `main` (slice A); `slice-b-expiry` (slice B, not pushed) |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: pending independent audit |
-| Next milestone | D1/R2 parity and Phase 5 (MCP/OAuth/ChatGPT Web plugin) |
+| Phase | 0 complete; **vertical slices A and B implemented and pushed** |
+| Last pushed checkpoint | `7b5a63b` (audited tree `2bfaa9b`) on `origin/main`; CI success |
+| Branch | `main` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b` |
+| Next milestone | P0 credential-project binding and non-destructive init (Issues #2/#3), then D1/R2 parity and Phase 5 |
 
 ## Checkpoint history
 
@@ -20,6 +20,17 @@ as the work it describes.
 | --- | --- | --- | --- |
 | `df99e90` | `0459cfb` | Phase 0 docs, toolchain, secret hygiene | security PASS; contract PASS |
 | `b5c421d` | `048065f` | Vertical slice A: encrypted messaging, ordered replay, REST API, CLI | security PASS; contract PASS |
+| `7b5a63b` | `2bfaa9b` | Vertical slice B: body expiry tombstones, audited expiry endpoint, cleanup worker | security PASS; contract PASS |
+
+## GitHub Issue coordination
+
+| Field | Value |
+| --- | --- |
+| Authenticated account | `YaoYinYing` (verified with `gh api user`) |
+| Pending P0 Issues | #2 credential-to-project grants; #3 non-destructive key bootstrap |
+| Last pushed checkpoint | `7b5a63b`; remote HEAD verified; CI run 41817856459 success |
+| Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8), next run 2026-11-04 03:55 local; **not durable across process exit**, auto-expires after 7 days |
+| Status | Issue #2/#3 remain open until fixed, pushed, audited revisions are linked |
 
 Do not treat later phases as verified until their checkpoints exist.
 
@@ -300,6 +311,13 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Expiry cleanup is an operator-run command with no in-process scheduler; deployments
   must schedule `expire-bodies` externally. No hard-delete/admin erasure path exists;
   expiry retains metadata and does not rewrite backups.
+- Slice-B P2 debt from exact-tree audits: the `(body_state, body_expires_at)` index is
+  added only to migration 001, so existing v1 databases do not receive it (no upgrade
+  guarantee yet); worker orphan/audit passes scan the growing expired population;
+  an already-expired retry can record the retrying caller as the audit actor;
+  `issue-key --scopes` does not persist the granted scope set in its audit row; a body
+  fetch that passes its state check immediately before expiry may still return the
+  already-decrypted content.
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large

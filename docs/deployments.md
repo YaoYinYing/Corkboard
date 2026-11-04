@@ -43,7 +43,8 @@ node dist/scripts/corkboard.js create-project --account <account_id> --title "Op
 node dist/scripts/corkboard.js create-speaker --account <account_id> --name "Codex"
 node dist/scripts/corkboard.js add-member --project <project_id> --speaker <speaker_id>
 node dist/scripts/corkboard.js issue-key --speaker <speaker_id> --project <project_id>
-# optional: issue a narrower key, e.g. the project.edit capability for expiry
+# optional: issue a narrower key. `project.edit` is an owner-membership capability,
+# so grant an owner membership first (`add-member --owner`), then:
 node dist/scripts/corkboard.js issue-key --speaker <speaker_id> --project <project_id> \
   --scopes project.edit
 # prints the token once; store it in the agent's own environment

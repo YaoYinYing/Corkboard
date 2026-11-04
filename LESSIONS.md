@@ -6,6 +6,20 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — Fixtures that bypass provisioning hide unreachable features
+
+- **Failure:** The expiry endpoint required `project.edit`, but `issue-key` could only
+  mint the four default member scopes. Tests passed because the fixture constructed
+  credentials with `ALL_SCOPES`, so the feature was unusable through the shipped CLI;
+  a contract audit found it end-to-end.
+- **Reproducer:** Follow the documented CLI bootstrap, then `POST .../expire` with the
+  issued token — `403 FORBIDDEN`.
+- **Fix:** `issue-key --scopes` (validated as a subset of membership capabilities), a
+  CLI-to-HTTP end-to-end test using the real issuance path, and documented `--owner`.
+- **Prevents:** Green unit tests over a capability no real caller can obtain.
+- **Remove when:** Every feature has at least one end-to-end test through its public
+  provisioning path.
+
 ## 2026-11-03 — Credential-bearing source must never reach public git
 
 - **Failure:** The archival `ORIGINAL_DESIGN.md` contains a proxy URL with embedded
