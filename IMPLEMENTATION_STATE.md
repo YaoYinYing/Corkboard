@@ -8,7 +8,7 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–F implemented and pushed |
+| Phase | 0 complete; vertical slices A–F implemented and pushed; slice G (rate limiting) candidate |
 | Last pushed checkpoint | `1fa8876` (doctor, audited tree `66bc243`; combined-tree gate 221 tests/220 pass) and `df5d200` (MCP id fix) on `origin/main` |
 | Branch | `main` |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243` |
@@ -27,6 +27,7 @@ as the work it describes.
 | `4216af6` | `30e9267` | Issue #4 fix: typed JSON-RPC ids in MCP idempotency | security PASS; contract PASS |
 | `1fa8876` | `66bc243` | Vertical slice F: read-only operator diagnostics (`doctor`) | security PASS; contract PASS |
 | `slice-f-doctor` candidate | recorded in the campaign report | Vertical slice F: read-only operator diagnostics (`doctor`) | independent security/contract audits pending |
+| `slice-g-ratelimit` candidate | recorded in the checkpoint commit | Vertical slice G: per-credential REST/MCP rate limiting | independent security/contract audits pending |
 
 ## GitHub Issue coordination
 
@@ -408,6 +409,49 @@ pushed.
   smoke (`init` → service send with near expiry → `expire-bodies` → body fetch fails,
   metadata survives).
 
+## Vertical slice G — per-credential rate limiting (candidate)
+
+- **Core limiter.** `src/app/rate-limit.ts` is a Web-standard token bucket with an
+  injected clock (`now`, `maxKeys`, `idleMs` options). `RateLimitConfig` holds
+  `perMinute` and `burst`; `rateLimitConfigFromEnv` parses
+  `CORKBOARD_RATE_LIMIT_PER_MINUTE` (integer `>= 0`, `0` disables) and
+  `CORKBOARD_RATE_LIMIT_BURST` (integer 1–1000) and throws a clear error on empty,
+  signed, fractional, non-numeric, or out-of-range values. Defaults are 120/minute with
+  burst 30.
+- **Placement.** `createApp` builds one `RateLimiter` per app. `authenticate()` checks
+  it immediately after `authenticateBearer` resolves the `Principal`, so every
+  authenticated `/api/v1/...` and `/mcp` request is keyed by `credentialId` before body
+  parsing, handler work, or MCP session creation. `/healthz` and unauthenticated
+  requests never reach the check. REST and MCP share the same bucket.
+- **429 contract.** An exhausted bucket throws `RateLimitError` (an `AppError` with code
+  `RATE_LIMITED` and `retryAfterSeconds >= 1`). The normal error envelope is returned
+  with `Retry-After`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
+  a `request_id`; no token, body, summary, or session id is included. Over-limit MCP
+  requests get this HTTP envelope before the SDK runs and no `mcp-session-id`.
+- **Memory bounds.** Buckets are capped at 10,000 entries; the oldest entry is evicted
+  when a new credential arrives at the cap, and an entry untouched for 2 minutes is swept
+  (time-gated to at most once per idle window). Behaviour is deterministic with the
+  injected clock.
+- **Startup.** `startServer` parses the limiter configuration before creating, opening,
+  or chmodding the data directory, so invalid values fail startup with the variable name
+  and leave the filesystem untouched. `0` disables limiting entirely.
+- **Docs.** `docs/api.md` (rate-limit contract and error), `docs/security-operations.md`
+  (process-local, reverse-proxy per-IP limits, no secret logging), `docs/architecture.md`,
+  `docs/deployments.md` (env table/example), and `docs/mcp.md` (429 before session) are
+  updated. Nothing claims distributed or global limiting.
+- **Tests.** New `tests/integration/rate-limit.test.ts` (9 tests) covers burst capacity
+  and refill with `Retry-After`, per-credential isolation, REST/MCP shared bucket and
+  no-session 429, `0` disable, env defaults/invalid/bounds, startup refusal before
+  filesystem creation, no token/body disclosure, healthz and unauthenticated requests
+  unkeyed, bounded-map/idle eviction, and constructor bounds. Existing suites are
+  unchanged.
+- **Limitations.** Limits are process-local and per credential; they are not shared
+  across processes or Workers isolates and reset on restart. There is no per-IP limiting
+  in the application (bearer tokens are 256-bit; reverse proxy handles unauthenticated
+  and volumetric abuse). The Node adapter still reads an in-cap body before the core
+  runs, so a rate-limited request's bytes reach the adapter but are never parsed by the
+  application.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -662,7 +706,9 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
 - No human web session or OAuth yet.
-- No attachments or rate limiting. MCP session state is in-memory/process-local
+- No attachments. Per-credential rate limiting is implemented but process-local; it is
+  not distributed/global, is not shared across processes or Workers isolates, and
+  per-IP limiting remains delegated to the reverse proxy. MCP session state is in-memory/process-local
   (1024-session LRU cap, lazy 30-minute idle TTL) with no cross-process/Workers sharing;
   a restart drops sessions. A rejected request does not close a revoked credential's
   session; it remains until eviction and can be reused if the credential is reactivated.

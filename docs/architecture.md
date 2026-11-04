@@ -298,6 +298,27 @@ OAuth 2.1/PKCE, ChatGPT Web installation/linking, conversation-level tool invoca
 SSE notifications, resumability, and cross-process session storage are not implemented
 or verified.
 
+## Per-credential rate limiting
+
+`src/app/rate-limit.ts` implements an in-memory token bucket with an injected clock and
+Web-standard APIs only. The HTTP router checks it inside `authenticate()`: after the
+bearer credential resolves to a `Principal` and before any request body is parsed or
+handler/MCP work begins. Every authenticated `/api/v1` and `/mcp` request therefore uses
+one bucket keyed by `credentialId`; REST and MCP share it. `GET /healthz` and
+unauthenticated requests are never keyed.
+
+- Defaults are 120 requests/minute with burst 30, overridable by
+  `CORKBOARD_RATE_LIMIT_PER_MINUTE` (`0` disables) and `CORKBOARD_RATE_LIMIT_BURST`
+  (1–1000). Invalid configuration fails startup before the data directory is touched.
+- An exhausted bucket produces HTTP `429 RATE_LIMITED` with `Retry-After` and
+  `Cache-Control: no-store`; no MCP session is created and no handler effect occurs.
+- The bucket map is bounded to 10,000 credentials with a 2-minute idle sweep and
+  oldest-entry eviction at the cap.
+- State is **process-local**: buckets are not shared across processes or Workers
+  isolates and reset on restart. This is additional denial, not an authorization
+  decision; no authentication or authorization semantics change. Per-IP limiting is
+  deferred to the reverse proxy because bearer tokens are 256-bit random values.
+
 ## Deliberate deferments
 
 WebSockets/presence, agent launchers, file reservations, true E2EE, per-project

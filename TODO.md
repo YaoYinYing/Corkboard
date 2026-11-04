@@ -352,6 +352,7 @@ recorded there.
 ### Phase 4 — HTTP API and real Node/Workers deployments (**P1**)
 
 - [ ] Implement documented HTTP endpoints, strict schemas, stable codes, request IDs, body limits, pagination, rate limits and security headers.
+- [x] Implement authenticated per-credential request rate limiting for REST and MCP (process-local token bucket, 429 `RATE_LIMITED` with `Retry-After`, bounded map). Per-IP/distributed limiting and reverse-proxy abuse controls remain unimplemented.
 - [ ] Run a self-hosted Node.js server with SQLite WAL + encrypted local files, health/readiness and secure HTTPS reverse-proxy example (without embedding real credentials).
 - [ ] Run Cloudflare Worker with D1 + private R2, binding/secrets and migrations; real Cloudflare preview/staging deployment, not only local mock.
 - [x] Add read-only `doctor` diagnostics: orphan and missing blob report, stuck provisional post, expired bodies pending delete, schema versions, key presence/version, counts and stable issue codes, with bounded samples. (Destructive repair/fix mode and backup-integrity verification remain unimplemented.)

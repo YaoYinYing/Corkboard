@@ -11,6 +11,7 @@ import {
   requestTooLargeResponse,
   type RequestLogEntry,
 } from "../../app/handlers.ts";
+import { rateLimitConfigFromEnv } from "../../app/rate-limit.ts";
 import { keyProviderFromEnv } from "../../crypto/keys.ts";
 import type { ServiceDeps } from "../../service/auth.ts";
 import { LocalBlobStore } from "../../storage/blobs/local.ts";
@@ -139,6 +140,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   }
   // Plain HTTP stays on loopback unless the operator opts into another HOST.
   const host = env.HOST === undefined || env.HOST === "" ? DEFAULT_HOST : env.HOST;
+  // Invalid limiter configuration fails startup before the data directory is
+  // created, opened, or chmodded.
+  const rateLimit = rateLimitConfigFromEnv(env);
 
   const blobDir = join(dataDir, "blobs");
   const databasePath = join(dataDir, "corkboard.sqlite");
@@ -172,6 +176,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       now: () => new Date(),
     };
     const app = createApp(deps, {
+      rateLimit,
       // JSON lines for the service log; no headers, tokens, bodies or IPs.
       logger: (entry: RequestLogEntry): void => {
         process.stdout.write(`${JSON.stringify(entry)}\n`);
