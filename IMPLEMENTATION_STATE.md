@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A, B, C, and D implemented and pushed; slice E (bearer MCP) candidate |
-| Last pushed checkpoint | `9b23b6d` on `origin/main` (base for slice E); prior audited tree `bcc6a73` |
-| Branch | `slice-e-mcp` (candidate) |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: security PASS + contract PASS on tree `8ffff4a`. Slice D: security PASS + contract PASS on tree `bcc6a73` |
+| Phase | 0 complete; vertical slices A–E implemented and pushed |
+| Last pushed checkpoint | `57d769b` (audited tree `31a542a`) on `origin/main`; CI run 41844525189 |
+| Branch | `main` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a` |
 | Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, doctor/observability |
 
 ## Checkpoint history
@@ -23,6 +23,7 @@ as the work it describes.
 | `7b5a63b` | `2bfaa9b` | Vertical slice B: body expiry tombstones, audited expiry endpoint, cleanup worker | security PASS; contract PASS |
 | `0052909` | `8ffff4a` | Vertical slice C: credential-project grants, safe bootstrap, transactional migrations | security PASS; contract PASS |
 | `17caa65` | `bcc6a73` | Vertical slice D: revocation re-checks, multi-process evidence, fail-closed filesystem | security PASS; contract PASS |
+| `57d769b` | `31a542a` | Vertical slice E: bearer-authenticated MCP Streamable HTTP tools | security PASS; contract PASS |
 
 ## GitHub Issue coordination
 
@@ -30,7 +31,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `17caa65`; remote HEAD verified; CI run 41833362751 |
+| Last pushed checkpoint | `57d769b`; remote HEAD verified; CI run 41844525189 |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -216,13 +217,16 @@ pushed.
 - **Sessions.** `src/mcp/http.ts` uses the SDK's
   `WebStandardStreamableHTTPServerTransport` in stateful JSON-response mode. Sessions
   are in-memory and process-local, capped at 1024 (least-recently-used eviction) with a
-  30-minute idle TTL; eviction closes the transport/server. They are bound to the
-  initializing credential; another credential's id is `404` for tools and `DELETE`, and
-  a foreign DELETE leaves the owner's session intact. Sessions are lost on restart and
-  are not shared across processes. The bearer token is not passed to the SDK
-  (`authInfo.token` is empty); tools receive only the derived principal, and each
-  request re-authenticates and re-authorizes through the service layer. No
-  session/authorization cache exists.
+  lazy 30-minute idle TTL swept on the next authenticated `/mcp` request; eviction
+  closes the transport/server. They are bound to the initializing credential; another
+  credential's id is `404` for tools and `DELETE`, and a foreign DELETE leaves the
+  owner's session intact. Sessions are lost on restart and are not shared across
+  processes. The bearer token is not passed to the SDK (`authInfo.token` is empty); the
+  SDK receives a credential-stripped request plus the derived principal, and each
+  request re-authenticates and re-authorizes through the service layer. A rejected
+  request does not close a revoked credential's session; it stays until eviction and
+  would become usable if the credential were reactivated. No session/authorization
+  cache exists.
 - **Token boundary.** Before the SDK sees a request, the adapter clones it and removes
   `Authorization`, `Proxy-Authorization`, and `Cookie`, so the SDK's
   `requestInfo.headers` exposed to tool handlers carries no credential material. A test
@@ -267,7 +271,8 @@ pushed.
   idempotency, changed-payload `CONFLICT`, cross-credential session `404`, `GET` `405`,
   `DELETE`, the 64 KiB cap, and schema rejection of client-supplied digest/idempotency
   arguments. Existing REST tests are unchanged.
-- **Post-audit hardening (audits PASSED tree `2a8b80c`).** Corrected the false claim that
+- **Post-audit hardening (re-audited and PASSED on final tree `31a542a`; initial
+  audits PASSED `2a8b80c`).** Corrected the false claim that
   the SDK could not see the bearer token: requests are now cloned with
   `Authorization`, `Proxy-Authorization`, and `Cookie` removed before
   `transport.handleRequest`, and a test observes the handler context. Added the bounded
@@ -567,9 +572,17 @@ Do not infer any of these from local MCP behavior or from another plan.
   unverified.
 - No human web session or OAuth yet.
 - No attachments or rate limiting. MCP session state is in-memory/process-local
-  (1024-session LRU cap, 30-minute idle TTL) with no cross-process/Workers sharing; a
-  restart drops sessions, and sessions of a revoked credential are not closed until
-  their next (rejected) request or eviction.
+  (1024-session LRU cap, lazy 30-minute idle TTL) with no cross-process/Workers sharing;
+  a restart drops sessions. A rejected request does not close a revoked credential's
+  session; it remains until eviction and can be reused if the credential is reactivated.
+- Slice-E audit debt: `withoutCredentials` relies on `Request.clone()` mutability and is
+  not Workers-portable (Workers is unimplemented; would need headers-copy construction);
+  the cap-eviction test does not distinguish LRU from FIFO; the header test does not
+  assert a benign sentinel survives; cache headers on 401/404/405/DELETE/413 and the
+  Node-adapter MCP 413 envelope are manually verified but not all committed as tests;
+  the global 1024-session cap lets one credential evict another's session (availability
+  only); `SessionEntry.sessionId` is dead; the MCP 413-before-auth ordering exception on
+  oversized unauthenticated POSTs needs explicit docs/tests.
 - No Workers adapter.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.

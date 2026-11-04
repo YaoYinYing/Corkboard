@@ -256,7 +256,7 @@ so there is no second authorization path and no cached authorization state.
   credential material.
 - Sessions are in-memory, process-local, and bound to the credential that initialized
   them; an id from another credential is `404`. The registry is capped at 1024
-  least-recently-used sessions with a 30-minute idle TTL; eviction closes the
+  least-recently-used sessions with a lazy 30-minute idle TTL; eviction closes the
   transport/server. Sessions are lost on restart and are not shared across processes.
 - A successful initialize returns `mcp-session-id`; later POST/DELETE require it.
   `DELETE` closes the session. `GET` returns `405` because server-initiated SSE is not

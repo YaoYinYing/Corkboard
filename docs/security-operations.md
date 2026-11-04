@@ -138,18 +138,19 @@ written) is not prevented; no stronger guarantee is claimed. See
 - `/mcp` requires the same scoped `Authorization: Bearer cb_...` credential as REST.
   Authentication happens before any MCP protocol handling or session creation; a
   missing/invalid credential receives `401` and no session id.
-- The bearer token is never passed to the SDK, tool result, log, or audit. The SDK
-  receives only the derived principal (speaker, account, credential id, scopes).
-  Before a request reaches the SDK, the adapter clones it and removes `Authorization`,
-  `Proxy-Authorization`, and `Cookie`; the `requestInfo.headers` exposed to tool
-  handlers therefore contains no credential material. A regression test observes the
+- The bearer token is never passed to the SDK, tool result, log, or audit. The SDK does
+  receive the sanitized request (URL, body, non-credential headers) plus the derived
+  principal (speaker, account, credential id, scopes). Before a request reaches the
+  SDK, the adapter clones it and removes `Authorization`, `Proxy-Authorization`, and
+  `Cookie`; the `requestInfo.headers` exposed to tool handlers therefore contains no
+  credential material. A regression test observes the
   handler context and asserts those headers are absent.
 - Sessions are in-memory, process-local, bound to the initializing credential, and lost
   on restart. Another credential's session id is `404`, including for `DELETE` (the
   owner's session survives). The registry is capped at 1024 sessions with
-  least-recently-used eviction and a 30-minute idle TTL; eviction closes the
-  transport/server. There is no cross-process persistence and no additional rate
-  limiting.
+  least-recently-used eviction and a lazy 30-minute idle TTL swept on the next
+  authenticated `/mcp` request; eviction closes the transport/server. There is no
+  cross-process persistence and no additional rate limiting.
 - Every `/mcp` response, including SDK JSON and protocol errors, carries
   `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 - Every tool reuses the service authorization path and per-request credential/grant/

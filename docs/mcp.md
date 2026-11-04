@@ -36,16 +36,19 @@ Corkboard error envelope `{ "error": { "code": "UNAUTHENTICATED", ... } }` and n
 denied by the same service checks used by REST.
 
 The bearer token is never echoed in a tool result, log entry, or error. The transport
-receives only the derived principal (speaker, account, credential id, scopes), not the
-token value. Before a request enters the SDK, the adapter clones it and removes
-`Authorization`, `Proxy-Authorization`, and `Cookie`, so the SDK's
-`requestInfo.headers` exposed to tool handlers contains no credential material.
+receives the derived principal (speaker, account, credential id, scopes) and a
+credential-stripped request, never the token value. Before a request enters the SDK,
+the adapter clones it and removes `Authorization`, `Proxy-Authorization`, and `Cookie`,
+so the SDK's `requestInfo.headers` exposed to tool handlers contains no credential
+material.
 
 The REST request-body cap (64 KiB) also applies to `POST /mcp`. Through the Node adapter,
 an oversized body is rejected by the adapter with the standard Corkboard `413`
-`REQUEST_TOO_LARGE` envelope before the core sees it. When a Web `Request` is handed
-directly to the core, the SDK transport returns a `413` JSON-RPC error. In both cases no
-tool argument is parsed.
+`REQUEST_TOO_LARGE` envelope before the core sees it. Because the adapter reads the body
+before routing, an oversized **unauthenticated** POST therefore returns `413` rather than
+`401`; all in-cap unauthenticated requests return `401` before session creation. When a
+Web `Request` is handed directly to the core, the SDK transport returns a `413` JSON-RPC
+error. In both cases no tool argument is parsed.
 
 Every `/mcp` response carries `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`, including SDK JSON responses and protocol/auth
@@ -66,16 +69,19 @@ The endpoint is stateful and in-memory:
   credential cannot reuse the id (including `DELETE`, which returns `404` and leaves the
   owner's session intact).
 - The registry is process-local and bounded at **1024 concurrent sessions**; creating a
-  session above the cap evicts the least-recently-used session. A session with no
-  request for **30 minutes** is evicted. Eviction closes its transport/server; its id
-  then behaves as unknown (`404`).
+  session above the cap evicts the least-recently-used session. A session idle for
+  **30 minutes** is evicted lazily, when the next authenticated `/mcp` request sweeps the
+  registry; there is no background timer, so an idle process can retain up to the cap.
+  Eviction closes its transport/server; its id then behaves as unknown (`404`), and the
+  client must initialize again.
 - Sessions are lost on restart and are not shared across processes or Workers isolates.
 - No auth state is cached: each HTTP request re-authenticates the bearer credential and
   each tool re-authorizes the project through the service layer. A revoked or expired
   credential on an existing session gets HTTP `401` and no JSON-RPC result, because the
-  router rejects it before the transport. Its session remains registered until used (and
-  rejected) or evicted; unauthenticated requests carry no trusted identity with which to
-  close it early.
+  router rejects it before the transport. The rejected request does **not** close the
+  session: the entry stays registered until cap/idle eviction and would become usable
+  again if the credential were reactivated first. Unauthenticated requests carry no
+  trusted identity with which to close it early.
 
 No WebSocket transport is implemented. No rate limiting beyond existing behavior is
 added; authenticated clients can create sessions.
@@ -172,7 +178,7 @@ size) use the normal Corkboard JSON error envelope.
 The tool accepts the same service limits as REST: summary ≤140 graphemes and ≤1024 UTF-8
 bytes; text ≤2000 graphemes and ≤8192 UTF-8 bytes; canonical BCP 47 language; type
 matching `^[a-z][a-z0-9_.-]{0,31}$`; `reply_to_id` must be a committed message in the
-same project. `limit` is 1–100. The whole HTTP request is capped at 64 KiB.
+same project. `limit` is 1–100. The HTTP request **body** is capped at 64 KiB.
 
 ## Local client configuration
 

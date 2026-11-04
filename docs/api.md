@@ -341,7 +341,7 @@ arguments cannot set sender, timestamps, `body_digest`, or `idempotency_key`; th
 trusted adapter computes/derives them. `POST` initializes and calls; `DELETE` terminates
 a session; `GET` returns `405` because server-initiated SSE is not offered. Sessions are
 in-memory, bound to the initializing credential, capped at 1024 with least-recently-used
-eviction and a 30-minute idle TTL, and lost on restart. All `/mcp` responses carry
+eviction and a lazy 30-minute idle TTL, and lost on restart. All `/mcp` responses carry
 `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. The request body cap is
 64 KiB. Full schemas, idempotency derivation, error codes, and limitations are in
 [`mcp.md`](./mcp.md).

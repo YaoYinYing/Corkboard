@@ -131,8 +131,9 @@ OAuth 2.1/PKCE, ChatGPT Web plugin installation/linking, and conversation-level 
 tool invocation are **not implemented or verified** in this slice. Do not document or
 claim them. See [`mcp.md`](./mcp.md).
 
-Sessions are in-memory, capped at **1024 concurrent sessions** (the oldest is evicted
-first), and expire after **30 minutes idle**. Eviction closes the transport/server.
+Sessions are in-memory, capped at **1024 concurrent sessions** (least-recently-used is
+evicted first), and a session idle for **30 minutes** is evicted on the next
+authenticated `/mcp` request (lazy sweep, no timer). Eviction closes the transport/server.
 Sessions are lost on restart and are not shared across processes; clients must
 initialize again. There is no cross-process session persistence.
 
