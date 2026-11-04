@@ -577,11 +577,15 @@ pushed.
   existing REST/MCP APIs, refreshes with rotation, and revokes. No API key or client
   secret exists in the flow. The ChatGPT Web plugin installation/sharing experience and
   conversation-level ChatGPT invocation are not implemented or verified.
-- **Migration 004.** `oauth_clients`, `oauth_authorization_codes`, and
-  `oauth_refresh_tokens` with foreign keys and lookup indexes. Registered
-  `grant_types`/`response_types` are persisted; each code records the issuing
-  `session_id`. Codes and refresh tokens are stored only as a public prefix plus a
-  keyed HMAC verifier; no plaintext token, code, verifier, or client secret is stored.
+- **Migration 004.** `oauth_clients`, `oauth_authorization_codes`,
+  `oauth_refresh_tokens`, and `oauth_token_clients` with foreign keys and lookup
+  indexes. Registered `grant_types`/`response_types` are persisted; each code records
+  the issuing `session_id`; `oauth_token_clients` records which public client owns an
+  access credential even when no refresh row exists. Codes and refresh tokens are
+  stored only as a public prefix plus a keyed HMAC verifier; no plaintext token, code,
+  verifier, or client secret is stored. The migration was revised in place before any
+  release and was never on `origin/main`; no supported installation has the pre-fix v4
+  shape, and such an unreleased database must be recreated rather than upgraded.
   Applies on a fresh database and on a migration-003 database.
 - **Client registration.** `POST /oauth/register` accepts bounded JSON, public clients
   only (`token_endpoint_auth_method=none`), 1–10 exact absolute HTTPS redirect URIs
@@ -602,9 +606,10 @@ pushed.
   redirect, ownership, account/speaker/project status, membership, and capabilities,
   and issues a 5-minute single-use code. The form's mandatory `requested_scope` and
   `request_signature` are verified against a server HMAC of every authorization-request
-  field before the selected scopes are checked as a subset, so a consent POST cannot
-  add or misdeclare a scope. Deny redirects `access_denied` with no code. OAuth can
-  never grant `project.edit`, member scopes, or `receipt.write`.
+  field (including the issuing session id) before the selected scopes are checked as a
+  subset, so a consent POST cannot add or misdeclare a scope or replay another
+  session's form. Deny redirects `access_denied` with no code. OAuth can never grant
+  `project.edit`, member scopes, or `receipt.write`.
 - **Token endpoint.** Form-encoded only. Authorization code exchange verifies the exact
   client, registered redirect, resource, PKCE S256 (keyed HMAC over code + challenge at
   fixed length), code expiry, and single use via a conditional `UPDATE`, then
@@ -626,7 +631,9 @@ pushed.
 - **Revocation.** `POST /oauth/revoke` is RFC 7009 form-encoded and always returns
   `200` for a well-formed request: unknown tokens, wrong clients, and ordinary speaker
   tokens are no-ops. A refresh token revokes its family and credential; an OAuth access
-  token revokes the credential and families for the matching client.
+  token revokes the credential and families for the matching client, using the durable
+  `oauth_token_clients` association so code-only clients are revocable too. A global
+  process-local limiter (60/minute, burst 20) returns `429` only above the limit.
 - **Configuration.** `CORKBOARD_PUBLIC_BASE_URL` must be a plain `https` origin. Unset
   disables every OAuth route with a fixed `503`; invalid fails startup before the data
   directory is created/opened/chmodded. Discovery, issuer, and `resource` all derive
@@ -639,24 +646,26 @@ pushed.
   is `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 - **Metrics/logging.** Fixed route labels for the OAuth paths; no client IDs, scopes,
   codes, tokens, cookies, CSRF values, or form bodies are logged or used as labels.
-- **Tests.** New `tests/security/oauth.test.ts` (29 tests) and
-  `tests/integration/oauth.test.ts` (3 tests through real `startServer()`), plus
+- **Tests.** New `tests/security/oauth.test.ts` (31 tests) and
+  `tests/integration/oauth.test.ts` (5 tests through real `startServer()`), plus
   migration 004 contract coverage for fresh and 003→004 databases. Coverage includes
   redirect mismatch/open redirect, PKCE wrong/missing/replay, code expiry/replay and
   binding to client/redirect/resource/account/speaker/project/membership/issuing
-  session, consent without session/CSRF, mandatory signed `requested_scope` with
-  forged/missing/subset escalation rejected, scope escalation
+  session (including absolute and idle expiry), consent without session/CSRF,
+  mandatory signed `requested_scope` with forged/missing/subset escalation rejected
+  and cross-session replay rejected, scope escalation
   (`project.edit`/member scopes), another account's speaker/project, invalid DCR
   metadata and oversized/duplicate redirects plus redirect count/length boundaries,
   code-only grant registration behavior, discovery secrecy, access-token use on REST
   and MCP with exact scopes, refresh rotation and reuse revocation, RFC 7009
-  no-oracle behavior including a no-op speaker token, injected-clock per-client and
-  global rate limits, DB-only verifier storage, log secrecy, HTML escaping/CSP, fixed
+  no-oracle behavior including a no-op speaker token and code-only access-token
+  revocation, injected-clock per-client and global rate limits plus revocation
+  limiting, DB-only verifier storage, log secrecy, HTML escaping/CSP, fixed
   metrics labels, `return_to` control-character rejection, content-type enforcement,
   and an end-to-end HTTP flow.
-- **Limitations.** Process-local OAuth registration, per-client, and global token
-  buckets. Concurrent refresh with the same token races and may revoke the family.
-  Codes/refresh rows are not automatically purged. No CORS, JWT/OIDC,
+- **Limitations.** Process-local OAuth registration, per-client, global token, and
+  revocation buckets. Concurrent refresh with the same token races and may revoke the
+  family. Codes/refresh rows are not automatically purged. No CORS, JWT/OIDC,
   implicit/client-credentials/device flows, consent management UI, or admin OAuth
   endpoints. ChatGPT Web, D1/Workers, and real browser verification remain
   external/unverified. Independent review is pending.
@@ -904,8 +913,8 @@ Do not infer any of these from local MCP behavior or from another plan.
   conversation-level ChatGPT tool invocation remain unimplemented and unverified. A
   session cannot act as a speaker credential; an OAuth access token is a speaker
   credential, not a session.
-- Slice-J audit debt (candidate, non-blocking): OAuth registration, per-client, and
-  global token-exchange limits are process-local and reset on restart; concurrent
+- Slice-J audit debt (candidate, non-blocking): OAuth registration, per-client,
+  global token-exchange, and revocation limits are process-local and reset on restart; concurrent
   refresh with the same token can revoke a family; expired/rotated OAuth rows are never
   purged; the consent form requires JavaScript to send the CSRF header (a `<noscript>`
   notice is shown); no CORS, JWT/OIDC, introspection, consent-management UI, or admin

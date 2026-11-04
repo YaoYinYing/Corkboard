@@ -197,6 +197,7 @@ export async function validateSession(
 export async function sessionIsActiveById(
   deps: ServiceDeps,
   sessionId: string,
+  accountId: string,
 ): Promise<boolean> {
   if (
     typeof sessionId !== "string" ||
@@ -209,8 +210,8 @@ export async function sessionIsActiveById(
     `SELECT s.revoked_at, s.last_seen_at, s.expires_at, a.status AS account_status
        FROM sessions s
        JOIN accounts a ON a.id = s.account_id
-      WHERE s.id = ?`,
-    [sessionId],
+      WHERE s.id = ? AND s.account_id = ?`,
+    [sessionId, accountId],
   );
   return row !== undefined && sessionRowIsActive(row, deps.now());
 }

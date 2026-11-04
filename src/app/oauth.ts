@@ -66,6 +66,7 @@ export interface OAuthRouteOptions {
   tokenLimiter: RateLimiter;
   /** Global token-endpoint bucket so rotating client_id cannot bypass limits. */
   tokenGlobalLimiter: RateLimiter;
+  revokeLimiter: RateLimiter;
 }
 
 export function isOAuthPath(segments: readonly string[]): boolean {
@@ -477,6 +478,7 @@ async function handleAuthorize(
     codeChallenge: parsed.codeChallenge,
     resource: parsed.resource,
     scopes: parsed.scopes,
+    sessionId: session.sessionId,
   });
   return consentPage(
     clientId,
@@ -683,6 +685,7 @@ async function handleConsent(
     codeChallenge,
     resource,
     scopes: requested,
+    sessionId: session.sessionId,
   };
   if (
     !(await verifyAuthorizationRequestSignature(deps.pepper, signed, signature))
@@ -792,6 +795,8 @@ async function handleRevoke(
   ) {
     throw new OAuthTokenError("invalid_request");
   }
+  const decision = options.revokeLimiter.check("oauth:revoke");
+  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
   await revokeOAuthToken(deps, { clientId, token });
   return new Response(null, {
     status: 200,
@@ -893,6 +898,7 @@ export async function handleOAuthRoute(
 // Re-exported for the Node adapter's startup validation and tests.
 export {
   DEFAULT_OAUTH_REGISTER_RATE_LIMIT,
+  DEFAULT_OAUTH_REVOKE_RATE_LIMIT,
   DEFAULT_OAUTH_TOKEN_GLOBAL_RATE_LIMIT,
   DEFAULT_OAUTH_TOKEN_RATE_LIMIT,
   isValidRedirectUri,

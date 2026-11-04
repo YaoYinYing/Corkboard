@@ -201,9 +201,11 @@ It re-reads the client, exact redirect URI, S256 challenge, resource, speaker
 ownership, active speaker/account/project, and the active membership's capabilities
 from storage. The submitted form is never trusted for authorization. The form also
 carries a server-issued HMAC over the client, redirect, state, challenge, resource,
-and requested scope set; `requested_scope` and `request_signature` are mandatory and
-must verify before a code is issued. A consent submission that omits or forges either
-field, or selects/claims a scope outside the signed request, is rejected with `400`.
+requested scope set, and issuing session id; `requested_scope` and
+`request_signature` are mandatory and must verify before a code is issued. The
+session binding prevents replaying a signature obtained in one session into another.
+A consent submission that omits or forges either field, or selects/claims a scope
+outside the signed request, is rejected with `400`.
 Selecting an unowned speaker, a project without an active membership, or a scope the
 membership does not hold returns `403` and issues no code.
 
@@ -295,6 +297,9 @@ are never logged.
   revocation/expiry behavior is unchanged.
 - Missing/duplicate parameters, an unsupported content type, or a token longer than
   4096 characters return `400 {"error":"invalid_request"}`.
+- Revocation is unauthenticated, so it has a process-local global bucket
+  (**60 requests/minute, burst 20**). A request above the limit returns `429`; under
+  the limit the RFC 7009 `200` behavior is unchanged. Not distributed.
 
 ## Access-token behavior on REST and MCP
 
@@ -319,7 +324,7 @@ They authenticate through the existing `authenticateBearer`, so:
   `Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self';
   form-action 'self'; base-uri 'none'; frame-ancestors 'none'` and
   `Referrer-Policy: no-referrer`.
-- Request logs retain method, path, status, duration, `request_id`, `error_code`, and
+- Request logs retain method, path, status, duration, `requestId`, `errorCode`, and
   actor IDs only. OAuth query strings, form bodies, codes, tokens, cookies, CSRF
   values, client IDs, and scopes are never logged.
 - Metrics use fixed route labels (`/.well-known/oauth-*`, `/oauth/register`,
@@ -341,6 +346,15 @@ Migration `004_oauth.sql` adds:
 - `oauth_refresh_tokens(id, family_id, client_id, credential_id, token_prefix,
   token_verifier, created_at, expires_at, revoked_at, rotated_at)` — prefix + keyed
   HMAC verifier only; rotation and reuse detection columns.
+- `oauth_token_clients(credential_id PK, client_id, created_at)` — durable client
+  ownership of an access credential, so revocation does not depend on a refresh row
+  (code-only clients mint none).
+
+Migration 004 was revised in place while slice J was unreleased and never on
+`origin/main`. No supported installation has a v4 database with the pre-fix shape
+(missing `grant_types_json`, `response_types_json`, `session_id`, or
+`oauth_token_clients`); a database created by an unreleased pre-fix build must be
+recreated, not upgraded in place. Fresh and migration-003 databases are tested.
 
 Access tokens reuse `credentials` and `credential_project_grants`; refresh replaces
 that credential's prefix/verifier/expiry in place. The database stores no raw code,

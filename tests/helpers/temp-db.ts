@@ -203,6 +203,7 @@ const TABLES = [
   "oauth_clients",
   "oauth_authorization_codes",
   "oauth_refresh_tokens",
+  "oauth_token_clients",
 ];
 
 /**

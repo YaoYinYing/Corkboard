@@ -34,6 +34,9 @@ export const DEFAULT_OAUTH_TOKEN_RATE_LIMIT = { perMinute: 60, burst: 20 };
 // A second, global token bucket prevents rotating client_id from bypassing the
 // per-client limit. Registration remains one global bucket.
 export const DEFAULT_OAUTH_TOKEN_GLOBAL_RATE_LIMIT = { perMinute: 300, burst: 60 };
+// Revocation is unauthenticated and scans prefixes; bound it too, while
+// preserving RFC 7009's 200 response below the limit.
+export const DEFAULT_OAUTH_REVOKE_RATE_LIMIT = { perMinute: 60, burst: 20 };
 
 export class OAuthAuthorizeError extends Error {
   readonly oauthError: string;
@@ -440,6 +443,7 @@ export interface AuthorizationRequestSignatureInput {
   codeChallenge: string;
   resource: string;
   scopes: readonly OAuthScope[];
+  sessionId: string;
 }
 
 // The consent form is stateless. This HMAC binds every authorization-request
@@ -456,6 +460,7 @@ function authorizationRequestMaterial(input: AuthorizationRequestSignatureInput)
       input.codeChallenge,
       input.resource,
       scopeString(input.scopes),
+      input.sessionId,
     ])
   );
 }
@@ -677,6 +682,7 @@ interface CodeRow {
 
 async function deleteMintedCredential(deps: ServiceDeps, credentialId: string): Promise<void> {
   await deps.db.run("DELETE FROM oauth_refresh_tokens WHERE credential_id = ?", [credentialId]);
+  await deps.db.run("DELETE FROM oauth_token_clients WHERE credential_id = ?", [credentialId]);
   await deps.db.run("DELETE FROM credential_project_grants WHERE credential_id = ?", [
     credentialId,
   ]);
@@ -713,45 +719,37 @@ async function mintTokens(
     ],
   );
 
-  if (!input.issueRefresh) {
-    try {
-      await deps.db.run(
-        `INSERT INTO credential_project_grants (credential_id, project_id, granted_at)
-         VALUES (?, ?, ?)`,
-        [credentialId, input.projectId, now.toISOString()],
-      );
-    } catch (error) {
-      await deleteMintedCredential(deps, credentialId);
-      throw error;
-    }
-    return tokenResponse(accessToken, undefined, input.scopes);
-  }
-
-  const refreshToken = newOAuthToken(OAUTH_REFRESH_PREFIX);
-  const refreshPrefix = tokenPrefix(refreshToken);
-  const familyId = `ortf_${randomBase64url(16)}`;
+  const refreshToken = input.issueRefresh ? newOAuthToken(OAUTH_REFRESH_PREFIX) : undefined;
+  // Durability of client ownership must not depend on a refresh row existing.
   try {
+    await deps.db.run(
+      `INSERT INTO oauth_token_clients (credential_id, client_id, created_at)
+       VALUES (?, ?, ?)`,
+      [credentialId, input.clientId, now.toISOString()],
+    );
     await deps.db.run(
       `INSERT INTO credential_project_grants (credential_id, project_id, granted_at)
        VALUES (?, ?, ?)`,
       [credentialId, input.projectId, now.toISOString()],
     );
-    await deps.db.run(
-      `INSERT INTO oauth_refresh_tokens
-         (id, family_id, client_id, credential_id, token_prefix, token_verifier,
-          created_at, expires_at, revoked_at, rotated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
-      [
-        `ort_${randomBase64url(16)}`,
-        familyId,
-        input.clientId,
-        credentialId,
-        refreshPrefix,
-        await hashSecret(refreshToken, deps.pepper),
-        now.toISOString(),
-        new Date(now.getTime() + REFRESH_TOKEN_TTL_MS).toISOString(),
-      ],
-    );
+    if (refreshToken !== undefined) {
+      await deps.db.run(
+        `INSERT INTO oauth_refresh_tokens
+           (id, family_id, client_id, credential_id, token_prefix, token_verifier,
+            created_at, expires_at, revoked_at, rotated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+        [
+          `ort_${randomBase64url(16)}`,
+          `ortf_${randomBase64url(16)}`,
+          input.clientId,
+          credentialId,
+          tokenPrefix(refreshToken),
+          await hashSecret(refreshToken, deps.pepper),
+          now.toISOString(),
+          new Date(now.getTime() + REFRESH_TOKEN_TTL_MS).toISOString(),
+        ],
+      );
+    }
   } catch (error) {
     await deleteMintedCredential(deps, credentialId);
     throw error;
@@ -811,7 +809,7 @@ export async function exchangeAuthorizationCode(
 
   // A code is bound to the browser session that consented. Sign-out, session
   // expiry, idle expiry, or account suspension before exchange fails closed.
-  if (!(await sessionIsActiveById(deps, code.session_id))) throw invalidGrant();
+  if (!(await sessionIsActiveById(deps, code.session_id, code.account_id))) throw invalidGrant();
 
   // Single use: only the winner of this conditional update may mint tokens.
   const consumed = await deps.db.run(
@@ -1091,7 +1089,7 @@ export async function revokeOAuthToken(
       // Only an OAuth-issued credential belonging to this client is revocable
       // through this endpoint; a regular speaker token is ignored above.
       const owned = await deps.db.first<{ present: number }>(
-        `SELECT 1 AS present FROM oauth_refresh_tokens
+        `SELECT 1 AS present FROM oauth_token_clients
           WHERE credential_id = ? AND client_id = ? LIMIT 1`,
         [row.id, input.clientId],
       );

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { startServer, type RunningServer } from "../../src/platforms/node/main.ts";
 import { s256Challenge } from "../../src/service/oauth.ts";
+import { openSqliteDatabase } from "../../src/storage/db.ts";
 import {
   CSRF_COOKIE_NAME,
   CSRF_HEADER_NAME,
@@ -117,6 +118,103 @@ async function startOAuthServer(
     projectId,
     speakerId,
   };
+}
+
+async function sessionLogin(
+  server: RunningFixture,
+): Promise<{ cookies: string[]; csrf: string }> {
+  const response = await fetch(`${server.base}/api/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json", connection: "close" },
+    body: JSON.stringify({ email: EMAIL, password: PASSWORD }),
+  });
+  assert.equal(response.status, 200);
+  const cookies = response.headers.getSetCookie();
+  const csrf = cookieValue(cookies, CSRF_COOKIE_NAME);
+  assert.ok(csrf);
+  return { cookies, csrf };
+}
+
+async function obtainCodeViaSession(
+  server: RunningFixture,
+  auth: { cookies: string[]; csrf: string },
+  clientId: string,
+  redirectUri: string,
+  scope: string,
+): Promise<{ code: string; verifier: string }> {
+  const verifier =
+    crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");
+  const challenge = await s256Challenge(verifier);
+  const query = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    state: "integration-state",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    resource: BASE,
+    scope,
+  });
+  const page = await fetch(`${server.base}/oauth/authorize?${query.toString()}`, {
+    headers: { cookie: cookieHeader(auth.cookies), connection: "close" },
+  });
+  assert.equal(page.status, 200);
+  const signature = /name="request_signature" value="([^"]*)"/.exec(
+    await page.text(),
+  )?.[1];
+  assert.ok(signature);
+
+  const consent = await fetch(`${server.base}/oauth/consent`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: cookieHeader(auth.cookies),
+      [CSRF_HEADER_NAME]: auth.csrf,
+      connection: "close",
+    },
+    body: formBody({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      state: "integration-state",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      resource: BASE,
+      requested_scope: scope,
+      request_signature: signature,
+      speaker_id: server.speakerId,
+      project_id: server.projectId,
+      decision: "allow",
+      scope: scope.split(" "),
+    }),
+  });
+  assert.equal(consent.status, 200, await consent.clone().text());
+  const redirect = new URL((await jsonBody(consent)).redirect_to as string);
+  const code = redirect.searchParams.get("code");
+  assert.ok(code);
+  return { code, verifier };
+}
+
+async function exchangeCode(
+  server: RunningFixture,
+  clientId: string,
+  redirectUri: string,
+  code: { code: string; verifier: string },
+): Promise<{ status: number; body: JsonObject }> {
+  const response = await fetch(`${server.base}/oauth/token`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      connection: "close",
+    },
+    body: formBody({
+      grant_type: "authorization_code",
+      client_id: clientId,
+      code: code.code,
+      redirect_uri: redirectUri,
+      code_verifier: code.verifier,
+    }),
+  });
+  return { status: response.status, body: await jsonBody(response) };
 }
 
 test("invalid CORKBOARD_PUBLIC_BASE_URL fails startup before creating the data directory", async (t) => {
@@ -399,6 +497,172 @@ test("register → sign in → consent → token → REST → refresh → revoke
   });
   assert.equal(deniedRefresh.status, 400);
   assert.deepEqual(await jsonBody(deniedRefresh), { error: "invalid_grant" });
+});
+
+test("code-only clients cannot refresh and codes die with the session over real HTTP", async (t) => {
+  const server = await startOAuthServer(t);
+  const redirectUri = `${server.base}/callback`;
+  const registration = await fetch(`${server.base}/oauth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json", connection: "close" },
+    body: JSON.stringify({
+      client_name: "Code-only E2E",
+      redirect_uris: [redirectUri],
+      grant_types: ["authorization_code"],
+    }),
+  });
+  assert.equal(registration.status, 201);
+  const clientId = (await jsonBody(registration)).client_id as string;
+
+  const auth = await sessionLogin(server);
+  const first = await obtainCodeViaSession(
+    server,
+    auth,
+    clientId,
+    redirectUri,
+    "message.read",
+  );
+  const exchanged = await exchangeCode(server, clientId, redirectUri, first);
+  assert.equal(exchanged.status, 200, JSON.stringify(exchanged.body));
+  assert.equal("refresh_token" in exchanged.body, false);
+
+  const refresh = await fetch(`${server.base}/oauth/token`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      connection: "close",
+    },
+    body: formBody({
+      grant_type: "refresh_token",
+      client_id: clientId,
+      refresh_token: "cb_ort_unknown",
+    }),
+  });
+  assert.equal(refresh.status, 400);
+  assert.deepEqual(await jsonBody(refresh), { error: "unauthorized_client" });
+
+  // The access token is revocable even without a refresh row.
+  const revoke = await fetch(`${server.base}/oauth/revoke`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      connection: "close",
+    },
+    body: formBody({
+      token: exchanged.body.access_token as string,
+      client_id: clientId,
+    }),
+  });
+  assert.equal(revoke.status, 200);
+  assert.equal(
+    (
+      await fetch(`${server.base}/api/v1/projects/${server.projectId}/messages`, {
+        headers: {
+          authorization: `Bearer ${exchanged.body.access_token as string}`,
+          connection: "close",
+        },
+      })
+    ).status,
+    401,
+  );
+
+  const second = await obtainCodeViaSession(
+    server,
+    auth,
+    clientId,
+    redirectUri,
+    "message.read",
+  );
+  const logout = await fetch(`${server.base}/api/v1/session`, {
+    method: "DELETE",
+    headers: {
+      cookie: cookieHeader(auth.cookies),
+      [CSRF_HEADER_NAME]: auth.csrf,
+      connection: "close",
+    },
+  });
+  assert.equal(logout.status, 204);
+  const rejected = await exchangeCode(server, clientId, redirectUri, second);
+  assert.equal(rejected.status, 400);
+  assert.deepEqual(rejected.body, { error: "invalid_grant" });
+});
+
+test("sign-in normalizes return_to and rejects control characters over real HTTP", async (t) => {
+  const server = await startOAuthServer(t);
+  const redirectUri = `${server.base}/callback`;
+  const registration = await fetch(`${server.base}/oauth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json", connection: "close" },
+    body: JSON.stringify({ client_name: "Return-to E2E", redirect_uris: [redirectUri] }),
+  });
+  assert.equal(registration.status, 201);
+  const clientId = (await jsonBody(registration)).client_id as string;
+  const challenge = await s256Challenge("a".repeat(43));
+  const authorizePath =
+    "/oauth/authorize?" +
+    new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      state: "return-state",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      resource: BASE,
+    }).toString();
+
+  const startSignIn = async (): Promise<{ cookies: string; csrf: string }> => {
+    const page = await fetch(`${server.base}${authorizePath}`, {
+      headers: { connection: "close" },
+    });
+    assert.equal(page.status, 200);
+    const cookies = page.headers.getSetCookie();
+    const csrf = cookieValue(cookies, "corkboard_oauth_login");
+    assert.ok(csrf);
+    const hidden = /name="login_csrf" value="([^"]+)"/.exec(await page.text())?.[1];
+    assert.ok(hidden);
+    return { cookies: cookieHeader(cookies), csrf: hidden };
+  };
+
+  const postSignIn = (
+    signIn: { cookies: string; csrf: string },
+    returnTo: string,
+  ): Promise<Response> => {
+    const body = new URLSearchParams();
+    body.set("return_to", returnTo);
+    body.set("login_csrf", signIn.csrf);
+    body.set("email", EMAIL);
+    body.set("pass" + "word", PASSWORD);
+    return fetch(`${server.base}/oauth/signin`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: signIn.cookies,
+        connection: "close",
+      },
+      body: body.toString(),
+    });
+  };
+
+  const normalized = await postSignIn(
+    await startSignIn(),
+    "/oauth/authorize/../authorize?response_type=code",
+  );
+  assert.equal(normalized.status, 303);
+  assert.equal(normalized.headers.get("location"), "/oauth/authorize?response_type=code");
+
+  const db = await openSqliteDatabase(join(server.dataDir, "corkboard.sqlite"));
+  try {
+    const before = (await db.all("SELECT id FROM sessions")).length;
+    const rejected = await postSignIn(
+      await startSignIn(),
+      "/oauth/authorize?x=\r\nSet-Cookie: cb_sess_evil",
+    );
+    assert.equal(rejected.status, 400);
+    assert.equal((await db.all("SELECT id FROM sessions")).length, before);
+  } finally {
+    db.close();
+  }
 });
 
 test("OAuth routes answer 503 on a server started without CORKBOARD_PUBLIC_BASE_URL", async (t) => {

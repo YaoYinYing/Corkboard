@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
   rotated_at TEXT
 );
 
+-- Durable client ownership of an OAuth access credential. Refresh tokens are
+-- absent for clients registered with only authorization_code, so revocation
+-- cannot rely on them to prove which client may revoke the credential.
+CREATE TABLE IF NOT EXISTS oauth_token_clients (
+  credential_id TEXT PRIMARY KEY NOT NULL REFERENCES credentials (id),
+  client_id TEXT NOT NULL REFERENCES oauth_clients (client_id),
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_oauth_clients_status
   ON oauth_clients (status);
 CREATE INDEX IF NOT EXISTS idx_oauth_authorization_codes_prefix

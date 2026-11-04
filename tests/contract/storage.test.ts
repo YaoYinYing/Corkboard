@@ -293,6 +293,7 @@ test("an existing v3 database receives migration 004 OAuth tables", async (t) =>
       "oauth_clients",
       "oauth_authorization_codes",
       "oauth_refresh_tokens",
+      "oauth_token_clients",
     ]) {
       const row = await db.first<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -404,8 +405,20 @@ test("built adapter opens its bundled migration from dist", async (t) => {  cons
   const script = `
 import { openSqliteDatabase } from ${JSON.stringify(moduleUrl)};
 const db = await openSqliteDatabase(${JSON.stringify(dbPath)});
-const row = await db.first("SELECT version FROM schema_migrations WHERE version = 3");
-if (row === undefined) throw new Error("migration not applied");
+const version = await db.first("SELECT version FROM schema_migrations WHERE version = 4");
+if (version === undefined) throw new Error("migration 004 not applied");
+const codeColumns = (await db.all("PRAGMA table_info(oauth_authorization_codes)")).map((c) => c.name);
+const clientColumns = (await db.all("PRAGMA table_info(oauth_clients)")).map((c) => c.name);
+for (const name of ["session_id"]) {
+  if (!codeColumns.includes(name)) throw new Error("missing code column " + name);
+}
+for (const name of ["grant_types_json", "response_types_json"]) {
+  if (!clientColumns.includes(name)) throw new Error("missing client column " + name);
+}
+const index = await db.first("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_oauth_authorization_codes_session'");
+if (index === undefined) throw new Error("missing session index");
+const ownership = await db.first("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oauth_token_clients'");
+if (ownership === undefined) throw new Error("missing oauth_token_clients");
 db.close();
 `;
   execFileSync(process.execPath, ["--input-type=module", "-e", script], {

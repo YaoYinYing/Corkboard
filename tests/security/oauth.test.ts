@@ -716,6 +716,30 @@ test("codes expire and exchange revalidates account, speaker, project, and membe
   assert.deepEqual((await exchange(setupValue, expired)).body, { error: "invalid_grant" });
   setupValue.fx.setNow(start);
 
+  // Absolute session expiry.
+  const absolute = await obtainCode(setupValue);
+  await setupValue.fx.db.run(
+    "UPDATE sessions SET expires_at = ? WHERE revoked_at IS NULL",
+    [new Date(start.getTime() - 1000).toISOString()],
+  );
+  assert.deepEqual((await exchange(setupValue, absolute)).body, { error: "invalid_grant" });
+  await setupValue.fx.db.run(
+    "UPDATE sessions SET expires_at = ? WHERE revoked_at IS NULL",
+    [new Date(start.getTime() + 12 * 60 * 60 * 1000).toISOString()],
+  );
+
+  // Idle session expiry.
+  const idle = await obtainCode(setupValue);
+  await setupValue.fx.db.run(
+    "UPDATE sessions SET last_seen_at = ? WHERE revoked_at IS NULL",
+    [new Date(start.getTime() - 31 * 60 * 1000).toISOString()],
+  );
+  assert.deepEqual((await exchange(setupValue, idle)).body, { error: "invalid_grant" });
+  await setupValue.fx.db.run(
+    "UPDATE sessions SET last_seen_at = ? WHERE revoked_at IS NULL",
+    [start.toISOString()],
+  );
+
   const suspended = await obtainCode(setupValue);
   await setupValue.fx.db.run("UPDATE accounts SET status = 'suspended' WHERE id = 'acct_owner'");
   assert.equal((await exchange(setupValue, suspended)).status, 400);
@@ -1067,6 +1091,56 @@ test("consent requires a signed requested scope and rejects an added scope", asy
   );
 });
 
+test("a consent signature cannot be replayed into another session", async (t) => {
+  const setupValue = await setup(t);
+  const auth = await authorization({ clientId: setupValue.clientId });
+  const page = await getAuthorize(setupValue.app, auth.url, setupValue.cookies);
+  assert.equal(page.status, 200);
+  const signature = hiddenValue(await page.text(), "request_signature");
+  assert.ok(signature);
+
+  // A second valid session for the same account did not render this request.
+  const otherCookies = await login(setupValue.app);
+  const response = await formCall(
+    setupValue.app,
+    "/oauth/consent",
+    consentForm({
+      clientId: setupValue.clientId,
+      state: auth.state,
+      challenge: auth.challenge,
+      requestSignature: signature,
+    }),
+    {
+      cookie: cookieHeader(otherCookies),
+      [CSRF_HEADER_NAME]: cookieValue(otherCookies, CSRF_COOKIE_NAME) ?? "",
+    },
+  );
+  assert.equal(response.status, 400);
+  assert.equal(
+    (await setupValue.fx.db.all("SELECT id FROM oauth_authorization_codes")).length,
+    0,
+  );
+});
+
+test("revocation is rate limited while well-formed requests keep 200", async (t) => {
+  let now = 0;
+  const setupValue = await setup(t, {
+    oauthRevokeRateLimit: { perMinute: 1, burst: 1 },
+    oauthRateLimitNow: () => now,
+  });
+  const revokeUnknown = () =>
+    formCall(
+      setupValue.app,
+      "/oauth/revoke",
+      new URLSearchParams({ token: "cb_ort_unknown", client_id: setupValue.clientId }),
+    );
+
+  assert.equal((await revokeUnknown()).status, 200);
+  assert.equal((await revokeUnknown()).status, 429);
+  now += 61_000;
+  assert.equal((await revokeUnknown()).status, 200);
+});
+
 test("a code-only client receives and can use no refresh token", async (t) => {
   const setupValue = await setup(t);
   const codeOnly = await registerClient(setupValue.app, {
@@ -1088,6 +1162,27 @@ test("a code-only client receives and can use no refresh token", async (t) => {
   });
   assert.equal(attempted.status, 400);
   assert.deepEqual(attempted.body, { error: "unauthorized_client" });
+
+  // The code-only client's access token is still revocable through RFC 7009
+  // even though no refresh row exists for it.
+  const access = exchanged.body.access_token as string;
+  const revoke = await formCall(
+    setupValue.app,
+    "/oauth/revoke",
+    new URLSearchParams({ token: access, client_id: clientId }),
+  );
+  assert.equal(revoke.status, 200);
+  const credential = await setupValue.fx.db.first<{ revoked_at: string | null }>(
+    `SELECT revoked_at FROM credentials WHERE id = (
+       SELECT credential_id FROM oauth_token_clients WHERE client_id = ?
+     )`,
+    [clientId],
+  );
+  assert.notEqual(credential?.revoked_at, null);
+  assert.equal(
+    (await rest(setupValue.app, "/api/v1/projects/proj_1/messages", access)).status,
+    401,
+  );
 });
 
 test("an authorization code dies with the session that issued it", async (t) => {

@@ -366,6 +366,19 @@ prevented regression; when to remove the advice.
 - **Prevents:** A stolen code remaining usable after the user revokes their session.
 - **Remove when:** Codes have an independent, equally strong approval lifetime bound.
 
+## 2026-11-04 — Revocation ownership cannot depend on refresh rows
+
+- **Failure:** Access-token revocation proved client ownership through
+  `oauth_refresh_tokens`. A client registered only for `authorization_code` mints no
+  refresh row, so revocation returned RFC 7009 success while leaving the credential
+  valid.
+- **Reproducer:** Register a code-only client, exchange a code, revoke the access
+  token, and call the API with it.
+- **Fix:** `oauth_token_clients` records the owning client for every minted access
+  credential; revocation authorizes from that durable association.
+- **Prevents:** Silent revocation failure for clients without refresh tokens.
+- **Remove when:** Every OAuth credential always has a refresh family (not expected).
+
 ## 2026-11-04 — Compiled server could not find its migrations
 
 - **Failure:** `db.ts` resolved the migration SQL relative to its module, so the built
