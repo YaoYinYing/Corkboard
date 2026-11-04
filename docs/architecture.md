@@ -251,11 +251,18 @@ the SDK sees the request, then calls `src/mcp/http.ts` with the derived `Princip
 Each request re-authenticates, and every tool calls the same service function as REST,
 so there is no second authorization path and no cached authorization state.
 
+- Requests entering the SDK are cloned and stripped of `Authorization`,
+  `Proxy-Authorization`, and `Cookie`, so the SDK's `requestInfo.headers` never carries
+  credential material.
 - Sessions are in-memory, process-local, and bound to the credential that initialized
-  them; an id from another credential is `404`.
+  them; an id from another credential is `404`. The registry is capped at 1024
+  least-recently-used sessions with a 30-minute idle TTL; eviction closes the
+  transport/server. Sessions are lost on restart and are not shared across processes.
 - A successful initialize returns `mcp-session-id`; later POST/DELETE require it.
   `DELETE` closes the session. `GET` returns `405` because server-initiated SSE is not
   offered (the spec permits this).
+- Every `/mcp` response carries `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`.
 - Tool arguments cannot set sender, timestamps, `body_digest`, or `idempotency_key`.
   The adapter computes the SHA-256 of the exact UTF-8 `text` and derives the
   idempotency key from `(session id, JSON-RPC request id, project id)`, documented in

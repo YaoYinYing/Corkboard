@@ -6,6 +6,22 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — Passing the original Request to an SDK leaks credential headers
+
+- **Failure:** The MCP adapter authenticated the bearer token, then handed the same
+  `Request` to `transport.handleRequest`. The SDK copies request headers into the
+  handler context (`extra.requestInfo.headers`), so the bearer token reached every tool
+  handler even though documentation claimed it never did.
+- **Reproducer:** An `onToolRequest` observer on the handler context printed an
+  `authorization` key while the original request carried `Bearer ...`.
+- **Fix:** Clone the request and delete `Authorization`, `Proxy-Authorization`, and
+  `Cookie` before the transport sees it. Keep only the derived principal in
+  `authInfo.extra`. Test the handler context and tool output for absence of the token.
+- **Prevents:** Credential material entering an SDK, provider, or tool-visible context
+  that does not need it. Applies to any library that echoes request headers.
+- **Remove when:** The SDK offers an explicit context allowlist that excludes auth
+  headers by construction (still keep the negative test).
+
 ## 2026-11-04 — JSON-RPC ids repeat across sessions, so MCP keys need the session
 
 - **Failure:** Deriving an MCP send idempotency key from only the JSON-RPC request id and

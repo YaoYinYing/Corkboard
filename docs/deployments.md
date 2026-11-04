@@ -1,8 +1,9 @@
 # Deployments
 
 Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slices
-A and B), and the commands below are runnable after `npm run build`. Cloudflare Workers/D1/R2 is
-planned and is not implemented or tested.
+A–D and the bearer-authenticated MCP slice), and the commands below are runnable after
+`npm run build`. Cloudflare Workers/D1/R2, OAuth 2.1/PKCE, and ChatGPT Web integration
+are planned and are not implemented or tested.
 
 ## Self-hosted Node.js 24 LTS
 
@@ -130,8 +131,10 @@ OAuth 2.1/PKCE, ChatGPT Web plugin installation/linking, and conversation-level 
 tool invocation are **not implemented or verified** in this slice. Do not document or
 claim them. See [`mcp.md`](./mcp.md).
 
-Sessions are in-memory and lost on restart; a restart requires clients to initialize
-again. There is no cross-process session sharing.
+Sessions are in-memory, capped at **1024 concurrent sessions** (the oldest is evicted
+first), and expire after **30 minutes idle**. Eviction closes the transport/server.
+Sessions are lost on restart and are not shared across processes; clients must
+initialize again. There is no cross-process session persistence.
 
 ## Cloudflare Workers (planned)
 

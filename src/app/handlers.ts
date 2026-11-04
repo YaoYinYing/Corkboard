@@ -9,6 +9,7 @@ import {
   type Principal,
   type ServiceDeps,
 } from "../service/auth.ts";
+import { getPrincipalIdentity } from "../service/identity.ts";
 import { listProjects } from "../service/projects.ts";
 import {
   getMessage,
@@ -207,10 +208,7 @@ function isCompressionField(name: string): boolean {
 }
 
 async function handleMe(deps: ServiceDeps, principal: Principal): Promise<Response> {
-  const speaker = await deps.db.first<{ display_name: string | null }>(
-    "SELECT display_name FROM speakers WHERE id = ?",
-    [principal.speakerId],
-  );
+  const identity = await getPrincipalIdentity(deps, principal);
   const projects = principal.scopes.has("project.read")
     ? await deps.db.all<{ id: string }>(
         `SELECT p.id
@@ -225,12 +223,7 @@ async function handleMe(deps: ServiceDeps, principal: Principal): Promise<Respon
       )
     : [];
   return json(200, {
-    speaker: {
-      id: principal.speakerId,
-      display_name: speaker?.display_name ?? principal.speakerId,
-    },
-    account: { id: principal.accountId },
-    scopes: scopeList(principal.scopes),
+    ...identity,
     projects: projects.map((project) => project.id),
   });
 }

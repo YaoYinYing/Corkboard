@@ -215,10 +215,22 @@ pushed.
   routes are unchanged.
 - **Sessions.** `src/mcp/http.ts` uses the SDK's
   `WebStandardStreamableHTTPServerTransport` in stateful JSON-response mode. Sessions
-  are in-memory, process-local, and bound to the initializing credential; another
-  credential's id is `404`. The bearer token is not passed to the SDK (`authInfo.token`
-  is empty); tools receive only the derived principal, and each request re-authenticates
-  and re-authorizes through the service layer. No session/authorization cache exists.
+  are in-memory and process-local, capped at 1024 (least-recently-used eviction) with a
+  30-minute idle TTL; eviction closes the transport/server. They are bound to the
+  initializing credential; another credential's id is `404` for tools and `DELETE`, and
+  a foreign DELETE leaves the owner's session intact. Sessions are lost on restart and
+  are not shared across processes. The bearer token is not passed to the SDK
+  (`authInfo.token` is empty); tools receive only the derived principal, and each
+  request re-authenticates and re-authorizes through the service layer. No
+  session/authorization cache exists.
+- **Token boundary.** Before the SDK sees a request, the adapter clones it and removes
+  `Authorization`, `Proxy-Authorization`, and `Cookie`, so the SDK's
+  `requestInfo.headers` exposed to tool handlers carries no credential material. A test
+  observes the handler context and asserts those headers are absent, and that tool
+  output never contains the token.
+- **Response headers.** Every `/mcp` response, including SDK JSON and protocol error
+  responses, carries `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`.
 - **Tools.** `src/mcp/tools.ts` registers exactly six tools:
   `corkboard_whoami`, `corkboard_list_projects`, `corkboard_list_messages`,
   `corkboard_get_message`, `corkboard_send_message`, `corkboard_mark_read`. Every
@@ -227,9 +239,11 @@ pushed.
   `idempotency_key`, sender, or timestamp argument; unknown arguments are rejected
   before the handler runs. No admin/key/membership tools exist.
 - **Shared service.** `src/service/projects.ts` now holds the project enumeration used
-  by both `GET /api/v1/projects` and `corkboard_list_projects`; the other tools call
-  `listMessages`, `getMessage`, `getMessageBody`, `sendMessage`, and `markRead` directly.
-  There is no parallel authorization decision.
+  by both `GET /api/v1/projects` and `corkboard_list_projects`, and
+  `src/service/identity.ts` holds the principal identity read used by both
+  `GET /api/v1/me` and `corkboard_whoami`; the other tools call `listMessages`,
+  `getMessage`, `getMessageBody`, `sendMessage`, and `markRead` directly. There is no
+  parallel authorization decision.
 - **Send adapter.** The tool computes `sha256:` over the exact UTF-8 `text` and derives
   the idempotency key as
   `mcp_` + hex SHA-256(`"corkboard-mcp\n" + sessionId + "\n" + projectId + "\n" + String(requestId)`).
@@ -253,7 +267,15 @@ pushed.
   idempotency, changed-payload `CONFLICT`, cross-credential session `404`, `GET` `405`,
   `DELETE`, the 64 KiB cap, and schema rejection of client-supplied digest/idempotency
   arguments. Existing REST tests are unchanged.
-- Tests: 195 total, 194 pass, 1 skipped (live D1 marker). `npm run check`, `npm run
+- **Post-audit hardening (audits PASSED tree `2a8b80c`).** Corrected the false claim that
+  the SDK could not see the bearer token: requests are now cloned with
+  `Authorization`, `Proxy-Authorization`, and `Cookie` removed before
+  `transport.handleRequest`, and a test observes the handler context. Added the bounded
+  LRU/30-minute-idle session registry, cache headers on every `/mcp` response, foreign
+  `DELETE` survival, revoked/expired-credential rejection on an existing session,
+  cross-session idempotency, and an injected-clock TTL test. `whoami` now uses the same
+  identity read as `/api/v1/me`.
+- Tests: 201 total, 200 pass, 1 skipped (live D1 marker). `npm run check`, `npm run
   build`, and a built-server MCP smoke pass. Not yet independently audited or pushed.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
@@ -544,8 +566,10 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
 - No human web session or OAuth yet.
-- No attachments or rate limiting. MCP session state is in-memory/process-local with no
-  TTL or eviction and no cross-process/Workers sharing; a restart drops sessions.
+- No attachments or rate limiting. MCP session state is in-memory/process-local
+  (1024-session LRU cap, 30-minute idle TTL) with no cross-process/Workers sharing; a
+  restart drops sessions, and sessions of a revoked credential are not closed until
+  their next (rejected) request or eviction.
 - No Workers adapter.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.

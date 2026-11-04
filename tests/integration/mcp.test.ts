@@ -6,6 +6,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createApp } from "../../src/app/handlers.ts";
 import type { Scope } from "../../src/domain/authz.ts";
+import { createMcpEndpoint } from "../../src/mcp/http.ts";
+import type { ToolRequestHeaders } from "../../src/mcp/tools.ts";
 import {
   ALL_SCOPES,
   createServiceFixture,
@@ -495,6 +497,17 @@ test("session headers, GET/DELETE, and the 64 KiB cap behave as documented", asy
   const foreign = await rawTool(app, other.token, sessionId, 3, "corkboard_whoami", {});
   assert.equal(foreign["error"]["code"], -32001);
 
+  // A foreign DELETE is 404 and must not close the owner's session.
+  const foreignDelete = await app(
+    new Request(MCP_URL, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${other.token}`, "mcp-session-id": sessionId },
+    }),
+  );
+  assert.equal(foreignDelete.status, 404);
+  const ownerStillWorks = await rawTool(app, actor.token, sessionId, 31, "corkboard_whoami", {});
+  assert.notEqual(ownerStillWorks["result"], undefined);
+
   // DELETE terminates the session; reusing it afterwards is 404.
   const deleted = await app(
     new Request(MCP_URL, {
@@ -565,4 +578,259 @@ test("invalid tool arguments are schema errors, not service calls", async (t) =>
   const listed = value(await call(client, "corkboard_list_messages", { project_id: "proj_schema" }));
   assert.equal(listed["messages"].length, 1);
   assert.equal(listed["messages"][0]["message_id"], sent["message_id"]);
+});
+
+async function endpointApp(
+  fx: ServiceFixture,
+  token: string,
+  options: Parameters<typeof createMcpEndpoint>[1] = {},
+): Promise<{ app: App; observed: ToolRequestHeaders[] }> {
+  const principal = await fx.authenticate(token);
+  const observed: ToolRequestHeaders[] = [];
+  const endpoint = createMcpEndpoint(fx.deps, {
+    ...options,
+    onToolRequest: (headers) => observed.push(headers),
+  });
+  return { app: (request) => endpoint.handle(request, principal), observed };
+}
+
+test("the SDK never sees credential headers and tool output never echoes the token", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  const actor = await addActor(fx, "boundary");
+  await fx.addProject("proj_boundary", actor.accountId);
+  await fx.addMembership("proj_boundary", actor.speakerId, ALL_SCOPES);
+  await fx.grantProject("cred_boundary", "proj_boundary");
+
+  const { app, observed } = await endpointApp(fx, actor.token);
+  const { client } = await connect(app, actor.token);
+  t.after(() => client.close());
+
+  const who = await call(client, "corkboard_whoami");
+  assert.ok(!text(who).includes(actor.token));
+
+  const sent = await call(client, "corkboard_send_message", {
+    project_id: "proj_boundary",
+    summary: "boundary",
+    type: "request",
+    language: "en",
+    text: "boundary body",
+  });
+  assert.ok(!text(sent).includes(actor.token));
+
+  const denied = await call(client, "corkboard_list_messages", { project_id: "proj_nowhere" });
+  assert.equal(errorCode(denied), "NOT_FOUND");
+  assert.ok(!text(denied).includes(actor.token));
+
+  assert.ok(observed.length >= 3);
+  for (const headers of observed) {
+    for (const name of Object.keys(headers)) {
+      const lower = name.toLowerCase();
+      assert.ok(!["authorization", "proxy-authorization", "cookie"].includes(lower));
+    }
+    assert.equal(headers["authorization"], undefined);
+  }
+});
+
+test("the session registry evicts the oldest session at the cap", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  const actor = await addActor(fx, "cap");
+  const { app } = await endpointApp(fx, actor.token, { maxSessions: 2 });
+
+  const first = await rawSession(app, actor.token);
+  const second = await rawSession(app, actor.token);
+  const third = await rawSession(app, actor.token);
+
+  const evicted = await rawTool(app, actor.token, first, 10, "corkboard_whoami", {});
+  assert.equal(evicted["error"]["code"], -32001);
+  assert.notEqual(
+    (await rawTool(app, actor.token, second, 11, "corkboard_whoami", {}))["result"],
+    undefined,
+  );
+  assert.notEqual(
+    (await rawTool(app, actor.token, third, 12, "corkboard_whoami", {}))["result"],
+    undefined,
+  );
+});
+
+test("idle sessions expire against an injected clock and activity refreshes them", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  const actor = await addActor(fx, "ttl");
+  let nowMs = 1_000_000;
+  const { app } = await endpointApp(fx, actor.token, {
+    now: () => nowMs,
+    sessionIdleMs: 1_000,
+  });
+
+  const idle = await rawSession(app, actor.token);
+  nowMs += 1_000;
+  assert.equal(
+    (await rawTool(app, actor.token, idle, 20, "corkboard_whoami", {}))["error"]["code"],
+    -32001,
+  );
+
+  const active = await rawSession(app, actor.token);
+  nowMs += 500;
+  assert.notEqual(
+    (await rawTool(app, actor.token, active, 21, "corkboard_whoami", {}))["result"],
+    undefined,
+  );
+  nowMs += 500;
+  assert.notEqual(
+    (await rawTool(app, actor.token, active, 22, "corkboard_whoami", {}))["result"],
+    undefined,
+  );
+  nowMs += 1_000;
+  assert.equal(
+    (await rawTool(app, actor.token, active, 23, "corkboard_whoami", {}))["error"]["code"],
+    -32001,
+  );
+});
+
+test("/mcp responses carry no-store and nosniff on success and error", async (t) => {
+  const { fx, app } = await withApp(t);
+  const actor = await addActor(fx, "headers");
+  await fx.addProject("proj_headers", actor.accountId);
+  await fx.addMembership("proj_headers", actor.speakerId, ALL_SCOPES);
+  await fx.grantProject("cred_headers", "proj_headers");
+
+  const initialize = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0.0" },
+    },
+  };
+  const success = await rawPost(app, initialize, { token: actor.token });
+  assert.equal(success.status, 200);
+  assert.equal(success.headers.get("cache-control"), "no-store");
+  assert.equal(success.headers.get("x-content-type-options"), "nosniff");
+
+  const error = await rawPost(
+    app,
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    { token: actor.token },
+  );
+  assert.equal(error.status, 400);
+  assert.equal(error.headers.get("cache-control"), "no-store");
+  assert.equal(error.headers.get("x-content-type-options"), "nosniff");
+
+  const sessionId = await rawSession(app, actor.token);
+  const toolError = await rawPost(
+    app,
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "corkboard_list_messages",
+        arguments: { project_id: "proj_nowhere" },
+      },
+    },
+    { token: actor.token, sessionId },
+  );
+  assert.equal(toolError.status, 200);
+  assert.equal(toolError.headers.get("cache-control"), "no-store");
+  assert.equal(toolError.headers.get("x-content-type-options"), "nosniff");
+});
+
+test("revoked or expired credentials cannot continue an existing session", async (t) => {
+  const { fx, app } = await withApp(t);
+  const actor = await addActor(fx, "revoked");
+  await fx.addProject("proj_revoked", actor.accountId);
+  await fx.addMembership("proj_revoked", actor.speakerId, ALL_SCOPES);
+  await fx.grantProject("cred_revoked", "proj_revoked");
+  const { client, transport } = await connect(app, actor.token);
+  t.after(() => client.close());
+  const sessionId = transport.sessionId;
+  assert.ok(sessionId !== undefined);
+
+  const callBody = { jsonrpc: "2.0", id: 50, method: "tools/list", params: {} };
+  await fx.db.run("UPDATE credentials SET revoked_at = ? WHERE id = ?", [
+    new Date(Date.now() - 1_000).toISOString(),
+    "cred_revoked",
+  ]);
+  const revoked = await rawPost(app, callBody, { token: actor.token, sessionId });
+  assert.equal(revoked.status, 401);
+  const revokedBody = (await revoked.json()) as JsonObject;
+  assert.equal(revokedBody["error"]["code"], "UNAUTHENTICATED");
+  assert.ok(!("result" in revokedBody));
+  assert.ok(!("content" in revokedBody));
+
+  await fx.db.run("UPDATE credentials SET revoked_at = NULL, expires_at = ? WHERE id = ?", [
+    new Date(0).toISOString(),
+    "cred_revoked",
+  ]);
+  const expired = await rawPost(app, callBody, { token: actor.token, sessionId });
+  assert.equal(expired.status, 401);
+  const expiredBody = (await expired.json()) as JsonObject;
+  assert.equal(expiredBody["error"]["code"], "UNAUTHENTICATED");
+  assert.ok(!("result" in expiredBody));
+  assert.ok(!("content" in expiredBody));
+});
+
+test("idempotency keys are session-bound, so different sessions do not collide", async (t) => {
+  const { fx, app } = await withApp(t);
+  const actor = await addActor(fx, "crosssession");
+  await fx.addProject("proj_cross", actor.accountId);
+  await fx.addMembership("proj_cross", actor.speakerId, ALL_SCOPES);
+  await fx.grantProject("cred_crosssession", "proj_cross");
+
+  const firstSession = await rawSession(app, actor.token);
+  const secondSession = await rawSession(app, actor.token);
+  const base = {
+    project_id: "proj_cross",
+    summary: "same id",
+    type: "request",
+    language: "en",
+  };
+
+  const first = await rawTool(
+    app,
+    actor.token,
+    firstSession,
+    901,
+    "corkboard_send_message",
+    { ...base, text: "first session body" },
+  );
+  const second = await rawTool(
+    app,
+    actor.token,
+    secondSession,
+    901,
+    "corkboard_send_message",
+    { ...base, text: "second session body" },
+  );
+  const firstValue = JSON.parse(first["result"]["content"][0].text) as JsonObject;
+  const secondValue = JSON.parse(second["result"]["content"][0].text) as JsonObject;
+  assert.equal(firstValue["isError"], undefined);
+  assert.equal(secondValue["isError"], undefined);
+  assert.notEqual(firstValue["message_id"], secondValue["message_id"]);
+
+  const replay = await rawTool(
+    app,
+    actor.token,
+    firstSession,
+    901,
+    "corkboard_send_message",
+    { ...base, text: "first session body" },
+  );
+  const replayValue = JSON.parse(replay["result"]["content"][0].text) as JsonObject;
+  assert.equal(replayValue["message_id"], firstValue["message_id"]);
+
+  const listedResponse = await rawTool(
+    app,
+    actor.token,
+    firstSession,
+    902,
+    "corkboard_list_messages",
+    { project_id: "proj_cross" },
+  );
+  const listed = JSON.parse(listedResponse["result"]["content"][0].text) as JsonObject;
+  assert.equal(listed["messages"].length, 2);
 });

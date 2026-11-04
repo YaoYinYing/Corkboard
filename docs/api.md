@@ -339,9 +339,12 @@ exposes exactly six tools (`corkboard_whoami`, `corkboard_list_projects`,
 `corkboard_mark_read`) over the same service and authorization layer as REST. Tool
 arguments cannot set sender, timestamps, `body_digest`, or `idempotency_key`; the
 trusted adapter computes/derives them. `POST` initializes and calls; `DELETE` terminates
-a session; `GET` returns `405` because server-initiated SSE is not offered. The request
-body cap is 64 KiB. Full schemas, idempotency derivation, error codes, and limitations
-are in [`mcp.md`](./mcp.md).
+a session; `GET` returns `405` because server-initiated SSE is not offered. Sessions are
+in-memory, bound to the initializing credential, capped at 1024 with least-recently-used
+eviction and a 30-minute idle TTL, and lost on restart. All `/mcp` responses carry
+`Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. The request body cap is
+64 KiB. Full schemas, idempotency derivation, error codes, and limitations are in
+[`mcp.md`](./mcp.md).
 
 MCP is implemented only for bearer credentials in this slice. OAuth 2.1/PKCE, ChatGPT
 Web installation/linking, and conversation-level ChatGPT tool invocation are **not

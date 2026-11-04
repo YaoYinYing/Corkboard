@@ -140,9 +140,18 @@ written) is not prevented; no stronger guarantee is claimed. See
   missing/invalid credential receives `401` and no session id.
 - The bearer token is never passed to the SDK, tool result, log, or audit. The SDK
   receives only the derived principal (speaker, account, credential id, scopes).
+  Before a request reaches the SDK, the adapter clones it and removes `Authorization`,
+  `Proxy-Authorization`, and `Cookie`; the `requestInfo.headers` exposed to tool
+  handlers therefore contains no credential material. A regression test observes the
+  handler context and asserts those headers are absent.
 - Sessions are in-memory, process-local, bound to the initializing credential, and lost
-  on restart. Another credential's session id is `404`. There is no TTL/eviction and no
-  additional rate limiting; authenticated clients can create sessions.
+  on restart. Another credential's session id is `404`, including for `DELETE` (the
+  owner's session survives). The registry is capped at 1024 sessions with
+  least-recently-used eviction and a 30-minute idle TTL; eviction closes the
+  transport/server. There is no cross-process persistence and no additional rate
+  limiting.
+- Every `/mcp` response, including SDK JSON and protocol errors, carries
+  `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 - Every tool reuses the service authorization path and per-request credential/grant/
   membership/revocation checks. Tool arguments cannot set sender, timestamps,
   `body_digest`, or `idempotency_key`.
@@ -198,8 +207,11 @@ written) is not prevented; no stronger guarantee is claimed. See
 
 ## Logging and audit
 
-- Log request ID, route, status, duration, actor IDs, and stable error codes.
-- Never log message bodies, summaries, tokens, keys, full IPs, or password material.
+- Log request ID, route, status, duration, and actor IDs. Log a stable error code only
+  when the response uses the Corkboard JSON envelope; MCP tool-level failures are HTTP
+  `200` with `isError: true` and are not logged as error codes.
+- Never log message bodies, summaries, tokens, keys, full IPs, credential headers, MCP
+  session ids, or password material.
 - `audit_events` records credential issuance/revocation, credential-project
   grant/revocation, membership grant/removal, body-integrity failures, and successful
   body expiry (`message.expire`), with identifiers and outcome only and no body
