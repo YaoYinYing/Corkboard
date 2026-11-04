@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; **vertical slice A implemented and checkpointed** |
-| Checkpoint | `b5c421d` (audited tree `048065f`) |
-| Branch | `main` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f` |
+| Phase | 0 complete; **vertical slices A and B implemented** (slice B checkpoint pending) |
+| Checkpoint | Slice A `b5c421d` (audited tree `048065f`); slice B candidate on branch `slice-b-expiry` |
+| Branch | `main` (slice A); `slice-b-expiry` (slice B, not pushed) |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: pending independent audit |
 | Next milestone | D1/R2 parity and Phase 5 (MCP/OAuth/ChatGPT Web plugin) |
 
 ## Checkpoint history
@@ -72,6 +72,36 @@ The Node.js/SQLite local product now works end-to-end:
   `serve`).
 - Tests: 127 total, 126 pass, 1 skipped (live D1 marker). `npm run check` and
   `npm run build` pass; build copies migrations into `dist/`.
+
+## Vertical slice B — body expiry and tombstone (implemented at this tree)
+
+- `POST /messages` accepts optional `body_expires_at`: RFC 3339 with offset,
+  normalized to UTC, strictly after server `received_at`, at most 366 days ahead;
+  otherwise `VALIDATION_ERROR` before any write. It is part of the idempotency payload
+  digest, so the same key with a different expiry is `CONFLICT`. A committed replay
+  returns the original result even after expiry.
+- List and single-message metadata include `body_expires_at`.
+- `POST /projects/:projectId/messages/:messageId/expire` requires `project.edit` plus
+  membership; non-member/removed → `NOT_FOUND`, member without scope → `FORBIDDEN`,
+  pending/failed/unknown → `NOT_FOUND`, already expired → idempotent `200`. One
+  conditional `ready → expired` transition per row, audited as `message.expire`
+  success with identifiers only, then best-effort ciphertext deletion.
+- Service helper `deleteExpiredBodyBlob` deletes ciphertext only for expired messages
+  and marks `body_objects.state = 'deleted'`, `storage_key = NULL`; a missing blob
+  counts as success.
+- `expire-bodies [--limit N]` (default 500, 1–5000) runs both phases: mark due rows
+  expired, then delete blobs for expired/undeleted objects. Per-row failures are
+  counted and do not stop the run; one JSON summary line is printed and the process
+  exits non-zero when `failures > 0`. Safe to repeat and after crashes.
+- Expiry requires an external scheduler: there is no in-process timer or daemon. The
+  server only enforces an explicit endpoint; the operator schedules the command.
+- Tests: 138 total, 137 pass, 1 skipped (live D1 marker): validation, tombstone
+  metadata, fetch/receipt denial plus retention of existing receipts, endpoint
+  authorization/state ordering, concurrent transition, worker due/orphan/unexpired
+  behavior, and CLI wiring.
+- Commands executed: `npm run check`, `npm run build`, and a temp-data-directory CLI
+  smoke (`init` → service send with near expiry → `expire-bodies` → body fetch fails,
+  metadata survives).
 
 ## Implemented and verified at this tree
 
@@ -248,7 +278,9 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Same-key concurrent sends can transiently orphan a blob/body-object row; messages and
   sequences stay unique, and the orphan is reclaimable.
 - `q` case-insensitivity inherits SQLite `LIKE` (ASCII only).
-- No expiry worker; expiry is a state transition only.
+- Expiry cleanup is an operator-run command with no in-process scheduler; deployments
+  must schedule `expire-bodies` externally. No hard-delete/admin erasure path exists;
+  expiry retains metadata and does not rewrite backups.
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
@@ -265,7 +297,7 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
 - No human web session or OAuth yet.
-- No attachments, expiry worker, rate limiting, or MCP.
+- No attachments, rate limiting, or MCP.
 - No Workers adapter.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.

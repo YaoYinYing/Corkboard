@@ -10,7 +10,9 @@ import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 import { AppError } from "../domain/errors.ts";
 import { requireScope } from "../domain/authz.ts";
 import {
+  normalizeBodyExpiresAt,
   validateBodyDigest,
+  validateBodyExpiresAtWindow,
   validateIdempotencyKey,
   validateLanguage,
   validateSummary,
@@ -36,6 +38,7 @@ export interface SendMessageInput {
   bodyDigest: string;
   replyToId?: string | null;
   clientSentAt?: string | null;
+  bodyExpiresAt?: string | null;
 }
 
 export interface SendMessageResult {
@@ -67,6 +70,7 @@ export interface MessageMetadata {
   language: string;
   replyToId: string | null;
   bodyState: "ready" | "expired";
+  bodyExpiresAt: string | null;
   clientSentAt: string | null;
   receivedAt: string;
   committedAt: string;
@@ -114,10 +118,12 @@ async function canonicalPayloadDigest(
     bodyDigest: string;
     replyToId: string | null;
     clientSentAt: string | null;
+    bodyExpiresAt: string | null;
   },
 ): Promise<string> {
   const canonical = JSON.stringify({
     bodyDigest: input.bodyDigest,
+    bodyExpiresAt: input.bodyExpiresAt,
     clientSentAt: input.clientSentAt,
     language: input.language,
     replyToId: input.replyToId,
@@ -155,6 +161,7 @@ interface MessageListRow {
   language: string;
   reply_to_id: string | null;
   body_state: string;
+  body_expires_at: string | null;
   client_sent_at: string | null;
   received_at: string;
   committed_at: string | null;
@@ -212,6 +219,7 @@ function listRowToMetadata(row: MessageListRow): MessageMetadata {
     language: row.language,
     replyToId: row.reply_to_id,
     bodyState: row.body_state,
+    bodyExpiresAt: row.body_expires_at,
     clientSentAt: row.client_sent_at,
     receivedAt: row.received_at,
     committedAt: row.committed_at,
@@ -270,6 +278,7 @@ async function commitBody(
     text: string;
     replyToId: string | null;
     clientSentAt: string | null;
+    bodyExpiresAt: string | null;
     receivedAt: string;
   },
 ): Promise<MessageRow> {
@@ -304,8 +313,8 @@ async function commitBody(
   await deps.db.run(
     `INSERT OR IGNORE INTO messages
        (id, project_id, seq, sender_speaker_id, summary, type, language, reply_to_id,
-        client_sent_at, received_at, committed_at, body_state, body_object_id)
-     VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?)`,
+        client_sent_at, received_at, committed_at, body_state, body_object_id, body_expires_at)
+     VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)`,
     [
       messageId,
       projectId,
@@ -317,6 +326,7 @@ async function commitBody(
       input.clientSentAt,
       input.receivedAt,
       objectId,
+      input.bodyExpiresAt,
     ],
   );
   await deps.db.run(
@@ -367,6 +377,7 @@ export async function sendMessage(
     }
   }
 
+  const bodyExpiresAt = normalizeBodyExpiresAt(input.bodyExpiresAt);
   const payloadDigest = await canonicalPayloadDigest(deps.pepper, {
     summary,
     type,
@@ -375,9 +386,45 @@ export async function sendMessage(
     bodyDigest,
     replyToId,
     clientSentAt,
+    bodyExpiresAt,
   });
   const receivedAt = deps.now().toISOString();
   const generatedMessageId = randomId("msg_");
+
+  const commitRecordedMessage = async (messageId: string): Promise<SendMessageResult> => {
+    const row = await commitBody(deps, principal, projectId, messageId, {
+      summary,
+      type,
+      language,
+      text,
+      replyToId,
+      clientSentAt,
+      bodyExpiresAt,
+      receivedAt,
+    });
+    return sendResult(row, bodyDigest);
+  };
+
+  // An existing key is a replay or resume. It returns the committed result even
+  // when its expiry has since passed, and a different payload is CONFLICT.
+  const existingRecord = await loadIdempotencyRecord(deps, principal, projectId, key);
+  if (existingRecord !== undefined) {
+    const outcome = await replayOrResume(
+      deps,
+      principal,
+      projectId,
+      existingRecord,
+      payloadDigest,
+      bodyDigest,
+    );
+    if (outcome.status === "done") return outcome.result;
+    return commitRecordedMessage(outcome.messageId);
+  }
+
+  // Temporal expiry checks apply to a new write only. The idempotency insert is
+  // the first write, so this precedes it.
+  validateBodyExpiresAtWindow(bodyExpiresAt, new Date(receivedAt));
+
   const inserted = await insertIdempotency(deps.db, {
     speakerId: principal.speakerId,
     projectId,
@@ -389,83 +436,111 @@ export async function sendMessage(
     updatedAt: receivedAt,
   });
 
-  let messageId = generatedMessageId;
-  let existing: MessageRow | undefined;
   if (!inserted) {
-    const record = await deps.db.first<{
-      payload_digest: string | null;
-      message_id: string | null;
-      status: string | null;
-    }>(
-      `SELECT payload_digest, message_id, status FROM idempotency_keys
-        WHERE speaker_id = ? AND project_id = ? AND key = ?`,
-      [principal.speakerId, projectId, key],
+    // A concurrent request won the insert between the read and the write.
+    const raced = await loadIdempotencyRecord(deps, principal, projectId, key);
+    if (raced === undefined) throw new AppError("UNAVAILABLE");
+    const outcome = await replayOrResume(
+      deps,
+      principal,
+      projectId,
+      raced,
+      payloadDigest,
+      bodyDigest,
     );
-    if (record === undefined || record.payload_digest === null) {
-      throw new AppError("UNAVAILABLE");
-    }
-    if (!digestsEqual(record.payload_digest, payloadDigest)) {
-      throw new AppError("CONFLICT");
-    }
-    if (record.message_id === null) throw new AppError("UNAVAILABLE");
-    messageId = record.message_id;
-    existing = await loadMessage(deps, projectId, messageId);
-
-    if (existing !== undefined && (existing.body_state === "ready" || existing.body_state === "expired")) {
-      return sendResult(existing, bodyDigest);
-    }
-
-    // Resume a prior attempt after its blob was written but before
-    // finalization. Verify the stored blob against the DB-recorded digest (the
-    // authority) before publishing; a missing/corrupt blob stays pending and
-    // reclaimable instead of being published.
-    if (existing !== undefined && existing.body_state === "pending" && existing.body_object_id !== null) {
-      const object = await deps.db.first<BodyObjectRow>(
-        "SELECT id, project_id, storage_key, ciphertext_digest FROM body_objects WHERE id = ? AND project_id = ?",
-        [existing.body_object_id, projectId],
-      );
-      if (
-        object === undefined ||
-        object.storage_key === null ||
-        typeof object.ciphertext_digest !== "string"
-      ) {
-        throw new AppError("NOT_FOUND");
-      }
-      let blob: Uint8Array | undefined;
-      try {
-        blob = await deps.blobs.get(object.storage_key);
-      } catch {
-        throw await auditIntegrityFailure(deps, principal, projectId, "message.send.resume");
-      }
-      if (blob === undefined) throw new AppError("NOT_FOUND");
-      try {
-        await openBody(
-          blob,
-          { serviceId: deps.serviceId, projectId, messageId, objectId: object.id },
-          deps.keys,
-          { expectedCiphertextDigest: object.ciphertext_digest },
-        );
-      } catch (error) {
-        if (error instanceof IntegrityError || error instanceof EnvelopeFormatError) {
-          throw await auditIntegrityFailure(deps, principal, projectId, "message.send.resume");
-        }
-        throw error;
-      }
-      const row = await publish(deps, projectId, messageId, existing.body_object_id);
-      return sendResult(row, bodyDigest);
-    }
+    if (outcome.status === "done") return outcome.result;
+    return commitRecordedMessage(outcome.messageId);
   }
 
-  const row = await commitBody(deps, principal, projectId, messageId, {
-    summary,
-    type,
-    language,
-    text,
-    replyToId,
-    clientSentAt,
-    receivedAt,
-  });
-  return sendResult(row, bodyDigest);
+  return commitRecordedMessage(generatedMessageId);
+}
+
+type ReplayOutcome =
+  | { status: "done"; result: SendMessageResult }
+  | { status: "commit"; messageId: string };
+
+interface IdempotencyRow {
+  payload_digest: string | null;
+  message_id: string | null;
+  status: string | null;
+}
+
+async function loadIdempotencyRecord(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  key: string,
+): Promise<IdempotencyRow | undefined> {
+  return deps.db.first<IdempotencyRow>(
+    `SELECT payload_digest, message_id, status FROM idempotency_keys
+      WHERE speaker_id = ? AND project_id = ? AND key = ?`,
+    [principal.speakerId, projectId, key],
+  );
+}
+
+async function replayOrResume(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  record: IdempotencyRow,
+  payloadDigest: string,
+  bodyDigest: string,
+): Promise<ReplayOutcome> {
+  if (record.payload_digest === null) throw new AppError("UNAVAILABLE");
+  if (!digestsEqual(record.payload_digest, payloadDigest)) {
+    throw new AppError("CONFLICT");
+  }
+  if (record.message_id === null) throw new AppError("UNAVAILABLE");
+  const messageId = record.message_id;
+  const existing = await loadMessage(deps, projectId, messageId);
+
+  if (existing !== undefined && (existing.body_state === "ready" || existing.body_state === "expired")) {
+    return { status: "done", result: sendResult(existing, bodyDigest) };
+  }
+
+  // Resume a prior attempt after its blob was written but before finalization.
+  // Verify the stored blob against the DB-recorded digest (the authority) before
+  // publishing; a missing/corrupt blob stays pending and reclaimable instead of
+  // being published.
+  if (existing !== undefined && existing.body_state === "pending" && existing.body_object_id !== null) {
+    const object = await deps.db.first<BodyObjectRow>(
+      "SELECT id, project_id, storage_key, ciphertext_digest FROM body_objects WHERE id = ? AND project_id = ?",
+      [existing.body_object_id, projectId],
+    );
+    if (
+      object === undefined ||
+      object.storage_key === null ||
+      typeof object.ciphertext_digest !== "string"
+    ) {
+      throw new AppError("NOT_FOUND");
+    }
+    let blob: Uint8Array | undefined;
+    try {
+      blob = await deps.blobs.get(object.storage_key);
+    } catch {
+      throw await auditIntegrityFailure(deps, principal, projectId, "message.send.resume");
+    }
+    if (blob === undefined) throw new AppError("NOT_FOUND");
+    try {
+      await openBody(
+        blob,
+        { serviceId: deps.serviceId, projectId, messageId, objectId: object.id },
+        deps.keys,
+        { expectedCiphertextDigest: object.ciphertext_digest },
+      );
+    } catch (error) {
+      if (error instanceof IntegrityError || error instanceof EnvelopeFormatError) {
+        throw await auditIntegrityFailure(deps, principal, projectId, "message.send.resume");
+      }
+      throw error;
+    }
+    const row = await publish(deps, projectId, messageId, existing.body_object_id);
+    return { status: "done", result: sendResult(row, bodyDigest) };
+  }
+
+  // No message row exists yet, or the provisional row has no blob reference:
+  // the original attempt stopped before any body write, so commit it now.
+  return { status: "commit", messageId };
 }
 
 function validateSeqParam(value: number, field: string): number {
@@ -571,7 +646,7 @@ export async function listMessages(
   params.push(limit);
   const rows = await deps.db.all<MessageListRow>(
     `SELECT m.id, m.project_id, m.seq, m.sender_speaker_id, s.display_name,
-            m.summary, m.type, m.language, m.reply_to_id, m.body_state,
+            m.summary, m.type, m.language, m.reply_to_id, m.body_state, m.body_expires_at,
             m.client_sent_at, m.received_at, m.committed_at
        FROM messages m
        LEFT JOIN speakers s ON s.id = m.sender_speaker_id
@@ -596,7 +671,7 @@ export async function getMessage(
   await authorizeProject(deps, principal, projectId, "message.read");
   const row = await deps.db.first<MessageListRow>(
     `SELECT m.id, m.project_id, m.seq, m.sender_speaker_id, s.display_name,
-            m.summary, m.type, m.language, m.reply_to_id, m.body_state,
+            m.summary, m.type, m.language, m.reply_to_id, m.body_state, m.body_expires_at,
             m.client_sent_at, m.received_at, m.committed_at
        FROM messages m
        LEFT JOIN speakers s ON s.id = m.sender_speaker_id

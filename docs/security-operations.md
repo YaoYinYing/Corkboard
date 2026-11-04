@@ -1,7 +1,7 @@
 # Security operations
 
-Status: implemented for the Node.js 24 + SQLite self-hosted deployment (vertical slice
-A). Cloudflare-specific steps are planned.
+Status: implemented for the Node.js 24 + SQLite self-hosted deployment (vertical
+slices A and B). Cloudflare-specific steps are planned.
 
 ## Secrets and keys
 
@@ -63,9 +63,14 @@ manager or treat it as a backup secret. Rules:
 
 - Log request ID, route, status, duration, actor IDs, and stable error codes.
 - Never log message bodies, summaries, tokens, keys, full IPs, or password material.
-- `audit_events` records credential issuance/revocation and membership grant/removal,
-  plus body-integrity failures. Expiry and broader administrative events will be added
-  with the expiry worker. Retention is not yet bounded or enforced; no body content.
+- `audit_events` records credential issuance/revocation, membership grant/removal,
+  body-integrity failures, and successful body expiry (`message.expire`), with
+  identifiers and outcome only and no body content.
+- Body retention enforcement is **opt-in per message** via `body_expires_at`, either
+  through the authenticated `POST .../expire` endpoint or the operator-run
+  `expire-bodies` cleanup command. There is no scheduler daemon and no automatic
+  rotation or deletion of messages without an expiry. Expiry leaves a metadata
+  tombstone; it is not comprehensive erasure and does not rewrite backups.
 
 ## Environment separation
 

@@ -5,6 +5,10 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "graphem
 const UTF8_ENCODER = new TextEncoder();
 const TYPE_IDENTIFIER = /^[a-z][a-z0-9_.-]{0,31}$/;
 const PRINTABLE_ASCII = /^[\x21-\x7e]{1,128}$/;
+// RFC 3339 timestamp with an explicit offset; stored normalized to UTC.
+const RFC3339_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const MAX_BODY_EXPIRY_AHEAD_MS = 366 * 24 * 60 * 60 * 1000;
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string") {
@@ -78,6 +82,34 @@ export function validateIdempotencyKey(value: unknown): string {
 
 export function validateBodyDigest(value: unknown): string {
   return parseSha256Digest(value);
+}
+
+// Shape only: callers must validate the time window before a new write. Replays
+// of an already accepted request are allowed to carry a now-past expiry.
+export function normalizeBodyExpiresAt(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !RFC3339_TIMESTAMP.test(value)) {
+    throw new AppError("VALIDATION_ERROR", "body_expires_at must be an RFC 3339 UTC timestamp");
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new AppError("VALIDATION_ERROR", "body_expires_at must be a valid timestamp");
+  }
+  return parsed.toISOString();
+}
+
+export function validateBodyExpiresAtWindow(
+  bodyExpiresAt: string | null,
+  receivedAt: Date,
+): void {
+  if (bodyExpiresAt === null) return;
+  const aheadMs = new Date(bodyExpiresAt).getTime() - receivedAt.getTime();
+  if (aheadMs <= 0) {
+    throw new AppError("VALIDATION_ERROR", "body_expires_at must be after received_at");
+  }
+  if (aheadMs > MAX_BODY_EXPIRY_AHEAD_MS) {
+    throw new AppError("VALIDATION_ERROR", "body_expires_at must be at most 366 days ahead");
+  }
 }
 
 export async function verifySenderDigest(text: string, claimed: string): Promise<void> {

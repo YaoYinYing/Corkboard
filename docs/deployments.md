@@ -1,7 +1,7 @@
 # Deployments
 
-Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slice A),
-and the commands below are runnable after `npm run build`. Cloudflare Workers/D1/R2 is
+Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slices
+A and B), and the commands below are runnable after `npm run build`. Cloudflare Workers/D1/R2 is
 planned and is not implemented or tested.
 
 ## Self-hosted Node.js 24 LTS
@@ -47,6 +47,21 @@ node dist/scripts/corkboard.js issue-key --speaker <speaker_id> --project <proje
 node dist/scripts/corkboard.js revoke-key --credential <credential_id>
 node dist/scripts/corkboard.js remove-member --project <project_id> --speaker <speaker_id>
 ```
+
+Body expiry cleanup:
+
+```sh
+node dist/scripts/corkboard.js expire-bodies --data-dir /var/lib/corkboard [--limit 500]
+```
+
+`--limit` defaults to 500 and must be 1–5000. The command accepts `--data-dir` or
+`CORKBOARD_DATA_DIR`, marks due (`body_expires_at <= now`) messages expired, then
+deletes their ciphertext; a missing blob counts as success. It prints one JSON summary
+line (`examined`, `expired`, `blobsDeleted`, `failures`) and exits non-zero when
+`failures > 0`, so it is safe to retry. **There is no timer in the server process**:
+schedule this command externally (cron, systemd timer, or the platform scheduler), for
+example every 15 minutes. Running it concurrently is safe; transitions are conditional
+and repeated work is idempotent.
 
 Reverse proxy must preserve the `Authorization` header, strip untrusted forwarding
 headers, set body-size limits, and provide TLS. The application must not be exposed

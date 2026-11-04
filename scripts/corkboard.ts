@@ -10,6 +10,8 @@ import { parseArgs } from "node:util";
 import { generateSpeakerToken, hashSecret } from "../src/auth/credentials.ts";
 import { SCOPES, type Scope } from "../src/domain/authz.ts";
 import { startServer } from "../src/platforms/node/main.ts";
+import { expireDueBodies } from "../src/service/expiry.ts";
+import { LocalBlobStore } from "../src/storage/blobs/local.ts";
 import { openSqliteDatabase, type SqlDatabase } from "../src/storage/db.ts";
 
 const DEFAULT_CAPABILITIES: readonly Scope[] = [
@@ -33,6 +35,7 @@ const OPTIONS = {
   credential: { type: "string" },
   owner: { type: "boolean" },
   "expires-at": { type: "string" },
+  limit: { type: "string" },
 } as const;
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS }>>["values"];
@@ -75,8 +78,8 @@ function normalizeEmail(raw: string): string {
   return email;
 }
 
-async function withDb<T>(fn: (db: SqlDatabase) => Promise<T>): Promise<T> {
-  const dir = dataDirFromEnv();
+async function withDb<T>(fn: (db: SqlDatabase) => Promise<T>, dataDir?: string): Promise<T> {
+  const dir = dataDir === undefined || dataDir === "" ? dataDirFromEnv() : dataDir;
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
   const db = await openSqliteDatabase(join(dir, "corkboard.sqlite"));
@@ -314,6 +317,29 @@ async function issueKeyCommand(values: Values): Promise<void> {
   });
 }
 
+function parseExpiryLimit(raw: string | undefined): number {
+  if (raw === undefined) return 500;
+  if (!/^\d+$/.test(raw)) throw new Error("--limit must be an integer 1-5000");
+  const value = Number(raw);
+  if (value < 1 || value > 5000) throw new Error("--limit must be an integer 1-5000");
+  return value;
+}
+
+// Operator-run cleanup: no in-process timer exists, so schedule this command
+// externally. Prints exactly one JSON summary line.
+async function expireBodiesCommand(values: Values): Promise<void> {
+  const dataDir = values["data-dir"];
+  const dir = dataDir === undefined || dataDir === "" ? dataDirFromEnv() : dataDir;
+  const limit = parseExpiryLimit(values.limit);
+
+  const summary = await withDb(async (db) => {
+    const blobs = new LocalBlobStore(join(dir, "blobs"));
+    return expireDueBodies({ db, blobs, now: () => new Date() }, { limit });
+  }, dir);
+  console.log(JSON.stringify(summary));
+  if (summary.failures > 0) process.exitCode = 1;
+}
+
 async function main(): Promise<void> {
   const { positionals, values } = parseArgs({
     args: process.argv.slice(2),
@@ -339,12 +365,14 @@ async function main(): Promise<void> {
       return issueKeyCommand(values);
     case "revoke-key":
       return revokeKeyCommand(values);
+    case "expire-bodies":
+      return expireBodiesCommand(values);
     case "serve":
       await startServer();
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|revoke-key|serve> [options]; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|revoke-key|expire-bodies|serve> [options]; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }

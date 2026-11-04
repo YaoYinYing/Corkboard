@@ -208,6 +208,29 @@ test("bootstrap commands produce usable ids and a token that authenticates", asy
   }
 });
 
+test("expire-bodies wires the cleanup command and accepts --data-dir", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir]);
+  assert.equal(init.status, 0, init.stderr);
+
+  const empty = run(["expire-bodies", "--data-dir", dataDir]);
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.equal(
+    empty.stdout.trim(),
+    JSON.stringify({ examined: 0, expired: 0, blobsDeleted: 0, failures: 0 }),
+  );
+  assert.equal(empty.stdout.trim().split("\n").length, 1);
+
+  const bounded = run(["expire-bodies", "--data-dir", dataDir, "--limit", "0"]);
+  assert.notEqual(bounded.status, 0);
+  assert.match(bounded.stderr, /limit/);
+
+  const tooLarge = run(["expire-bodies", "--data-dir", dataDir, "--limit", "5001"]);
+  assert.notEqual(tooLarge.status, 0);
+  assert.match(tooLarge.stderr, /limit/);
+});
+
 test("issue-key rejects a speaker without an active membership", (t) => {
   const root = tempDir(t);
   const dataDir = join(root, "data");
