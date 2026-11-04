@@ -325,8 +325,10 @@ They authenticate through the existing `authenticateBearer`, so:
   form-action 'self'; base-uri 'none'; frame-ancestors 'none'` and
   `Referrer-Policy: no-referrer`.
 - Request logs retain method, path, status, duration, `requestId`, `errorCode`, and
-  actor IDs only. OAuth query strings, form bodies, codes, tokens, cookies, CSRF
-  values, client IDs, and scopes are never logged.
+  actor IDs only. OAuth token and revocation failures use the flat RFC
+  `{"error":"..."}` body and are not counted as an `errorCode`. OAuth query strings,
+  form bodies, codes, tokens, cookies, CSRF values, client IDs, and scopes are never
+  logged.
 - Metrics use fixed route labels (`/.well-known/oauth-*`, `/oauth/register`,
   `/oauth/authorize`, `/oauth/signin`, `/oauth/consent`, `/oauth/token`,
   `/oauth/revoke`, `/oauth/client.js`). No client IDs or scopes appear in labels.

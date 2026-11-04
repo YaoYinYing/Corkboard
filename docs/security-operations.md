@@ -208,16 +208,18 @@ or as authority to act as a speaker.
   endpoint requires the session cookie and `X-CSRF-Token` and re-reads ownership,
   membership, project state, and capabilities. It can never grant `project.edit`,
   member scopes, `receipt.write`, or another project's speaker.
-- **Revocation.** `POST /oauth/revoke` always returns `200` for a well-formed request.
+- **Revocation.** `POST /oauth/revoke` returns `200` for a well-formed, non-abusive
+  request; above the process-local global revoke bucket it returns `429`.
   Revoking a refresh token revokes its family and credential; revoking an OAuth access
   token revokes the credential and its families. A normal speaker token is ignored.
   Take effect on the next request; there is no authorization cache. To revoke every
   session of a client, revoke each refresh token or the underlying credential by id,
   or disable the account/speaker/membership.
-- **Rate limits.** Registration is 10/minute (burst 5, global process-local key) and
-  token exchange 60/minute (burst 20, keyed by `client_id`). These are additional
-  denial only, reset on restart, and are not distributed. Per-IP controls remain the
-  reverse proxy's job.
+- **Rate limits.** Registration is 10/minute (burst 5, global process-local key),
+  token exchange 60/minute (burst 20, keyed by `client_id`), and revocation 60/minute
+  (burst 20, global process-local key, checked after body parsing). These are
+  additional denial only, reset on restart, and are not distributed. Per-IP controls
+  remain the reverse proxy's job.
 - **Headers and pages.** Every OAuth response is `Cache-Control: no-store` and
   `X-Content-Type-Options: nosniff`. HTML pages have no inline JavaScript, no
   third-party resources, escaped values, and the CSP documented in `oauth.md`.

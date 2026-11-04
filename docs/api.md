@@ -583,9 +583,10 @@ and `X-Content-Type-Options: nosniff`; HTML pages carry a strict CSP and are ful
 escaped.
 
 OAuth registration is limited to 10 requests/minute (burst 5, process-local, global
-key) and token exchange to 60 requests/minute (burst 20, process-local, keyed by
-`client_id`). These are additional denial only and are separate from the
-per-credential API bucket.
+key), token exchange to 60 requests/minute (burst 20, process-local, keyed by
+`client_id`) plus a global 300/minute (burst 60) endpoint bucket, and revocation to
+60 requests/minute (burst 20, process-local, global key). These are additional denial
+only and are separate from the per-credential API bucket.
 
 ## Validation limits summary
 

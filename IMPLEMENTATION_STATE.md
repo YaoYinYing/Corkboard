@@ -914,10 +914,15 @@ Do not infer any of these from local MCP behavior or from another plan.
   session cannot act as a speaker credential; an OAuth access token is a speaker
   credential, not a session.
 - Slice-J audit debt (candidate, non-blocking): OAuth registration, per-client,
-  global token-exchange, and revocation limits are process-local and reset on restart; concurrent
-  refresh with the same token can revoke a family; expired/rotated OAuth rows are never
-  purged; the consent form requires JavaScript to send the CSRF header (a `<noscript>`
-  notice is shown); no CORS, JWT/OIDC, introspection, consent-management UI, or admin
+  global token-exchange, and revocation limits are process-local and reset on restart;
+  `oauth_clients`, expired/consumed authorization codes, rotated/expired refresh rows,
+  and `oauth_token_clients` rows grow without bound because no purge task exists;
+  concurrent refresh with the same token can revoke a family; the consent form has no
+  nonce, so a same-session replay can mint multiple codes with identical rights
+  (codes remain single-use and PKCE-bound); the revoke bucket is global and checked
+  after body parsing, so anonymous bucket exhaustion can delay revocation; the
+  consent form requires JavaScript to send the CSRF header (a `<noscript>` notice is
+  shown); no CORS, JWT/OIDC, introspection, consent-management UI, or admin
   OAuth endpoints; the sign-in handler is a second HTTP entry to `loginAccount` (the
   `/api/v1/session` JSON/content-type rule itself is unchanged); OAuth
   consent/code/token/revocation events are not written to `audit_events` in this

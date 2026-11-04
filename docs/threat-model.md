@@ -151,10 +151,10 @@ authorization system.
   `credentials` rows. Refresh rotates the refresh token and the access credential's
   prefix/verifier/expiry, so the old access token fails on the next request. Reuse of
   a rotated or revoked refresh token revokes the whole family and credential.
-- **Revocation.** RFC 7009 always returns `200` for well-formed requests; unknown
-  tokens and wrong client IDs are silent no-ops. Revoking a refresh family or an
-  access token takes effect on the next REST/MCP request; there is no authorization
-  cache.
+- **Revocation.** RFC 7009 returns `200` for well-formed, non-abusive requests; above
+  the process-local global revoke bucket it returns `429`. Unknown tokens and wrong
+  client IDs are silent no-ops. Revoking a refresh family or an access token takes
+  effect on the next REST/MCP request; there is no authorization cache.
 - **Secrets and logging.** Codes, refresh/access tokens, cookies, CSRF values, client
   names, and scopes are not logged. The database stores prefix + keyed HMAC verifiers
   only. Known limit: concurrent refresh with the same token races and can revoke a

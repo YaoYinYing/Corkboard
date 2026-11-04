@@ -305,7 +305,8 @@ serves the public metadata, form handlers, and two escaped HTML pages.
   verifier, and expiry, which immediately retires the previous access token. Reuse of
   a rotated/revoked row, or a refresh after membership/account/speaker/project
   revocation, revokes the family and the credential.
-- **Revocation.** RFC 7009 form endpoint; well-formed requests always return `200`.
+- **Revocation.** RFC 7009 form endpoint; well-formed, non-abusive requests return
+  `200` (above the process-local global revoke bucket: `429`).
   Unknown tokens, wrong clients, and ordinary speaker tokens are silent no-ops.
 - **Configuration.** `CORKBOARD_PUBLIC_BASE_URL` must be an `https` origin. Unset means
   the feature is disabled with a fixed `503`; invalid fails startup before filesystem
