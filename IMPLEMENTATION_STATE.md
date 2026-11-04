@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–H pushed; slice I (human account sessions) candidate, review pending |
-| Last pushed checkpoint | `5d0ae9f` (metrics hardening, audited tree `f45a3b4`) on `origin/main`; CI run 41878712983 |
-| Branch | `main`, clean; the `slice-h-metrics` candidate was fast-forwarded |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: review pending |
-| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, attachments, queue-to-commit and per-project observability |
+| Phase | 0 complete; vertical slices A–I implemented and pushed |
+| Last pushed checkpoint | `9a4f6c5` (human account sessions, audited tree `cc8df35`) on `origin/main`; CI pending |
+| Branch | `main`, clean; the `slice-i-session` two-commit candidate was fast-forwarded |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS |
+| Next milestone | OAuth 2.1/PKCE authorization server (human session prerequisite now exists), ChatGPT Web integration, D1/R2 parity, attachments, per-project observability |
 
 ## Checkpoint history
 
@@ -28,6 +28,7 @@ as the work it describes.
 | `1fa8876` | `66bc243` | Vertical slice F: read-only operator diagnostics (`doctor`) | security PASS; contract PASS |
 | `3d3dc25` | `52bf6b7` | Vertical slice G: per-credential REST/MCP rate limiting | security PASS; contract PASS |
 | `5d0ae9f` | `f45a3b4` | Vertical slice H: metrics token hardening, fixed-length comparison, adapter recording isolation | security PASS; contract PASS |
+| `9a4f6c5` | `cc8df35` | Vertical slice I: human account sessions (PBKDF2 login, cookie + CSRF, revocation) | security PASS; contract PASS |
 
 ## GitHub Issue coordination
 
@@ -35,7 +36,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `5d0ae9f`; remote HEAD verified; CI run 41878712983 |
+| Last pushed checkpoint | `9a4f6c5`; remote HEAD verified; CI run pending |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -803,7 +804,7 @@ Do not infer any of these from local MCP behavior or from another plan.
   metadata-only reads remain request-start-only by design; a bounded `..` filesystem
   test variant is still missing.
 - Bearer-authenticated MCP is implemented locally. Human account sessions are
-  implemented as slice I (candidate): sign-in, session read, and sign-out only. No
+  implemented and pushed as slice I: sign-in, session read, and sign-out only. No
   browser UI, registration, email verification, password reset, OAuth 2.1/PKCE, ChatGPT
   Web installation/linking, or conversation-level ChatGPT tool invocation is
   implemented or verified. A session cannot act as a speaker credential.
@@ -859,7 +860,13 @@ Do not infer any of these from local MCP behavior or from another plan.
   path; session rows are never purged automatically and no cleanup command exists; there
   is no UI, registration, email verification, password reset, OAuth, or speaker
   delegation. The adapter body-buffering and multi-`Set-Cookie` defects found by the
-  audit are fixed in the follow-up commit, and session 401s no longer send a Bearer
-  challenge.
+  first audit are fixed in `9a4f6c5`; session-route 401s no longer send a Bearer
+  challenge while bearer-route 401s still do. Re-audit test gaps: no committed
+  adapter-level 65,536/65,537-byte login boundary test, no positive test for
+  `application/json` with parameters (behavior probed correct), and the `/api/v1/session`
+  metrics label is untested. Legacy `scrypt$` accounts remain distinguishable by
+  response timing from unknown emails; rehash-on-login or a fixed PBKDF2 step would
+  close it. Rotating emails bypasses the per-email login bucket (CPU pressure), and a
+  known address can be locked out; per-IP controls remain the reverse proxy's job.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.
