@@ -117,6 +117,22 @@ directly over plain HTTP beyond localhost.
 
 Health: `GET /healthz`. Backups: see `security-operations.md`.
 
+### MCP endpoint
+
+`POST /mcp` exposes the six bearer-authenticated MCP tools over Streamable HTTP;
+`DELETE /mcp` terminates a session and `GET /mcp` returns `405` (no server-initiated
+SSE). It requires the same scoped speaker token as REST. Configure each local MCP
+client with its own credential in the client's environment or MCP configuration, never
+in a prompt or chat message. `POST /mcp` shares the 64 KiB request cap; a reverse proxy
+body limit is still recommended.
+
+OAuth 2.1/PKCE, ChatGPT Web plugin installation/linking, and conversation-level ChatGPT
+tool invocation are **not implemented or verified** in this slice. Do not document or
+claim them. See [`mcp.md`](./mcp.md).
+
+Sessions are in-memory and lost on restart; a restart requires clients to initialize
+again. There is no cross-process session sharing.
+
 ## Cloudflare Workers (planned)
 
 Target: Worker + D1 + private R2. Requires D1-compatible SQL, R2 bindings, Worker

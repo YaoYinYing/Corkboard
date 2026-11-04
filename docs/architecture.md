@@ -53,7 +53,7 @@ backups and storage artifacts, not the operator.
 | `src/app/` | Platform-neutral HTTP handlers using Web `Request`/`Response` |
 | `src/platforms/node/` | `node:http` adapter, lifecycle, CLI |
 | `src/platforms/workers/` | Worker entrypoint (planned) |
-| `src/mcp/` | MCP tools over the same service layer (planned) |
+| `src/mcp/` | Streamable HTTP endpoint and six tools over the same service layer (bearer auth) |
 
 There is no parallel authorization path. HTTP, MCP, and CLI call the same service
 functions.
@@ -242,6 +242,33 @@ command runs both phases over due rows and is safe to repeat. Nothing deletes a 
 for a non-expired message, and no in-process scheduler exists: operators schedule the
 command externally. Sequence numbers are never reused. A separate audited hard-delete
 path for privacy requests is not implemented and is documented as a limit.
+
+## MCP transport
+
+`POST/GET/DELETE /mcp` uses the official `@modelcontextprotocol/sdk` Web-standard
+Streamable HTTP transport. The HTTP router authenticates the bearer credential **before**
+the SDK sees the request, then calls `src/mcp/http.ts` with the derived `Principal`.
+Each request re-authenticates, and every tool calls the same service function as REST,
+so there is no second authorization path and no cached authorization state.
+
+- Sessions are in-memory, process-local, and bound to the credential that initialized
+  them; an id from another credential is `404`.
+- A successful initialize returns `mcp-session-id`; later POST/DELETE require it.
+  `DELETE` closes the session. `GET` returns `405` because server-initiated SSE is not
+  offered (the spec permits this).
+- Tool arguments cannot set sender, timestamps, `body_digest`, or `idempotency_key`.
+  The adapter computes the SHA-256 of the exact UTF-8 `text` and derives the
+  idempotency key from `(session id, JSON-RPC request id, project id)`, documented in
+  [`mcp.md`](./mcp.md). The service's existing idempotency and authorization rules are
+  unchanged.
+- The 64 KiB request cap applies to `POST /mcp`.
+- Tool failures return a stable `{"error":{"code":...}}` payload with no service
+  message, stack, body, summary, or token. Invalid arguments are schema errors handled
+  before the tool runs.
+
+OAuth 2.1/PKCE, ChatGPT Web installation/linking, conversation-level tool invocation,
+SSE notifications, resumability, and cross-process session storage are not implemented
+or verified.
 
 ## Deliberate deferments
 
