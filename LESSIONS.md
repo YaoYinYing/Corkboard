@@ -6,6 +6,40 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — Passing the original Request to an SDK leaks credential headers
+
+- **Failure:** The MCP adapter authenticated the bearer token, then handed the same
+  `Request` to `transport.handleRequest`. The SDK copies request headers into the
+  handler context (`extra.requestInfo.headers`), so the bearer token reached every tool
+  handler even though documentation claimed it never did.
+- **Reproducer:** An `onToolRequest` observer on the handler context printed an
+  `authorization` key while the original request carried `Bearer ...`.
+- **Fix:** Clone the request and delete `Authorization`, `Proxy-Authorization`, and
+  `Cookie` before the transport sees it. Keep only the derived principal in
+  `authInfo.extra`. Test the handler context and tool output for absence of the token.
+- **Prevents:** Credential material entering an SDK, provider, or tool-visible context
+  that does not need it. Applies to any library that echoes request headers.
+- **Remove when:** The SDK offers an explicit context allowlist that excludes auth
+  headers by construction (still keep the negative test).
+
+## 2026-11-04 — JSON-RPC ids repeat across sessions, so MCP keys need the session
+
+- **Failure:** Deriving an MCP send idempotency key from only the JSON-RPC request id and
+  project lets two independent sessions of the same speaker both use id `1` for
+  different payloads. The second send then fails `CONFLICT` even though it is unrelated.
+- **Reproducer:** Initialize two sessions with one credential, call
+  `corkboard_send_message` in the same project with JSON-RPC id `1` but different text;
+  the second call conflicts.
+- **Fix:** Include the server-issued session id in the derivation:
+  `mcp_` + SHA-256(`"corkboard-mcp\n" + sessionId + "\n" + projectId + "\n" + requestId`).
+  The service keeps its existing `(speaker, project, key)` scope and payload-digest
+  conflict check.
+- **Prevents:** Cross-session collisions while preserving same-session replay semantics.
+  It does not prevent a client from duplicating a message by retrying with a new JSON-RPC
+  id; that residual client responsibility is documented.
+- **Remove when:** MCP sends carry an explicit client-owned idempotency token whose scope
+  and retry semantics are part of the public contract (not expected for this API).
+
 ## 2026-11-04 — Authorize once, act later is a revocation window
 
 - **Failure:** A request that passed authorization at start could still commit a

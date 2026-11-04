@@ -2,12 +2,15 @@
 // reuses the service authorization layer; no parallel authz path exists here.
 import { SCOPES, type Scope } from "../domain/authz.ts";
 import { AppError, type ErrorCode } from "../domain/errors.ts";
+import { createMcpEndpoint } from "../mcp/http.ts";
 import {
   authenticateBearer,
   authorizeProject,
   type Principal,
   type ServiceDeps,
 } from "../service/auth.ts";
+import { getPrincipalIdentity } from "../service/identity.ts";
+import { listProjects } from "../service/projects.ts";
 import {
   getMessage,
   getMessageBody,
@@ -20,7 +23,6 @@ import {
 import { expireMessageBody } from "../service/expiry.ts";
 
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
-const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const DECODER = new TextDecoder();
 
@@ -168,36 +170,6 @@ function scopeList(scopes: ReadonlySet<Scope>): Scope[] {
   return SCOPES.filter((scope) => scopes.has(scope));
 }
 
-interface ProjectCursor {
-  createdAt: string;
-  id: string;
-}
-
-function encodeCursor(createdAt: string, id: string): string {
-  return btoa(JSON.stringify({ created_at: createdAt, id }))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-}
-
-function decodeCursor(value: string): ProjectCursor {
-  let parsed: unknown;
-  try {
-    const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
-    parsed = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=")));
-  } catch {
-    throw new AppError("VALIDATION_ERROR", "Invalid cursor");
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new AppError("VALIDATION_ERROR", "Invalid cursor");
-  }
-  const record = parsed as Record<string, unknown>;
-  if (typeof record.created_at !== "string" || typeof record.id !== "string") {
-    throw new AppError("VALIDATION_ERROR", "Invalid cursor");
-  }
-  return { createdAt: record.created_at, id: record.id };
-}
-
 function projectJson(row: ProjectRow, includeUpdatedAt: boolean): Record<string, unknown> {
   const project: Record<string, unknown> = {
     id: row.id,
@@ -236,10 +208,7 @@ function isCompressionField(name: string): boolean {
 }
 
 async function handleMe(deps: ServiceDeps, principal: Principal): Promise<Response> {
-  const speaker = await deps.db.first<{ display_name: string | null }>(
-    "SELECT display_name FROM speakers WHERE id = ?",
-    [principal.speakerId],
-  );
+  const identity = await getPrincipalIdentity(deps, principal);
   const projects = principal.scopes.has("project.read")
     ? await deps.db.all<{ id: string }>(
         `SELECT p.id
@@ -254,12 +223,7 @@ async function handleMe(deps: ServiceDeps, principal: Principal): Promise<Respon
       )
     : [];
   return json(200, {
-    speaker: {
-      id: principal.speakerId,
-      display_name: speaker?.display_name ?? principal.speakerId,
-    },
-    account: { id: principal.accountId },
-    scopes: scopeList(principal.scopes),
+    ...identity,
     projects: projects.map((project) => project.id),
   });
 }
@@ -269,45 +233,14 @@ async function handleProjectList(
   principal: Principal,
   url: URL,
 ): Promise<Response> {
-  if (!principal.scopes.has("project.read")) throw new AppError("FORBIDDEN");
-
-  const limit =
-    optionalInt(url.searchParams.get("limit"), "limit", 1, MAX_LIMIT) ?? DEFAULT_LIMIT;
-  const rawCursor = url.searchParams.get("cursor");
-  const cursor = rawCursor === null || rawCursor === "" ? null : decodeCursor(rawCursor);
-
-  const where = [
-    "m.speaker_id = ?",
-    "m.removed_at IS NULL",
-    "p.status = 'active'",
-    `instr(m.capabilities, '"project.read"') > 0`,
-    "g.credential_id = ?",
-  ];
-  const params: Array<string | number> = [principal.speakerId, principal.credentialId];
-  if (cursor !== null) {
-    where.push("(p.created_at > ? OR (p.created_at = ? AND p.id > ?))");
-    params.push(cursor.createdAt, cursor.createdAt, cursor.id);
-  }
-  params.push(limit + 1);
-
-  const rows = await deps.db.all<ProjectRow>(
-    `SELECT p.id, p.title, p.summary, p.status, p.created_at, p.updated_at
-       FROM projects p
-       JOIN project_memberships m ON m.project_id = p.id
-       JOIN credential_project_grants g ON g.project_id = p.id
-      WHERE ${where.join(" AND ")}
-      ORDER BY p.created_at ASC, p.id ASC
-      LIMIT ?`,
-    params,
+  const limit = optionalInt(url.searchParams.get("limit"), "limit", 1, MAX_LIMIT);
+  return json(
+    200,
+    await listProjects(deps, principal, {
+      cursor: url.searchParams.get("cursor"),
+      ...(limit === undefined ? {} : { limit }),
+    }),
   );
-  const page = rows.slice(0, limit);
-  const last = page[page.length - 1];
-  const nextCursor =
-    rows.length > limit && last !== undefined ? encodeCursor(last.created_at, last.id) : null;
-  return json(200, {
-    projects: page.map((row) => projectJson(row, false)),
-    next_cursor: nextCursor,
-  });
 }
 
 async function handleProjectDetail(
@@ -410,10 +343,21 @@ async function route(
   request: Request,
   requestId: string,
   context: RequestContext,
+  mcp: ReturnType<typeof createMcpEndpoint>,
 ): Promise<Response> {
   const url = new URL(request.url);
   const segments = url.pathname.split("/").filter((segment) => segment !== "");
   const method = request.method.toUpperCase();
+
+  if (segments.length === 1 && segments[0] === "mcp") {
+    // Authentication precedes every MCP protocol action, including session
+    // creation. Missing/invalid credentials never reach the SDK transport.
+    if (method !== "POST" && method !== "GET" && method !== "DELETE") {
+      return methodNotAllowed("POST, GET, DELETE", requestId);
+    }
+    const principal = await authenticate(deps, request, context);
+    return mcp.handle(request, principal);
+  }
 
   if (segments.length === 1 && segments[0] === "healthz") {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
@@ -538,13 +482,14 @@ export function createApp(
   deps: ServiceDeps,
   options: CreateAppOptions = {},
 ): (request: Request) => Promise<Response> {
+  const mcp = createMcpEndpoint(deps, { maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
   return async (request: Request): Promise<Response> => {
     const started = performance.now();
     const requestId = randomRequestId();
     const context: RequestContext = {};
     let response: Response;
     try {
-      response = await route(deps, request, requestId, context);
+      response = await route(deps, request, requestId, context, mcp);
     } catch (error) {
       if (error instanceof AppError) {
         response = errorResponse(error, requestId);

@@ -55,6 +55,7 @@ export async function readCappedBody(
 function needsBody(method: string, pathname: string): boolean {
   if (method !== "POST") return false;
   const segments = pathname.split("/").filter((segment) => segment !== "");
+  if (segments.length === 1 && segments[0] === "mcp") return true;
   return (
     segments.length === 5 &&
     segments[0] === "api" &&

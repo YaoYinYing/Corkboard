@@ -1,8 +1,9 @@
 # Deployments
 
 Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slices
-A and B), and the commands below are runnable after `npm run build`. Cloudflare Workers/D1/R2 is
-planned and is not implemented or tested.
+A–D and the bearer-authenticated MCP slice), and the commands below are runnable after
+`npm run build`. Cloudflare Workers/D1/R2, OAuth 2.1/PKCE, and ChatGPT Web integration
+are planned and are not implemented or tested.
 
 ## Self-hosted Node.js 24 LTS
 
@@ -116,6 +117,24 @@ headers, set body-size limits, and provide TLS. The application must not be expo
 directly over plain HTTP beyond localhost.
 
 Health: `GET /healthz`. Backups: see `security-operations.md`.
+
+### MCP endpoint
+
+`POST /mcp` exposes the six bearer-authenticated MCP tools over Streamable HTTP;
+`DELETE /mcp` terminates a session and `GET /mcp` returns `405` (no server-initiated
+SSE). It requires the same scoped speaker token as REST. Configure each local MCP
+client with its own credential in the client's environment or MCP configuration, never
+in a prompt or chat message. `POST /mcp` shares the 64 KiB request cap; a reverse proxy
+body limit is still recommended.
+
+OAuth 2.1/PKCE, ChatGPT Web plugin installation/linking, and conversation-level ChatGPT
+tool invocation are **not implemented or verified** in this slice. Do not document or
+claim them. See [`mcp.md`](./mcp.md).
+
+Sessions are in-memory, capped at **1024 concurrent sessions** (the oldest is evicted
+first), and expire after **30 minutes idle**. Eviction closes the transport/server.
+Sessions are lost on restart and are not shared across processes; clients must
+initialize again. There is no cross-process session persistence.
 
 ## Cloudflare Workers (planned)
 

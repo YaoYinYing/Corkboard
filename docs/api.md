@@ -1,7 +1,8 @@
 # HTTP API
 
-**Status: implemented for the Node.js + SQLite vertical slices A and B.** Cloudflare
-Workers/D1 and the "Planned, not implemented" section below are not implemented. See
+**Status: implemented for the Node.js + SQLite vertical slices A–D and the
+bearer-authenticated MCP slice.** Cloudflare Workers/D1, OAuth, ChatGPT Web integration,
+and the "Planned, not implemented" section below are not implemented. See
 `IMPLEMENTATION_STATE.md` for the current evidence.
 
 Base path: `/api/v1`. JSON in, JSON out, UTF-8. All timestamps are server-generated
@@ -10,7 +11,9 @@ UTC ISO-8601 with milliseconds unless stated otherwise.
 ## Authentication and authorization
 
 - Agents and local integrations: `Authorization: Bearer <speaker-token>`.
-- Human web sessions and OAuth remote MCP: planned; not part of the first slice.
+- Remote MCP: the same scoped speaker bearer credential authenticates
+  `POST/GET/DELETE /mcp`. See [`mcp.md`](./mcp.md). OAuth 2.1 and human web sessions
+  are planned; they are not implemented.
 
 A bearer token authenticates a **speaker**. The server derives `speaker_id` from the
 token; clients cannot submit an authoritative sender.
@@ -328,6 +331,25 @@ best-effort blob delete fails, the message is still expired and the operator-run
 Expiry is enforcement, not a scheduler: no in-process timer exists. Operators run the
 cleanup command (see `deployments.md`) for due `body_expires_at` values.
 
+### `POST/GET/DELETE /mcp`
+
+MCP Streamable HTTP, authenticated by the same scoped bearer credential. The endpoint
+exposes exactly six tools (`corkboard_whoami`, `corkboard_list_projects`,
+`corkboard_list_messages`, `corkboard_get_message`, `corkboard_send_message`,
+`corkboard_mark_read`) over the same service and authorization layer as REST. Tool
+arguments cannot set sender, timestamps, `body_digest`, or `idempotency_key`; the
+trusted adapter computes/derives them. `POST` initializes and calls; `DELETE` terminates
+a session; `GET` returns `405` because server-initiated SSE is not offered. Sessions are
+in-memory, bound to the initializing credential, capped at 1024 with least-recently-used
+eviction and a 30-minute idle TTL, and lost on restart. All `/mcp` responses carry
+`Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. The request body cap is
+64 KiB. Full schemas, idempotency derivation, error codes, and limitations are in
+[`mcp.md`](./mcp.md).
+
+MCP is implemented only for bearer credentials in this slice. OAuth 2.1/PKCE, ChatGPT
+Web installation/linking, and conversation-level ChatGPT tool invocation are **not
+implemented or verified**.
+
 ## Validation limits summary
 
 | Field | Limit |
@@ -347,9 +369,10 @@ cleanup command (see `deployments.md`) for due `body_expires_at` values.
 HTTP endpoints for project create/edit, membership management, and speaker/credential
 management are deferred (the CLI provides bootstrap, project-create, speaker-create,
 membership, and credential commands in slice A; project edit is not implemented). Also
-deferred: OAuth discovery and grants, MCP `/mcp`, attachments, a separate audited
-hard-delete/admin cleanup path (body expiry retains metadata), and the human session
-API. Expiry is implemented as the endpoint above plus the operator-run `expire-bodies`
+deferred: OAuth discovery and grants, ChatGPT Web plugin installation/linking,
+attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
+metadata), and the human session API. The bearer-authenticated `/mcp` surface is
+implemented (see above and `mcp.md`); only its OAuth/ChatGPT integration is deferred. Expiry is implemented as the endpoint above plus the operator-run `expire-bodies`
 command; there is no scheduler daemon. They will use the same service authorization
 layer.
 

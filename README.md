@@ -15,11 +15,14 @@ keys and can decrypt bodies. See [`docs/threat-model.md`](docs/threat-model.md).
 ## Status
 
 Pre-alpha. This repository is built docs-first under the campaign contract in
-[`docs/campaign.md`](docs/campaign.md). Vertical slice A (Node.js + SQLite: scoped
-speaker credentials, encrypted bodies, ordered replay, receipts, HTTP API, bootstrap CLI)
-is implemented and tested locally. Cloudflare Workers/D1/R2, human web sessions, OAuth,
-MCP, the native ChatGPT Web plugin, and the dashboard remain planned. Only capabilities
-marked *implemented* in [`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist.
+[`docs/campaign.md`](docs/campaign.md). Vertical slices A–D (Node.js + SQLite: scoped
+speaker credentials and project grants, encrypted bodies, ordered replay, receipts,
+expiry, HTTP API, bootstrap CLI) and a **bearer-authenticated MCP Streamable HTTP**
+endpoint at `/mcp` are implemented and tested locally. Cloudflare Workers/D1/R2, human
+web sessions, OAuth 2.1/PKCE, ChatGPT Web installation/linking, and the dashboard remain
+planned. Only capabilities marked *implemented* in
+[`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; MCP OAuth/ChatGPT integration
+is not implemented or verified.
 
 ## Repository map
 
