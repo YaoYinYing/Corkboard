@@ -456,3 +456,49 @@ prevented regression; when to remove the advice.
 - **Prevents:** Project-existence enumeration through the dashboard.
 - **Remove when:** the product deliberately exposes discoverability separately from
   read authorization with a reviewed policy.
+
+## 2026-11-04 — Read authority is not the membership capability set
+
+- **Failure:** The session-viewer branch of `authorizeProject` returned the whole
+  membership capability set as `rights`. A read path that also checks a write
+  scope (`markRead`'s `receipt.write`) would have passed, contradicting the
+  read-only dashboard guarantee.
+- **Reproducer:** Derive a session viewer from a membership with every capability,
+  then call `markRead`; the receipt scope check succeeded before the fix.
+- **Fix:** The session branch requires the requested read scope in the parsed
+  membership capabilities, but returns only that scope as the principal's
+  `scopes` and the result's `rights`/`capabilities`. Tests assert `markRead`,
+  `sendMessage`, and expiry are rejected while timeline/body reads still work.
+- **Prevents:** A future dashboard write silently inheriting membership writes.
+- **Remove when:** the session viewer becomes a first-class principal with its own
+  read-only authorization port rather than a `Principal` reuse.
+
+## 2026-11-04 — `Origin: null` is not a cross-origin assertion
+
+- **Failure:** Login fetch-metadata validation rejected any `Origin` that did not
+  parse as a URL. Headless Chrome's CDP-driven `form.submit()` sends
+  `Origin: null`, so a otherwise-valid double-submit login returned 400.
+- **Reproducer:** Submit the dashboard login form from `Runtime.evaluate` in
+  headless Chrome and observe `Origin: null` and the expired-form page.
+- **Fix:** Treat absent or `null` Origin as no assertion and fall back to the
+  double-submit value; still reject a non-null Origin whose host differs and any
+  cross-site `Sec-Fetch-Site`.
+- **Prevents:** Breaking legitimate opaque-origin form posts while keeping the
+  defense-in-depth check for real cross-origin requests.
+- **Remove when:** every supported browser reliably supplies a usable
+  `Sec-Fetch-Site` and the double-submit fallback is no longer needed.
+
+## 2026-11-04 — Capability JSON must be parsed, not substring-matched
+
+- **Failure:** The session project listing used `instr(capabilities,
+  '"project.read"')`. A malformed or non-JSON capability string containing that
+  substring listed a project whose timeline then returned 404 because the
+  resolver parsed the same value to an empty scope set.
+- **Reproducer:** Insert `not-json "project.read" not-json` as a membership
+  capability and open the dashboard.
+- **Fix:** Fetch the account's membership rows and use `parseScopeJson` for the
+  `project.read` decision, deduplicating projects in deterministic order.
+- **Prevents:** Listing/timeline inconsistency and a substring-based authorization
+  bypass.
+- **Remove when:** capabilities are stored in a parsed relational form rather than
+  a JSON text column.

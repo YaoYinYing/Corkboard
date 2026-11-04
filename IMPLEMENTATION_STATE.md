@@ -10,8 +10,8 @@ as the work it describes.
 | --- | --- |
 | Phase | 0 complete; vertical slices A–K implemented and pushed; slice L candidate unpushed |
 | Last pushed checkpoint | `7df76f7` (slice K final docs/state tail; audited code tree `1a5d207`) on `origin/main`; CI pending |
-| Branch | `slice-l-dashboard`, original candidate `43d1937` (tree `d6fae0b`) plus audit-fix commits, independent review PENDING; `origin/main` and the branch base are `7df76f7` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice L: candidate `43d1937` on tree `d6fae0b`; security PASS with three P2s and contract PASS with six P2s on tree `905d2cb` (head `b9187ed`), fixes in the follow-up commit; independent review PENDING |
+| Branch | `slice-l-dashboard`, audit-fix candidate `bf79cd0` (tree `f7c516a`) on top of `43d1937`, independent review PENDING; `origin/main` and the branch base are `7df76f7` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice L: candidate `43d1937` on tree `d6fae0b`; security PASS with three P2s and contract PASS with six P2s on tree `905d2cb` (head `b9187ed`); audit-fix candidate `bf79cd0` on tree `f7c516a`, independent review PENDING |
 | Next milestone | Independent review of the slice-L dashboard; ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
@@ -34,6 +34,7 @@ as the work it describes.
 | `31ac9fb` | `e6fbd45` | Slice K security audit fixes: retain OAuth ownership with a live refresh row, bound grace to the Date range, add regression/exact-boundary tests | superseded by final K commit |
 | `f0e43d3` | `1a5d207` | Slice K final: retention plus docs/validation/test corrections | security PASS; contract PASS (delta on `1a5d207`) |
 | `43d1937` | `d6fae0b` | Vertical slice L: read-only human web dashboard (en/zh, session-derived viewer, server-rendered, explicit body reveal) | independent review PENDING |
+| `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | independent review PENDING |
 
 ## GitHub Issue coordination
 
@@ -805,13 +806,16 @@ pushed.
   assertions without claiming axe/WCAG conformance, add per-capability and
   no-mutation negative tests, and record the real pushed base `7df76f7`.
 - **Browser evidence.** A local headless Chrome CDP run (outside the repository; the
-  harness is deleted) observed: login page `lang=en` with a CSRF form; successful
+  harness is deleted) was rerun after the audit fixes. It observed: login page
+  `lang=en` with a CSRF form; successful
   sign-in to `/`; project list showing the project and member name; timeline order
   "First smoke message | Second smoke message" with reply and read-receipt labels;
   two body links; the first body rendered as text in a `PRE` (`hello <world> &
   "quoted"`); clicking the Chinese switch changed the document to `lang=zh-Hans`,
-  showed the Chinese timeline label, and preserved the body path. This is local
-  Chrome evidence, not Workers/D1 or an exact-revision independent review.
+  showed the Chinese timeline label, and preserved the body path. The CDP-driven
+  `form.submit()` sent `Origin: null`; that is treated as no fetch-metadata
+  assertion and the double-submit CSRF still authenticates. This is local Chrome
+  evidence, not Workers/D1 or an exact-revision independent review.
 - **Limitations.** Read-only only; the project list is capped at 100 with no UI
   pager; no filters, search, replay scrubber, attachments, previews, or image
   rendering; no project/speaker/membership/credential management or registration/
