@@ -1,7 +1,7 @@
 // Self-hosted Node adapter: plain HTTP in, Web Request/Response at the core.
 // TLS, proxy trust and body limits in front of this process are the reverse
 // proxy's job; secrets are read from the environment and never printed.
-import { mkdirSync, realpathSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,10 @@ import { keyProviderFromEnv } from "../../crypto/keys.ts";
 import type { ServiceDeps } from "../../service/auth.ts";
 import { LocalBlobStore } from "../../storage/blobs/local.ts";
 import { openSqliteDatabase } from "../../storage/db.ts";
+import {
+  requiresPrivateFilesystem,
+  verifyPrivateFilesystem,
+} from "../../storage/permissions.ts";
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "127.0.0.1";
@@ -133,14 +137,26 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   const host = env.HOST === undefined || env.HOST === "" ? DEFAULT_HOST : env.HOST;
 
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  const blobDir = join(dataDir, "blobs");
+  mkdirSync(blobDir, { recursive: true, mode: 0o700 });
+  const productionFilesystem = requiresPrivateFilesystem(env);
+  // Establish the mode first; verification below fails closed if it did not take.
+  if (productionFilesystem) chmodSync(blobDir, 0o700);
+  const databasePath = join(dataDir, "corkboard.sqlite");
+  const db = await openSqliteDatabase(databasePath);
 
   let close: () => Promise<void>;
   let shutdown: () => void;
   try {
+    verifyPrivateFilesystem({
+      dataDir,
+      blobDir,
+      databasePath,
+      production: productionFilesystem,
+    });
     const deps: ServiceDeps = {
       db,
-      blobs: new LocalBlobStore(join(dataDir, "blobs")),
+      blobs: new LocalBlobStore(blobDir),
       keys: await keyProviderFromEnv(env),
       pepper: decodePepper(env.CORKBOARD_CREDENTIAL_PEPPER),
       serviceId: "corkboard",

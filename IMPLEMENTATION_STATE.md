@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A, B, and C implemented and pushed |
+| Phase | 0 complete; vertical slices A, B, and C pushed; slice D implemented at this candidate |
 | Last pushed checkpoint | `0052909` (audited tree `8ffff4a`) on `origin/main`; CI run 41825517323 |
-| Branch | `main` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: security PASS + contract PASS on tree `8ffff4a` |
-| Next milestone | Revocation-ordering hardening, independent-process persistence evidence, and fail-closed filesystem verification; then D1/R2 parity and Phase 5 |
+| Branch | `slice-d-revocation` (candidate; not pushed) |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: security PASS + contract PASS on tree `8ffff4a`. Slice D: audits pending on this exact tree |
+| Next milestone | Independent slice-D audits; then D1/R2 parity and Phase 5 |
 
 ## Checkpoint history
 
@@ -147,6 +147,46 @@ pushed.
   option), default secrets isolation, symlinked containment escapes, in-data secrets
   rejection, and token authentication plus body decryption surviving a refused
   reinitialization.
+
+## Vertical slice D — revocation ordering, process evidence, fail-closed filesystem (candidate)
+
+- **Authorization timing.** `docs/architecture.md`, `docs/api.md`, and
+  `docs/security-operations.md` now state the exact contract: request-start
+  authorization for every path; final re-authorization immediately before the durable
+  effect for send finalization, receipt insert, and plaintext body return; request-start
+  only for reads with no write. A revocation landing after the final re-check and before
+  the atomic SQL statement is explicitly not prevented.
+- **Final re-checks.** `sendMessage` calls `authorizeProject(..., "message.send")` in
+  `publish` immediately before `finalizeMessage`, so a mid-flight revocation allocates
+  no `seq` and leaves only the documented reclaimable pending row/blob; a same-key retry
+  after re-grant resumes. `markRead` re-authorizes `message.read` and re-checks
+  `receipt.write` immediately before the receipt INSERT. `getMessageBody` re-authorizes
+  `message.read` after decryption and before returning plaintext. No duplicate
+  authorization logic exists; all three reuse `authorizeProject`.
+- **Independent-process persistence evidence.** `tests/integration/persistence-processes.test.ts`
+  provisions one SQLite file, closes the parent connection, and runs four independent
+  Node processes, each sending three messages concurrently in the same project. It
+  asserts contiguous unique `seq` 1–12, unique message ids, one completed idempotency
+  row per key, no idempotency row without a committed message, `next_seq = 12`,
+  `PRAGMA integrity_check = ok`, and one blob per message.
+- **Fail-closed filesystem.** `src/storage/permissions.ts` exports
+  `requiresPrivateFilesystem` (`NODE_ENV=production` or
+  `CORKBOARD_REQUIRE_PRIVATE_FS=1`) and `verifyPrivateFilesystem`. Production startup
+  rejects symlinked data/blob directories and requires `0700` data/blob directories and
+  `0600` database, WAL/SHM, and blob files; it throws before listening. Outside
+  production the previous best-effort behavior remains. Tests cover normal and
+  deliberately wrong modes, symlinks, the non-production path, and a real
+  production-mode `startServer`.
+- **Slice-C audit debt cleared.** `add-member` updates capabilities only for a removed
+  membership (`DO UPDATE ... WHERE removed_at IS NOT NULL`) and treats an active
+  re-run as a no-op with no extra audit row. `init` uses `lstatSync` so a dangling or
+  real `corkboard.sqlite` symlink counts as an existing installation. `/me` and project
+  enumeration are asserted to drop a project immediately after grant revocation and
+  membership removal. `remove-member` writes `credential.project.revoke` only when a
+  grant was deleted. `init` rejects a data-directory path containing a newline before
+  writing `secrets.env`.
+- Tests: 180 total, 179 pass, 1 skipped (live D1 marker). `npm run check` and
+  `npm run build` pass.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
 
@@ -394,13 +434,22 @@ Do not infer any of these from local MCP behavior or from another plan.
   scope/membership logic. Grant-specific tests set `autoGrantMemberships: false` /
   `grantExistingCredentials: false` and grant explicitly; the authoritative
   deny-by-default coverage lives in `tests/security/project-grants.test.ts`.
-- Slice-C audit P2/P3 debt: re-running `add-member` on an active membership currently
-  replaces its capability set (a non-owner rerun can downgrade an owner membership);
-  grant revocation is not asserted directly through `/me` and project-list paths;
-  the `init` database sentinel does not treat a dangling `corkboard.sqlite` symlink as
-  existing; `remove-member` writes a grant-revocation audit row even with no grants;
-  CLI mutations and their audits are separate statements, so a failure between them
-  can lose the audit row (authorization still denies by default).
+- Slice-C audit debt resolved in slice D: re-running `add-member` on an active
+  membership is a no-op (it cannot downgrade/widen or rewrite `joined_at`); a real or
+  dangling `corkboard.sqlite` symlink counts as an existing installation; `/me` and
+  project-list enumeration are asserted to drop access immediately after grant
+  revocation and membership removal; `remove-member` audits grant revocation only when
+  grants were deleted; `init` rejects newlines in the data-directory path.
+  Remaining: CLI mutations and their audits are separate statements, so a failure
+  between them can lose the audit row (authorization still denies by default).
+- Revocation re-checks narrow but do not eliminate TOCTOU. A revocation that commits
+  after the final re-check but before the atomic SQL statement (send finalization,
+  receipt INSERT) or before the plaintext response is written is not prevented. No
+  atomic-revocation guarantee is claimed. `getMessageBody` can also still return a body
+  that expires immediately after its state check, as recorded under slice B.
+- Production filesystem verification covers directories and files present at startup;
+  WAL/SHM sidecars are checked when present and are created `0600` by the adapter. It
+  does not detect a mode change made by another privileged process after startup.
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large

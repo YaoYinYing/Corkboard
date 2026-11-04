@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bootstrap CLI. Prints only ids, the secrets file path, or a one-time token —
 // never key material, proxy configuration, or stored message content.
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { scryptSync } from "node:crypto";
 import { homedir } from "node:os";
@@ -87,7 +87,23 @@ function pepperFromEnv(): Uint8Array {
 }
 
 function shellQuote(value: string): string {
+  // A newline would split the env file into a bogus second assignment.
+  if (/[\r\n]/.test(value)) {
+    throw new Error("data directory path must not contain newlines");
+  }
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+// A dangling symlink is still an existing path for bootstrap purposes: lstat
+// sees the link even when existsSync (which follows it) returns false.
+function pathOrLinkExists(target: string): boolean {
+  try {
+    lstatSync(target);
+    return true;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function hashPassword(password: string): string {
@@ -206,6 +222,9 @@ function assertSecretsSeparated(
 // key rotation is a separate, unimplemented operation (see docs/security-operations.md).
 async function initCommand(values: Values): Promise<void> {
   const dataDir = requireValue(values["data-dir"], "--data-dir");
+  if (/[\r\n]/.test(dataDir)) {
+    throw new Error("--data-dir must not contain newlines");
+  }
   const secretsOverride =
     values["secrets-file"] === undefined || values["secrets-file"] === ""
       ? undefined
@@ -215,12 +234,13 @@ async function initCommand(values: Values): Promise<void> {
 
   assertSecretsSeparated(dataDir, secretsFile, secretsIsDefault);
   const databaseFile = join(dataDir, "corkboard.sqlite");
-  if (existsSync(databaseFile)) {
+  // lstat also catches a dangling symlink, which existsSync would miss.
+  if (pathOrLinkExists(databaseFile)) {
     throw new Error(
-      `${databaseFile} exists; init refuses to modify an existing installation`,
+      `${databaseFile} exists or is a symbolic link; init refuses to modify an existing installation`,
     );
   }
-  if (existsSync(secretsFile)) {
+  if (pathOrLinkExists(secretsFile)) {
     throw new Error(`${secretsFile} exists; refusing to overwrite existing secrets`);
   }
 
@@ -234,7 +254,7 @@ async function initCommand(values: Values): Promise<void> {
   // by a symlink introduced after the first check.
   assertSecretsSeparated(dataDir, secretsFile, secretsIsDefault);
   const databaseAfter = join(dataDir, "corkboard.sqlite");
-  if (existsSync(databaseAfter) || existsSync(secretsFile)) {
+  if (pathOrLinkExists(databaseAfter) || pathOrLinkExists(secretsFile)) {
     throw new Error(`${secretsFile} exists; refusing to overwrite existing secrets`);
   }
 
@@ -310,23 +330,32 @@ async function addMemberCommand(values: Values): Promise<void> {
   const projectId = singleProject(values.project);
   const speakerId = requireValue(values.speaker, "--speaker");
   const capabilities = values.owner ? SCOPES : DEFAULT_CAPABILITIES;
-  await withDb(async (db) => {
-    await db.run(
+  const changed = await withDb(async (db) => {
+    // Only a removed membership may be reactivated. Re-running on an active
+    // membership is a no-op, so it cannot silently downgrade or widen rights.
+    const result = await db.run(
       `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT (project_id, speaker_id) DO UPDATE SET
          capabilities = excluded.capabilities,
          joined_at = excluded.joined_at,
-         removed_at = NULL`,
+         removed_at = NULL
+       WHERE project_memberships.removed_at IS NOT NULL`,
       [projectId, speakerId, JSON.stringify(capabilities), new Date().toISOString()],
     );
+    if (result.changes === 0) return false;
     await insertAudit(db, {
       operation: "membership.grant",
       speakerId,
       accountId: await speakerAccount(db, speakerId),
       projectId,
     });
+    return true;
   });
+  if (!changed) {
+    console.log(`membership already active: ${projectId} ${speakerId}`);
+    return;
+  }
   console.log(
     values.owner
       ? `owner membership added: ${projectId} ${speakerId}`
@@ -347,7 +376,7 @@ async function removeMemberCommand(values: Values): Promise<void> {
     // Removing a membership also removes that speaker's grants for the project,
     // so re-adding the membership cannot revive an old credential. Grants are
     // not restored automatically; they must be granted again explicitly.
-    await db.run(
+    const grants = await db.run(
       `DELETE FROM credential_project_grants
         WHERE project_id = ?
           AND credential_id IN (SELECT id FROM credentials WHERE speaker_id = ?)`,
@@ -359,13 +388,16 @@ async function removeMemberCommand(values: Values): Promise<void> {
       accountId: await speakerAccount(db, speakerId),
       projectId,
     });
-    await insertAudit(db, {
-      operation: "credential.project.revoke",
-      speakerId,
-      accountId: await speakerAccount(db, speakerId),
-      projectId,
-      detail: JSON.stringify({ projects: [projectId], source: "membership.remove" }),
-    });
+    // Audit a grant revocation only when a grant was actually deleted.
+    if (grants.changes > 0) {
+      await insertAudit(db, {
+        operation: "credential.project.revoke",
+        speakerId,
+        accountId: await speakerAccount(db, speakerId),
+        projectId,
+        detail: JSON.stringify({ projects: [projectId], source: "membership.remove" }),
+      });
+    }
   });
   console.log(`membership removed: ${projectId} ${speakerId}`);
 }

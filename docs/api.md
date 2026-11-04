@@ -50,6 +50,26 @@ the credential/membership intersection.
 - An existing grant does not add rights. Without the scope in both the credential and
   the membership, the request is still `FORBIDDEN`.
 
+### Authorization timing
+
+Every request authorizes at request start. Paths with a durable effect or a plaintext
+response re-authorize immediately before that effect, against current storage:
+
+- `POST .../messages` re-authorizes `message.send` before the finalization that assigns
+  `seq`; a revocation in between publishes nothing and allocates no sequence. A later
+  retry with the same `Idempotency-Key` after an explicit re-grant resumes.
+- `POST .../read` re-authorizes `message.read` and re-checks `receipt.write` before the
+  receipt INSERT; no receipt is written on denial.
+- `GET .../body` re-authorizes `message.read` after decryption and before returning the
+  plaintext; no content, receipt, or integrity audit is produced on denial.
+
+Message list, message metadata, `/me`, and `GET /projects` write nothing and are
+authorized at request start only. No authorization cache exists.
+
+This is not an atomic-revocation guarantee: a revocation that commits after the final
+re-check but before the atomic SQL statement (or before the response is written) is not
+prevented, and no stronger guarantee is claimed.
+
 The bootstrap CLI `issue-key` accepts one or more `--project <id>` occurrences and
 `--scopes <comma-separated>`; without `--scopes` the default remains `project.read`,
 `message.read`, `message.send`, `receipt.write`. At least one project is required.

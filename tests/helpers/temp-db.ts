@@ -345,7 +345,7 @@ export function runStorageContract(
   });
 
   test(
-    scenario("100 concurrent finalizations get unique contiguous seqs and retry"),
+    scenario("100 same-process concurrent finalizations get unique contiguous seqs and retry"),
     async (t) => {
       const storage = await openStorage();
       t.after(() => storage.dispose());

@@ -176,6 +176,40 @@ never sufficient authorization.
 No success response is returned before a committed metadata row references readable
 ciphertext. Content hashes detect corruption; no cross-tenant deduplication.
 
+## Authorization timing and revocation ordering
+
+Authorization is evaluated in two places, deliberately:
+
+1. **Request start.** Every authenticated entry point authenticates the bearer
+   credential once and then calls `authorizeProject` for the requested scope before
+   inspecting payloads or object state.
+2. **Immediately before the durable effect.** State-changing and plaintext-returning
+   paths re-evaluate against current storage and ignore the earlier decision:
+   - `sendMessage` re-authorizes `message.send` immediately before the finalization
+     `UPDATE` that assigns `seq` and publishes the row. A revocation or membership
+     removal in that window prevents publication; the provisional row and blob stay
+     reclaimable, and a later retry with the same idempotency key after an explicit
+     re-grant resumes normally.
+   - `markRead` re-authorizes `message.read` and re-checks `receipt.write` immediately
+     before the receipt `INSERT`. A revocation in that window creates no receipt.
+   - `getMessageBody` re-authorizes `message.read` after decryption and immediately
+     before the plaintext response. A revocation in that window returns no content,
+     writes no integrity audit, and creates no receipt.
+
+Reads that write nothing (message list, message metadata, `/me`, project enumeration)
+are authorized at request start only. Expiry and CLI mutations are authorized at
+request start and do not return plaintext.
+
+Decision order is unchanged: no active credential or principal → `UNAUTHENTICATED`;
+unknown/inactive project, missing or removed membership → `NOT_FOUND`; active
+membership without the required credential-project grant or scope → `FORBIDDEN`.
+
+This narrows the stale-authorization window; it is **not** an atomic-revocation
+guarantee. A revocation that commits after the final re-check but before the atomic SQL
+statement (or before the plaintext response write) is not prevented, and no such
+stronger guarantee is claimed. There is no authorization cache: credential, grant,
+membership, speaker, account, and project state are read from storage on each decision.
+
 ## Deletion and expiry
 
 Implemented for the Node.js/SQLite deployment. Default `body_expires_at` is `NULL` (no

@@ -6,6 +6,53 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — Authorize once, act later is a revocation window
+
+- **Failure:** A request that passed authorization at start could still commit a
+  message, write a receipt, or return plaintext after the credential, grant, or
+  membership had been revoked mid-flight.
+- **Reproducer:** Wrap the blob store so the grant/credential/membership is revoked
+  between the initial `authorizeProject` and the finalize statement, receipt INSERT, or
+  plaintext return; the operation previously succeeded.
+- **Fix:** `sendMessage` re-authorizes `message.send` immediately before finalization,
+  `markRead` re-authorizes `message.read` and `receipt.write` before the receipt INSERT,
+  and `getMessageBody` re-authorizes `message.read` after decryption before returning.
+  All reuse `authorizeProject`; reads with no write stay request-start-only.
+- **Prevents:** Acting on stale access after revocation. It does not prevent a
+  revocation landing after the final re-check and before the atomic SQL statement; no
+  atomic-revocation guarantee is claimed.
+- **Test note:** the interleavings are deterministic by wrapping `BlobStore.put/get` in
+  `tests/integration/messages.test.ts`.
+- **Remove when:** Later versions use an authorization epoch checked inside the same
+  atomic statement (not expected for SQLite/D1).
+
+## 2026-11-04 — `existsSync` follows symlinks, so bootstrap can miss one
+
+- **Failure:** `init` used `existsSync(corkboard.sqlite)`. A dangling symlink resolves
+  to a missing target, so the sentinel returned false and initialization proceeded.
+- **Reproducer:** Create `corkboard.sqlite` as a symlink to a nonexistent path, then run
+  `init`; it generated keys instead of refusing.
+- **Fix:** `lstatSync` (via `pathOrLinkExists`) treats any directory entry, including a
+  dangling or real symlink, as an existing installation. The same guard covers the
+  secrets path.
+- **Prevents:** Bootstrap writing into an installation whose database path was
+  redirected.
+- **Remove when:** Initialization is replaced by an explicit migration/repair tool.
+
+## 2026-11-04 — Re-running a membership grant must not rewrite active rights
+
+- **Failure:** `add-member` used `ON CONFLICT DO UPDATE` unconditionally, so a non-owner
+  re-run replaced an owner membership's capabilities and `joined_at`.
+- **Reproducer:** `add-member --owner`, then `add-member` without `--owner`; the
+  membership lost `member.manage`/`project.edit`.
+- **Fix:** the conflict update is gated by
+  `WHERE project_memberships.removed_at IS NOT NULL`; an active membership is a no-op
+  with no second audit row. Only reactivation of a removed membership may replace
+  capabilities.
+- **Prevents:** Silent privilege downgrade (or widening) from a repeatable CLI command.
+- **Remove when:** Membership management moves behind an explicit versioned update API.
+
+
 ## 2026-11-04 — A membership alone is not a credential grant
 
 - **Failure:** Authorization intersected credential scopes with *any* active membership
