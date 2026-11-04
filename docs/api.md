@@ -1,8 +1,8 @@
 # HTTP API
 
-**Status: planned contract for the first vertical slice. None of these endpoints exist
-at the Phase 0 bootstrap tree.** They are specified now so implementation and tests
-follow one authorization model. See `IMPLEMENTATION_STATE.md` for what is implemented.
+**Status: implemented for the Node.js + SQLite vertical slice A.** Cloudflare Workers/
+D1 and the "Planned, not implemented" section below are not implemented. See
+`IMPLEMENTATION_STATE.md` for the current evidence.
 
 Base path: `/api/v1`. JSON in, JSON out, UTF-8. All timestamps are server-generated
 UTC ISO-8601 with milliseconds unless stated otherwise.
@@ -48,7 +48,9 @@ Stable codes: `UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `VALIDATION_ERROR`,
 
 A denied project or message reference returns `NOT_FOUND` regardless of whether the
 object exists, so unauthorized callers cannot probe existence. Authorization is checked
-before response-shape decisions such as body state.
+before response-shape decisions such as body state. An unknown route returns 404
+`NOT_FOUND`; a known path with an unsupported method returns 405 with an `Allow` header
+and code `NOT_FOUND`.
 
 ## Endpoints
 
@@ -95,7 +97,7 @@ effective capabilities. A non-member receives `NOT_FOUND`.
 ### `POST /api/v1/projects/:projectId/messages`
 
 Requires `message.send` plus active membership. Header `Idempotency-Key` is mandatory
-(1–128 printable ASCII characters). Idempotency is scoped to `(authenticated speaker, project, key)`: the same
+(1–128 non-space printable ASCII characters, 0x21–0x7E). Idempotency is scoped to `(authenticated speaker, project, key)`: the same
 key in another speaker or project is independent, and a response is never returned
 across those boundaries.
 
@@ -121,8 +123,8 @@ Body:
 - `body_digest`: required; SHA-256 of the exact original `text` bytes, encoded
   `sha256:<lowercase hex>`. The server recomputes it over the received bytes and
   rejects a mismatch with `INTEGRITY_MISMATCH` **before** allocating a sequence,
-  writing a blob, or committing metadata. The verified digest is bound into the
-  AEAD AAD and travels inside the authenticated envelope.
+  writing a blob, or committing metadata. The verified digest is encrypted inside the
+  payload and verified again after decryption; it is not in the AAD or outer header.
 - `reply_to_id`: optional; must exist in the same project (tombstones allowed).
 - `client_sent_at`: optional untrusted metadata, stored for diagnostics only.
 - `speaker_id`, `received_at`, `seq`, `committed_at`, and compression fields are
@@ -155,6 +157,8 @@ Requires `message.read` plus membership. Query:
 
 Ascending `seq`. At most one of `after_seq`/`before_seq` may be present. Returns
 metadata only; bodies are never included, and listing never marks anything read.
+Sequence is assigned atomically at finalization, so pending/provisional messages are
+never returned and a cursor never advances past an unpublished lower sequence.
 
 ```json
 { "messages": [ { "message_id": "msg_...", "project_id": "proj_...", "seq": 42,
@@ -173,8 +177,9 @@ forward page. For older history, pass the smallest returned `seq` as `before_seq
 ### `GET /api/v1/projects/:projectId/messages/:messageId`
 
 Requires `message.read` plus membership. Returns exactly one message object in the
-same shape as the list endpoint, plus `"read_by": [{ "speaker_id", "read_at" }]`
-for receipts visible to the caller. Metadata only; never marks read.
+same shape as the list endpoint, plus `"read_by": [{ "speaker_id", "read_at" }]`.
+All receipts for that message are visible to any project member with `message.read`.
+Metadata only; never marks read.
 
 ### `GET /api/v1/projects/:projectId/messages/:messageId/body`
 
@@ -195,16 +200,18 @@ Requires `message.read` plus membership. Authorization precedes state decisions:
 
 Integrity lifecycle: before decrypting, the server verifies the stored ciphertext
 SHA-256 against its recorded ciphertext digest; after decrypting, it verifies the
-AAD-bound plaintext digest against the decrypted bytes. Any mismatch returns
+plaintext digest embedded inside the decrypted payload. Any mismatch returns
 `INTEGRITY_FAILURE` with no content, creates no read receipt, and is audited. A failed
 body fetch never marks a message read.
 
 ### `POST /api/v1/projects/:projectId/messages/:messageId/read`
 
-Requires `receipt.write` plus membership. The target must be a committed message in the
-calling speaker's project. Idempotent; stamps server time. Returns
-`{ "message_id", "speaker_id", "read_at" }`. Reading is not proof of understanding or
-execution.
+Requires `message.read` **and** `receipt.write`, plus membership. The target must be a
+committed (`ready`) message whose body integrity verifies: expired, pending, corrupt, or
+inaccessible messages are not acknowledged and create no receipt (`BODY_EXPIRED`,
+`NOT_FOUND`, or `INTEGRITY_FAILURE`). Idempotent; stamps server time. Returns
+`{ "message_id", "speaker_id", "read_at" }`. A receipt is a client assertion that the
+content was fetched, not proof of understanding or execution.
 
 ## Validation limits summary
 
@@ -215,12 +222,18 @@ execution.
 | `type` | 32 ASCII chars, `^[a-z][a-z0-9_.-]{0,31}$` |
 | `language` | canonical BCP 47 |
 | `body_digest` | `sha256:` + 64 lowercase hex characters |
-| `Idempotency-Key` | 1–128 printable ASCII |
+| `Idempotency-Key` | 1–128 non-space printable ASCII (0x21–0x7E) |
 | List `limit` | 1–100 |
 | Request body | 64 KiB (first slice; attachments separate and not implemented) |
 
 ## Planned, not implemented
 
-Project create/edit, membership management, speaker/credential management, OAuth
-discovery and grants, MCP `/mcp`, attachments, expiry worker, admin cleanup, and the
-human session API. They will use the same service authorization layer.
+HTTP endpoints for project create/edit, membership management, and speaker/credential
+management are deferred (the CLI provides bootstrap equivalents in slice A). Also
+deferred: OAuth discovery and grants, MCP `/mcp`, attachments, expiry worker, admin
+cleanup, and the human session API. They will use the same service authorization layer.
+
+MCP callers do not pass `body_digest` or `idempotency_key`: the trusted MCP adapter
+computes the digest from `text` and derives the idempotency key from transport/request
+context. The REST API retains mandatory `Idempotency-Key` and independent digest
+verification for non-MCP clients.

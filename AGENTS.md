@@ -18,8 +18,9 @@ imports this file; do not create a divergent copy.
   authorize with `WHERE id = ?` alone and never leak whether a forbidden object exists.
 - Credentials are random, displayed once, stored only as prefix + keyed HMAC verifier.
   Revocation/expiry is checked on every request.
-- AES-256-GCM only, fresh nonce per encryption, AAD binds service/project/message/
-  object/format/compression and the sender-verified plaintext SHA-256. Fail closed on
+- AES-256-GCM only, fresh nonce per encryption. AAD binds only pre-decryption metadata:
+  service/project/message/object/format/compression. The sender-verified plaintext
+  SHA-256 is encrypted inside the payload and verified after decryption. Fail closed on
   tamper.
 - Idempotency keys are mandatory for posting; same key + different payload is a
   conflict.

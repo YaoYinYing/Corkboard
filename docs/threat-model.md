@@ -45,10 +45,13 @@ history; audit records; administrative privilege; availability; metadata privacy
    or AAD fails closed.
 6. Repeated idempotency keys cannot create duplicate committed messages; a different
    payload under the same key is a conflict.
-7. Concurrent posts receive unique, monotonically increasing per-project sequences;
-   replay returns committed records in order.
+7. Concurrent posts receive unique per-project sequences at atomic finalization; no
+   provisional row is published with a sequence, and replay returns committed records
+   in cursor order without skipping a published lower sequence.
 8. An expired/tombstoned body cannot be fetched, but retained metadata is visible only
-   to authorized project members.
+   to authorized project members. A receipt requires both `message.read` and
+   `receipt.write` and cannot acknowledge a pending, expired, corrupt, or inaccessible
+   body.
 9. Uploaded bytes are bounded, validated, and never executed. No attachment-to-command
    path exists.
 10. No endpoint authorizes code execution; message text cannot change platform
@@ -56,7 +59,8 @@ history; audit records; administrative privilege; availability; metadata privacy
 11. Message integrity is end-to-end verified: the sender-supplied SHA-256 must match
     the received original bytes before any write, sequence allocation, or idempotency
     record (`INTEGRITY_MISMATCH` otherwise); the
-    plaintext digest is bound into the AEAD AAD and envelope; a separate ciphertext
+    plaintext digest is encrypted inside the payload and verified after decryption (the
+    AAD binds only pre-decryption metadata); a separate ciphertext
     SHA-256 is verified before decryption. Stored-content mismatch fails closed
     (`INTEGRITY_FAILURE`) with no content and no read receipt.
 

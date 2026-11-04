@@ -14,9 +14,12 @@ keys and can decrypt bodies. See [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Status
 
-Pre-alpha. This repository is being built docs-first under the campaign contract in
-[`docs/campaign.md`](docs/campaign.md). Only capabilities marked *implemented* in
-[`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; everything else is planned.
+Pre-alpha. This repository is built docs-first under the campaign contract in
+[`docs/campaign.md`](docs/campaign.md). Vertical slice A (Node.js + SQLite: scoped
+speaker credentials, encrypted bodies, ordered replay, receipts, HTTP API, bootstrap CLI)
+is implemented and tested locally. Cloudflare Workers/D1/R2, human web sessions, OAuth,
+MCP, the native ChatGPT Web plugin, and the dashboard remain planned. Only capabilities
+marked *implemented* in [`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist.
 
 ## Repository map
 
@@ -24,10 +27,10 @@ Pre-alpha. This repository is being built docs-first under the campaign contract
 | --- | --- |
 | `TODO.md` | Normative design and acceptance checklist |
 | `docs/` | Architecture, threat model, API, operations, deployments, campaign contract |
-| `src/` | TypeScript core and Node.js adapter (planned; not present yet) |
-| `migrations/` | Versioned, D1/SQLite-compatible SQL (planned; not present yet) |
-| `tests/` | Test suites for unit, contract, integration and security checks (currently secret-scan tests only) |
-| `scripts/` | Repository checks; bootstrap CLI planned |
+| `src/` | TypeScript core, storage/crypto/auth, message service, and Node.js adapter |
+| `migrations/` | Versioned, D1/SQLite-compatible SQL |
+| `tests/` | Unit, contract, integration, and security tests |
+| `scripts/` | Secret scans, migration copy, and the bootstrap CLI |
 
 ## Local development
 
@@ -37,6 +40,10 @@ Requires Node.js 24 LTS.
 npm install
 npm run check        # staged + history secret scan, typecheck, tests
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Security
 

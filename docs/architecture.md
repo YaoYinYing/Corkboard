@@ -86,16 +86,25 @@ interface Clock {
 }
 ```
 
-Atomic per-project sequence allocation uses one statement, so it needs no interactive
-transaction (which D1 does not provide):
+Sequence allocation happens at **finalization**, not at acceptance. Provisional rows
+carry `seq = NULL` and are invisible. One UPDATE assigns the next sequence and publishes
+the row; an `AFTER UPDATE` trigger advances `projects.next_seq` and completes the
+idempotency row in the same atomic statement. Publication order therefore equals
+sequence order, and a cursor reader cannot advance past an unpublished lower sequence.
 
 ```sql
-UPDATE projects SET next_seq = next_seq + 1
-WHERE id = ?1 AND status = 'active'
-RETURNING next_seq;
+UPDATE messages
+   SET seq = (SELECT p.next_seq + 1 FROM projects p
+               WHERE p.id = messages.project_id AND p.status = 'active'),
+       body_state = 'ready', committed_at = ?1, body_object_id = ?2
+ WHERE id = ?3 AND project_id = ?4 AND body_state = 'pending'
+RETURNING seq;
 ```
 
-Gaps are acceptable after a failed post; duplicates and reuse are not.
+Concurrent finalizations can collide on `(project_id, seq)`; the loser retries and takes
+the next sequence. Duplicates and reuse are forbidden. The trigger is part of the
+atomicity contract and must be ported to D1 unchanged; no interactive transaction is
+required.
 
 ## Data model
 
@@ -115,8 +124,8 @@ Shared relational schema; no table-per-project.
 - `messages` — immutable `(project_id, seq)`, sender, summary metadata, body state.
 - `message_receipts` — `(message_id, speaker_id)` with server-stamped read time.
 - `body_objects` — ciphertext location, nonce, key version, compression, ciphertext
-  digest. The plaintext digest is not stored in the DB; it lives in the sealed
-  envelope and the AEAD AAD.
+  digest. The plaintext digest is not stored in the DB; it is encrypted inside the
+  payload, and the AAD binds only pre-decryption metadata.
 - `idempotency_keys` — `(speaker_id, project_id, key)` with payload digest and result.
 - `audit_events` — sanitized security events.
 - `service_settings` — non-secret deployment preferences only.
@@ -134,15 +143,19 @@ query filters on `project_id`; object access alone is never sufficient authoriza
    `(speaker_id, project_id, key)`. If an existing row in that scope has a different
    payload digest → `CONFLICT`; if completed → return the stored result. Keys in
    another speaker or project are independent and never return another's response.
-4. Allocate `seq` with the atomic `UPDATE ... RETURNING` above.
-5. Insert the message with `body_state = 'pending'`; normal reads exclude it.
-6. Encrypt the body with AES-256-GCM. The AAD binds the verified plaintext digest,
-   and the envelope carries it; record the ciphertext SHA-256 separately. Write the
-   ciphertext blob.
-7. Mark `body_objects` and the message `ready`, stamp `committed_at`, mark the
-   idempotency row completed.
-8. On read: verify the ciphertext digest, decrypt, then verify the AAD-bound
-   plaintext digest. A mismatch is `INTEGRITY_FAILURE`: no content, no receipt.
+4. Insert the message with `seq = NULL` and `body_state = 'pending'`; normal reads
+   exclude provisional rows.
+5. Encrypt the body with AES-256-GCM. The AAD binds only pre-decryption metadata; the
+   verified plaintext digest is encrypted inside the payload. Record the ciphertext
+   SHA-256 separately. Write the ciphertext blob.
+6. Atomically finalize with the single `UPDATE ... RETURNING` above: assign `seq`, set
+   `ready`, stamp `committed_at` and `body_object_id`; the trigger advances
+   `projects.next_seq` and marks the idempotency row completed. Retry on a unique
+   sequence collision. No provisional row is ever visible with a sequence.
+8. On read: verify the computed ciphertext SHA-256 against the digest stored in
+   `body_objects` (the DB is the authority, not the envelope header), decrypt, then
+   verify the plaintext digest embedded in the payload. A mismatch is
+   `INTEGRITY_FAILURE`: no content, no receipt.
 9. On failure after step 5, leave a reclaimable pending row and an orphan blob record;
    diagnostics report both. A retry with the same key resumes or replaces safely.
 

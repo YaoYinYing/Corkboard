@@ -1,0 +1,560 @@
+// Platform-neutral HTTP handlers over Web Request/Response. Every data route
+// reuses the service authorization layer; no parallel authz path exists here.
+import { SCOPES, type Scope } from "../domain/authz.ts";
+import { AppError, type ErrorCode } from "../domain/errors.ts";
+import {
+  authenticateBearer,
+  authorizeProject,
+  type Principal,
+  type ServiceDeps,
+} from "../service/auth.ts";
+import {
+  getMessage,
+  getMessageBody,
+  listMessages,
+  markRead,
+  sendMessage,
+  type ListMessagesQuery,
+  type MessageMetadata,
+} from "../service/messages.ts";
+
+export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 100;
+const DECODER = new TextDecoder();
+
+const FORBIDDEN_SEND_FIELDS: ReadonlySet<string> = new Set([
+  "speaker_id",
+  "seq",
+  "received_at",
+  "committed_at",
+]);
+
+export interface RequestLogEntry {
+  requestId: string;
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+  errorCode?: string;
+  speakerId?: string;
+  accountId?: string;
+}
+
+export interface CreateAppOptions {
+  logger?: (entry: RequestLogEntry) => void;
+}
+
+interface RequestContext {
+  principal?: Principal;
+}
+
+interface ProjectRow {
+  id: string;
+  title: string;
+  summary: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+function randomRequestId(): string {
+  const raw = crypto.getRandomValues(new Uint8Array(16));
+  let binary = "";
+  for (const byte of raw) binary += String.fromCharCode(byte);
+  return `req_${btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
+}
+
+function json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  });
+  for (const [name, value] of Object.entries(extra)) headers.set(name, value);
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
+function errorBody(code: ErrorCode, message: string, requestId: string): unknown {
+  return { error: { code, message, request_id: requestId } };
+}
+
+function errorResponse(error: AppError, requestId: string): Response {
+  return json(
+    error.httpStatus,
+    errorBody(error.code, error.message, requestId),
+    error.code === "UNAUTHENTICATED" ? { "www-authenticate": "Bearer" } : {},
+  );
+}
+
+// Adapters that reject an oversized stream before building a Request use the
+// same envelope and headers as in-app validation.
+export function requestTooLargeResponse(): Response {
+  return errorResponse(new AppError("REQUEST_TOO_LARGE"), randomRequestId());
+}
+
+function notFound(requestId: string): Response {  return json(404, errorBody("NOT_FOUND", "Not found", requestId));
+}
+
+function methodNotAllowed(allow: string, requestId: string): Response {
+  return json(405, errorBody("NOT_FOUND", "Method not allowed", requestId), { allow });
+}
+
+// Records the authenticated principal for sanitized request logging.
+async function authenticate(
+  deps: ServiceDeps,
+  request: Request,
+  context: RequestContext,
+): Promise<Principal> {
+  const principal = await authenticateBearer(
+    deps,
+    request.headers.get("authorization") ?? undefined,
+  );
+  context.principal = principal;
+  return principal;
+}
+
+async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
+  const declared = request.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0) {
+      throw new AppError("VALIDATION_ERROR", "Invalid Content-Length");
+    }
+    if (length > MAX_REQUEST_BODY_BYTES) throw new AppError("REQUEST_TOO_LARGE");
+  }
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > MAX_REQUEST_BODY_BYTES) throw new AppError("REQUEST_TOO_LARGE");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(DECODER.decode(bytes));
+  } catch {
+    throw new AppError("VALIDATION_ERROR", "Malformed JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new AppError("VALIDATION_ERROR", "Body must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function optionalInt(
+  value: string | null,
+  name: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (value === null) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new AppError("VALIDATION_ERROR", `${name} must be an integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new AppError("VALIDATION_ERROR", `${name} must be ${min}-${max}`);
+  }
+  return parsed;
+}
+
+function optionalBoolean(value: string | null, name: string): boolean | undefined {
+  if (value === null) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new AppError("VALIDATION_ERROR", `${name} must be true or false`);
+}
+
+function scopeList(scopes: ReadonlySet<Scope>): Scope[] {
+  return SCOPES.filter((scope) => scopes.has(scope));
+}
+
+interface ProjectCursor {
+  createdAt: string;
+  id: string;
+}
+
+function encodeCursor(createdAt: string, id: string): string {
+  return btoa(JSON.stringify({ created_at: createdAt, id }))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+function decodeCursor(value: string): ProjectCursor {
+  let parsed: unknown;
+  try {
+    const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+    parsed = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=")));
+  } catch {
+    throw new AppError("VALIDATION_ERROR", "Invalid cursor");
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new AppError("VALIDATION_ERROR", "Invalid cursor");
+  }
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.created_at !== "string" || typeof record.id !== "string") {
+    throw new AppError("VALIDATION_ERROR", "Invalid cursor");
+  }
+  return { createdAt: record.created_at, id: record.id };
+}
+
+function projectJson(row: ProjectRow, includeUpdatedAt: boolean): Record<string, unknown> {
+  const project: Record<string, unknown> = {
+    id: row.id,
+    title: row.title,
+    summary: row.summary,
+    status: row.status,
+    created_at: row.created_at,
+  };
+  if (includeUpdatedAt) project.updated_at = row.updated_at;
+  return project;
+}
+
+function messageJson(message: MessageMetadata): Record<string, unknown> {
+  return {
+    message_id: message.messageId,
+    project_id: message.projectId,
+    seq: message.seq,
+    sender: {
+      id: message.sender.speakerId,
+      display_name: message.sender.displayName,
+    },
+    summary: message.summary,
+    type: message.type,
+    language: message.language,
+    reply_to_id: message.replyToId,
+    body_state: message.bodyState,
+    client_sent_at: message.clientSentAt,
+    received_at: message.receivedAt,
+    committed_at: message.committedAt,
+  };
+}
+
+function isCompressionField(name: string): boolean {
+  return name === "compression" || name.startsWith("compression_");
+}
+
+async function handleMe(deps: ServiceDeps, principal: Principal): Promise<Response> {
+  const speaker = await deps.db.first<{ display_name: string | null }>(
+    "SELECT display_name FROM speakers WHERE id = ?",
+    [principal.speakerId],
+  );
+  const projects = principal.scopes.has("project.read")
+    ? await deps.db.all<{ id: string }>(
+        `SELECT p.id
+           FROM projects p
+           JOIN project_memberships m ON m.project_id = p.id
+          WHERE m.speaker_id = ? AND m.removed_at IS NULL AND p.status = 'active'
+            AND instr(m.capabilities, '"project.read"') > 0
+          ORDER BY p.created_at ASC, p.id ASC`,
+        [principal.speakerId],
+      )
+    : [];
+  return json(200, {
+    speaker: {
+      id: principal.speakerId,
+      display_name: speaker?.display_name ?? principal.speakerId,
+    },
+    account: { id: principal.accountId },
+    scopes: scopeList(principal.scopes),
+    projects: projects.map((project) => project.id),
+  });
+}
+
+async function handleProjectList(
+  deps: ServiceDeps,
+  principal: Principal,
+  url: URL,
+): Promise<Response> {
+  if (!principal.scopes.has("project.read")) throw new AppError("FORBIDDEN");
+
+  const limit =
+    optionalInt(url.searchParams.get("limit"), "limit", 1, MAX_LIMIT) ?? DEFAULT_LIMIT;
+  const rawCursor = url.searchParams.get("cursor");
+  const cursor = rawCursor === null || rawCursor === "" ? null : decodeCursor(rawCursor);
+
+  const where = [
+    "m.speaker_id = ?",
+    "m.removed_at IS NULL",
+    "p.status = 'active'",
+    `instr(m.capabilities, '"project.read"') > 0`,
+  ];
+  const params: Array<string | number> = [principal.speakerId];
+  if (cursor !== null) {
+    where.push("(p.created_at > ? OR (p.created_at = ? AND p.id > ?))");
+    params.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  params.push(limit + 1);
+
+  const rows = await deps.db.all<ProjectRow>(
+    `SELECT p.id, p.title, p.summary, p.status, p.created_at, p.updated_at
+       FROM projects p
+       JOIN project_memberships m ON m.project_id = p.id
+      WHERE ${where.join(" AND ")}
+      ORDER BY p.created_at ASC, p.id ASC
+      LIMIT ?`,
+    params,
+  );
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  const nextCursor =
+    rows.length > limit && last !== undefined ? encodeCursor(last.created_at, last.id) : null;
+  return json(200, {
+    projects: page.map((row) => projectJson(row, false)),
+    next_cursor: nextCursor,
+  });
+}
+
+async function handleProjectDetail(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+): Promise<Response> {
+  const access = await authorizeProject(deps, principal, projectId, "project.read");
+  const row = await deps.db.first<ProjectRow>(
+    `SELECT id, title, summary, status, created_at, updated_at
+       FROM projects WHERE id = ?`,
+    [projectId],
+  );
+  if (row === undefined) throw new AppError("NOT_FOUND");
+  return json(200, {
+    project: projectJson(row, true),
+    capabilities: scopeList(access.rights),
+  });
+}
+
+async function handleSendMessage(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  request: Request,
+): Promise<Response> {
+  // Authorization precedes body parsing so denied callers learn nothing about
+  // payload validity. sendMessage repeats this check after its own validation.
+  await authorizeProject(deps, principal, projectId, "message.send");
+
+  const body = await readJsonObject(request);
+  for (const name of Object.keys(body)) {
+    if (FORBIDDEN_SEND_FIELDS.has(name) || isCompressionField(name)) {
+      throw new AppError("VALIDATION_ERROR", `${name} is assigned by the server`);
+    }
+  }
+
+  const replyTo = body.reply_to_id === undefined || body.reply_to_id === null
+    ? null
+    : (body.reply_to_id as string);
+  const clientSentAt = body.client_sent_at === undefined || body.client_sent_at === null
+    ? null
+    : (body.client_sent_at as string);
+
+  const idempotencyKey = request.headers.get("idempotency-key") ?? "";
+  // A prior row means this is a replay of an already accepted request.
+  const replay =
+    idempotencyKey !== "" &&
+    (await deps.db.first(
+      `SELECT 1 AS present FROM idempotency_keys
+        WHERE speaker_id = ? AND project_id = ? AND key = ?`,
+      [principal.speakerId, projectId, idempotencyKey],
+    )) !== undefined;
+
+  const result = await sendMessage(deps, principal, projectId, idempotencyKey, {
+    summary: body.summary as string,
+    type: body.type as string,
+    language: body.language as string,
+    text: body.text as string,
+    bodyDigest: body.body_digest as string,
+    replyToId: replyTo,
+    clientSentAt,
+  });
+  return json(replay ? 200 : 201, {
+    message_id: result.messageId,
+    project_id: result.projectId,
+    seq: result.seq,
+    committed_at: result.committedAt,
+    body_state: result.bodyState,
+    digest: result.digest,
+  });
+}
+
+function listQueryFrom(url: URL): ListMessagesQuery {
+  const query: ListMessagesQuery = {};
+  const afterSeq = optionalInt(url.searchParams.get("after_seq"), "after_seq", 0, Number.MAX_SAFE_INTEGER);
+  if (afterSeq !== undefined) query.afterSeq = afterSeq;
+  const beforeSeq = optionalInt(url.searchParams.get("before_seq"), "before_seq", 0, Number.MAX_SAFE_INTEGER);
+  if (beforeSeq !== undefined) query.beforeSeq = beforeSeq;
+  const limit = optionalInt(url.searchParams.get("limit"), "limit", 1, MAX_LIMIT);
+  if (limit !== undefined) query.limit = limit;
+  const unread = optionalBoolean(url.searchParams.get("unread"), "unread");
+  if (unread !== undefined) query.unread = unread;
+
+  const type = url.searchParams.get("type");
+  if (type !== null) query.type = type;
+  const sender = url.searchParams.get("sender");
+  if (sender !== null) query.sender = sender;
+  const q = url.searchParams.get("q");
+  if (q !== null) query.q = q;
+  return query;
+}
+
+async function route(
+  deps: ServiceDeps,
+  request: Request,
+  requestId: string,
+  context: RequestContext,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const segments = url.pathname.split("/").filter((segment) => segment !== "");
+  const method = request.method.toUpperCase();
+
+  if (segments.length === 1 && segments[0] === "healthz") {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    return json(200, { status: "ok" });
+  }
+
+  const isApi = segments[0] === "api" && segments[1] === "v1";
+  if (!isApi) return notFound(requestId);
+
+  if (segments.length === 3 && segments[2] === "me") {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    const principal = await authenticate(deps, request, context);
+    return handleMe(deps, principal);
+  }
+
+  if (segments.length === 3 && segments[2] === "projects") {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    const principal = await authenticate(deps, request, context);
+    return handleProjectList(deps, principal, url);
+  }
+
+  if (segments[2] !== "projects" || segments.length < 4) return notFound(requestId);
+  const projectId = segments[3] ?? "";
+
+  if (segments.length === 4) {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    const principal = await authenticate(deps, request, context);
+    return handleProjectDetail(deps, principal, projectId);
+  }
+
+  if (segments[4] !== "messages") return notFound(requestId);
+
+  if (segments.length === 5) {
+    if (method !== "GET" && method !== "POST") {
+      return methodNotAllowed("GET, POST", requestId);
+    }
+    const principal = await authenticate(deps, request, context);
+    if (method === "POST") {
+      return handleSendMessage(deps, principal, projectId, request);
+    }
+    const result = await listMessages(deps, principal, projectId, listQueryFrom(url));
+    return json(200, {
+      messages: result.messages.map(messageJson),
+      next_cursor: result.nextCursor,
+    });
+  }
+
+  const messageId = segments[5] ?? "";
+  if (segments.length === 6) {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    const principal = await authenticate(deps, request, context);
+    const message = await getMessage(deps, principal, projectId, messageId);
+    const receipts = await deps.db.all<{ speaker_id: string; read_at: string }>(
+      `SELECT r.speaker_id, r.read_at
+         FROM message_receipts r
+         JOIN messages m ON m.id = r.message_id
+        WHERE r.message_id = ? AND m.project_id = ?
+        ORDER BY r.read_at ASC, r.speaker_id ASC`,
+      [messageId, projectId],
+    );
+    return json(200, {
+      ...messageJson(message),
+      read_by: receipts.map((receipt) => ({
+        speaker_id: receipt.speaker_id,
+        read_at: receipt.read_at,
+      })),
+    });
+  }
+
+  if (segments.length === 7 && segments[6] === "body") {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    const principal = await authenticate(deps, request, context);
+    const body = await getMessageBody(deps, principal, projectId, messageId);
+    return json(200, {
+      message_id: body.messageId,
+      text: body.text,
+      compression: body.compression,
+      digest: body.digest,
+    });
+  }
+
+  if (segments.length === 7 && segments[6] === "read") {
+    if (method !== "POST") return methodNotAllowed("POST", requestId);
+    const principal = await authenticate(deps, request, context);
+    const receipt = await markRead(deps, principal, projectId, messageId);
+    return json(200, {
+      message_id: receipt.messageId,
+      speaker_id: receipt.speakerId,
+      read_at: receipt.readAt,
+    });
+  }
+
+  return notFound(requestId);
+}
+
+// Reads only the stable error code from a JSON error envelope. Message text and
+// all other body content stay out of the log.
+async function errorCodeFrom(response: Response): Promise<string | undefined> {
+  try {
+    const parsed: unknown = await response.clone().json();
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const error = (parsed as { error?: unknown }).error;
+    if (typeof error !== "object" || error === null) return undefined;
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function createApp(
+  deps: ServiceDeps,
+  options: CreateAppOptions = {},
+): (request: Request) => Promise<Response> {
+  return async (request: Request): Promise<Response> => {
+    const started = performance.now();
+    const requestId = randomRequestId();
+    const context: RequestContext = {};
+    let response: Response;
+    try {
+      response = await route(deps, request, requestId, context);
+    } catch (error) {
+      if (error instanceof AppError) {
+        response = errorResponse(error, requestId);
+      } else {
+        // Unexpected failures never echo internals or content.
+        response = errorResponse(new AppError("UNAVAILABLE"), requestId);
+      }
+    }
+
+    const entry: RequestLogEntry = {
+      requestId,
+      method: request.method.toUpperCase(),
+      // Path only: query values such as search text are never logged.
+      path: new URL(request.url).pathname,
+      status: response.status,
+      durationMs: Math.round(performance.now() - started),
+    };
+    if (response.status >= 400) {
+      const code = await errorCodeFrom(response);
+      if (code !== undefined) entry.errorCode = code;
+    }
+    if (context.principal !== undefined) {
+      entry.speakerId = context.principal.speakerId;
+      entry.accountId = context.principal.accountId;
+    }
+    try {
+      options.logger?.(entry);
+    } catch {
+      // A failing logger must not change the response.
+    }
+    return response;
+  };
+}

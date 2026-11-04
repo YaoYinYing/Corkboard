@@ -1,0 +1,158 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { AppError, httpStatusFor, type ErrorCode } from "../../src/domain/errors.ts";
+import { digestsEqual, parseSha256Digest, sha256Hex } from "../../src/domain/digest.ts";
+import {
+  validateBodyDigest,
+  validateIdempotencyKey,
+  validateLanguage,
+  validateSummary,
+  validateText,
+  validateType,
+  verifySenderDigest,
+} from "../../src/domain/validation.ts";
+
+function hasCode(code: ErrorCode): (error: unknown) => boolean {
+  return (error) => error instanceof AppError && error.code === code;
+}
+
+const UTF8 = new TextEncoder();
+
+test("sha256Hex matches a known vector and encodes UTF-8", async () => {
+  assert.equal(
+    await sha256Hex(UTF8.encode("abc")),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  );
+  assert.equal(await sha256Hex(UTF8.encode("é")), await sha256Hex(new Uint8Array([0xc3, 0xa9])));
+});
+
+test("digestsEqual compares equal-length values and rejects length mismatch", () => {
+  const digest = "sha256:" + "a".repeat(64);
+  assert.equal(digestsEqual(digest, digest), true);
+  assert.equal(digestsEqual("sha256:" + "a".repeat(63), "sha256:" + "a".repeat(64)), false);
+  assert.equal(digestsEqual("sha256:" + "a".repeat(64), "sha256:" + "b".repeat(64)), false);
+});
+
+test("parseSha256Digest accepts only canonical sha256 digests", () => {
+  const valid = "sha256:" + "0123456789abcdef".repeat(4);
+  assert.equal(parseSha256Digest(valid), valid);
+  for (const bad of [
+    "sha256:" + "0123456789ABCDEF".repeat(4),
+    "sha256:" + "g".repeat(64),
+    "sha256:" + "a".repeat(63),
+    "sha256:" + "a".repeat(65),
+    "SHA256:" + "a".repeat(64),
+    "md5:" + "a".repeat(32),
+    "",
+    null,
+    123,
+  ]) {
+    assert.throws(() => parseSha256Digest(bad), hasCode("VALIDATION_ERROR"));
+  }
+});
+
+test("summary counts graphemes, not UTF-16 code units", () => {
+  const combining = "é"; // 1 grapheme, 2 UTF-16 code units
+  assert.equal(validateSummary(combining), combining);
+  assert.equal(validateSummary(combining.repeat(140)), combining.repeat(140));
+  assert.equal(validateSummary("😀"), "😀");
+  assert.equal(validateSummary("👨‍👩‍👧‍👦"), "👨‍👩‍👧‍👦");
+  assert.equal(validateSummary("😀".repeat(140)), "😀".repeat(140));
+  assert.equal(validateSummary("𠀀".repeat(140)), "𠀀".repeat(140));
+  assert.throws(() => validateSummary("😀".repeat(141)), hasCode("VALIDATION_ERROR"));
+});
+
+test("summary enforces the UTF-8 byte cap without truncating", () => {
+  const cluster = "a" + "́".repeat(5); // 1 grapheme, 11 bytes
+  assert.equal(validateSummary(cluster), cluster);
+  const tooManyBytes = cluster.repeat(140); // 140 graphemes, 1540 bytes
+  assert.throws(() => validateSummary(tooManyBytes), hasCode("VALIDATION_ERROR"));
+});
+
+test("summary rejects empty and non-string input", () => {
+  for (const bad of ["", null, 1, {}, ["text"]]) {
+    assert.throws(() => validateSummary(bad), hasCode("VALIDATION_ERROR"));
+  }
+});
+
+test("text counts graphemes and enforces both caps", () => {
+  assert.equal(validateText("x"), "x");
+  assert.equal(validateText("😀"), "😀");
+  assert.equal(validateText("x".repeat(2000)), "x".repeat(2000));
+  assert.equal(validateText("😀".repeat(2000)), "😀".repeat(2000)); // 8000 bytes
+  assert.equal(validateText("𠀀".repeat(2000)), "𠀀".repeat(2000)); // 8000 bytes
+  assert.throws(() => validateText("x".repeat(2001)), hasCode("VALIDATION_ERROR"));
+  assert.throws(() => validateText("😀".repeat(2001)), hasCode("VALIDATION_ERROR"));
+  assert.throws(() => validateText(""), hasCode("VALIDATION_ERROR"));
+
+  const heavyCluster = "𠀀́"; // 1 grapheme, 6 bytes
+  assert.throws(() => validateText(heavyCluster.repeat(2000)), hasCode("VALIDATION_ERROR")); // 12000 bytes
+  assert.throws(() => validateText(42), hasCode("VALIDATION_ERROR"));
+});
+
+test("type follows the documented identifier pattern", () => {
+  for (const good of ["request", "a", "a".repeat(32), "msg.v2-beta_1", "status.update"]) {
+    assert.equal(validateType(good), good);
+  }
+  for (const bad of ["", "Request", "9abc", "a".repeat(33), "a b", "tag!", "é", null]) {
+    assert.throws(() => validateType(bad), hasCode("VALIDATION_ERROR"));
+  }
+});
+
+test("language is canonicalized as a single BCP 47 tag", () => {
+  assert.equal(validateLanguage("en"), "en");
+  assert.equal(validateLanguage("EN-us"), "en-US");
+  assert.equal(validateLanguage("zh-hant-tw"), "zh-Hant-TW");
+  for (const bad of ["", "en_US", "not a locale", "e", "en-US-", ["en", "fr"], null]) {
+    assert.throws(() => validateLanguage(bad), hasCode("VALIDATION_ERROR"));
+  }
+});
+
+test("idempotency keys are 1-128 printable ASCII characters", () => {
+  assert.equal(validateIdempotencyKey("x"), "x");
+  assert.equal(validateIdempotencyKey("!".repeat(128)), "!".repeat(128));
+  for (const bad of ["", " ".repeat(4), "a b", "a\tb", "é", "x".repeat(129), null]) {
+    assert.throws(() => validateIdempotencyKey(bad), hasCode("VALIDATION_ERROR"));
+  }
+});
+
+test("validateBodyDigest delegates to the canonical parser", () => {
+  const valid = "sha256:" + "ab".repeat(32);
+  assert.equal(validateBodyDigest(valid), valid);
+  assert.throws(() => validateBodyDigest("sha256:short"), hasCode("VALIDATION_ERROR"));
+});
+
+test("verifySenderDigest accepts the matching UTF-8 digest and rejects mismatches", async () => {
+  const text = "héllo 😀";
+  const digest = `sha256:${await sha256Hex(UTF8.encode(text))}`;
+  await assert.doesNotReject(verifySenderDigest(text, digest));
+
+  const wrong = `sha256:${await sha256Hex(UTF8.encode(text + "!"))}`;
+  await assert.rejects(verifySenderDigest(text, wrong), hasCode("INTEGRITY_MISMATCH"));
+  await assert.rejects(verifySenderDigest(text, "not-a-digest"), hasCode("VALIDATION_ERROR"));
+});
+
+test("AppError maps every stable code to an HTTP status", () => {
+  const expected: ReadonlyArray<[ErrorCode, number]> = [
+    ["UNAUTHENTICATED", 401],
+    ["FORBIDDEN", 403],
+    ["NOT_FOUND", 404],
+    ["VALIDATION_ERROR", 400],
+    ["CONFLICT", 409],
+    ["RATE_LIMITED", 429],
+    ["BODY_EXPIRED", 410],
+    ["REQUEST_TOO_LARGE", 413],
+    ["UNAVAILABLE", 503],
+    ["INTEGRITY_MISMATCH", 400],
+    ["INTEGRITY_FAILURE", 500],
+  ];
+  for (const [code, status] of expected) {
+    const error = new AppError(code);
+    assert.equal(error.code, code);
+    assert.equal(error.httpStatus, status);
+    assert.equal(httpStatusFor(code), status);
+    assert.ok(error instanceof Error);
+    assert.equal(error.name, "AppError");
+    assert.ok(error.message.length > 0);
+  }
+});

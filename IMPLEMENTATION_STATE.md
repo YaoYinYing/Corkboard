@@ -8,16 +8,19 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 — bootstrap and sensitive-data hygiene |
-| Status | Bootstrap implemented at this tree; **initial checkpoint pending commit** |
-| Branch | `main` |
-| Base SHA | none (initial commit) |
-| Review | Exact-tree security + docs review required before the checkpoint; results recorded in the commit trailer |
-| Next milestone | Vertical slice A: storage, crypto, identity, HTTP (Phases 1–3, thin Phase 4) |
+| Phase | 0 complete; **vertical slice A implemented; final gate pending commit** |
+| Checkpoint | `df99e90` (reviewed tree `0459cfb`); slice A candidate on `integration/slice-a` |
+| Branch | `integration/slice-a` (merged to `main` only after exact-tree review) |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: foundations review BLOCKED (1 P1) — fixes landed; final audits pending |
+| Next milestone | Commit slice A; then D1/R2 parity and Phase 5 (MCP/OAuth/ChatGPT Web plugin) |
 
-At the time this file was written, `git log` was empty by design: this is the initial
-checkpoint candidate. Do not treat later phases as verified until their checkpoints
-exist.
+## Checkpoint history
+
+| Commit | Tree | Capability | Reviews |
+| --- | --- | --- | --- |
+| `df99e90` | `0459cfb` | Phase 0 docs, toolchain, secret hygiene | security PASS; contract PASS |
+
+Do not treat later phases as verified until their checkpoints exist.
 
 ## Environment
 
@@ -25,10 +28,10 @@ exist.
 - Package manager: npm with committed `package-lock.json`.
 - Test runner: `node:test`; typecheck: strict `tsc`; `lint` currently aliases
   `typecheck` (ESLint deferred; no extra dependency yet).
-- SQLite: `node:sqlite` built-in (planned; no native dependency).
+- SQLite: `node:sqlite` built-in (no native dependency).
 - HTTP core: Web `Request`/`Response`; `node:http` adapter for self-hosting. Hono not
   pinned.
-- Crypto: WebCrypto AES-256-GCM and HMAC (planned).
+- Crypto: WebCrypto AES-256-GCM and HMAC.
 - CI: `.github/workflows/ci.yml` runs secret scan (staged index + untracked files and
   full history), typecheck,
   tests, build, and `npm audit`; actions pinned to commit SHAs; credentials not
@@ -44,8 +47,30 @@ exist.
 | 2026-11-03 | CLI bootstrap before web sessions | First slice needs a human authorization path without a UI |
 | 2026-11-03 | One versioned service root key (no per-object DEK) for the first slice | Simplicity; rotation documented; upgrade before public release if warranted |
 | 2026-11-03 | Live D1 adapter deferred to vertical slice B; SQLite first | Slice A proves the product on Node; D1 must pass the same contract before Phase 1 is complete |
-| 2026-11-03 | License deferred, safe default = no license file | Maintainer decision; tracked as an open question |
+| 2026-11-03 | License: MIT | Maintainer decision recorded in issue #1 |
 | 2026-11-03 | Campaign protocol revision pinned to REvoCompute `8cdf41a5` | Exact source record; adaptations documented |
+
+## Vertical slice A — implemented at this tree
+
+The Node.js/SQLite local product now works end-to-end:
+
+- Migration 001 with atomic ordered-replay finalization (`seq` NULL until publish,
+  one UPDATE + trigger advances `next_seq`, publishes `ready`, completes idempotency);
+  lifecycle CHECKs, FKs, WAL/foreign keys, D1-compatible SQL.
+- AES-256-GCM envelope with metadata-only AAD, CBPT1 plaintext frame carrying the
+  sender-verified SHA-256, ciphertext digest verified against the DB before decrypt;
+  local private blob store with atomic writes and 0700/0600 permissions.
+- Seven-scope authorization with active account/speaker/project/membership checks,
+  removed-membership denial, scoped speaker credentials (prefix + HMAC verifier),
+  prefix-collision-safe lookup, revocation/expiry.
+- Message service: send (digest before any write, idempotency scoped to speaker/
+  project/key), list/replay with filters and cursor, metadata, verified body fetch,
+  receipts requiring `message.read` + `receipt.write` and a valid body.
+- HTTP API per `docs/api.md`, Node server, and bootstrap CLI (`init`,
+  `bootstrap-owner`, `create-project`, `create-speaker`, `add-member`, `issue-key`,
+  `serve`).
+- Tests: 127 total, 126 pass, 1 skipped (live D1 marker). `npm run check` and
+  `npm run build` pass; build copies migrations into `dist/`.
 
 ## Implemented and verified at this tree
 
@@ -79,7 +104,7 @@ candidate SHA and review verdicts.
 | Node LTS and package manager pinned; lint/typecheck/test/build/audit scripts | Done (`lint` = strict typecheck for now) |
 | Clean install from upstream, not a mirror | Done via npm registry |
 | Checkpoint and audit report schema | Done |
-| Key/secret bootstrap implementation | **Pending** (Phase 2); provisioning documented, scanner in place |
+| Key/secret bootstrap implementation | Done (`init` writes 0700 dir + 0600 secrets.env; prints path only) |
 | Branch protection / serialized integrator discipline | Policy documented; branch protection not configured |
 | Staging/prod secret separation | Documented; no deployment yet |
 
@@ -95,14 +120,67 @@ Mandatory amendment accepted after bootstrap. Contract is now in `TODO.md` §5/�
 - Sender supplies `body_digest` = SHA-256 of the exact original bytes before
   compression/encryption. The server independently recomputes it and rejects a
   mismatch with `INTEGRITY_MISMATCH` before sequence allocation, blob write, or commit.
-- The verified plaintext digest is bound into the AES-GCM AAD and carried inside the
-  authenticated envelope. A separate ciphertext SHA-256 is stored for storage-integrity
-  verification.
+- The verified plaintext digest is encrypted inside the payload and verified after
+  decryption; the AAD binds only pre-decryption metadata. A separate ciphertext SHA-256
+  is stored for storage-integrity verification.
 - Every body read verifies the ciphertext digest, decrypts, then verifies the plaintext
   digest. Any mismatch returns `INTEGRITY_FAILURE`, returns no content, creates no read
   receipt, and is audited.
-- Status: **contract documented; implementation pending** in vertical slice A. Lessons
-  will be recorded in `LESSIONS.md` with the implementation evidence.
+- Status: **implemented and tested in vertical slice A** (sender digest verified
+  before writes, CBPT1 embedded digest, DB-bound ciphertext digest, fail-closed reads,
+  no receipt on failure). Lessons are recorded in `LESSIONS.md`.
+
+## Design review follow-ups (2026-11-03, after checkpoint df99e90)
+
+Contract corrections applied before affected implementation lands:
+
+- **P0 ordered replay.** Provisional messages carry `seq = NULL` and are invisible.
+  Sequence allocation, `ready` publication, and idempotency completion happen in one
+  atomic UPDATE plus trigger at finalization, so publication order equals sequence
+  order. Concurrency/crash-recovery tests are required; the shared contract is written
+  to run on SQLite and a D1 adapter, with live D1 recorded as an external gap until the
+  runtime exists.
+- **P1 crypto envelope.** AAD binds only pre-decryption metadata. The verified plaintext
+  SHA-256 is encrypted inside the payload and verified after decryption; it is not in
+  the outer header or AAD. Ciphertext SHA-256 remains stored for storage integrity.
+- **P1 MCP.** LLM-facing tool arguments no longer include `body_digest` or
+  `idempotency_key`. The trusted MCP adapter computes/derives them from text and
+  transport context; REST keeps mandatory independent verification.
+- **P1 read receipts.** Requires both `message.read` and `receipt.write`; only a
+  committed, integrity-verified body can be acknowledged. Receipts are client
+  assertions. Pending/expired/corrupt/inaccessible bodies create no receipt.
+- **License:** MIT, recorded in issue #1.
+
+Owner candidates A (persistence) and B (crypto) were redirected with these corrections;
+C (validation/auth) is unaffected except downstream service composition.
+
+## Independent foundations review (2026-11-04)
+
+A fresh reviewer audited the foundations tree and returned BLOCKED on one P1 plus
+hardening P2s. Disposition:
+
+- **P1 removed membership:** `removed_at` was never read, so removed collaborators kept
+  rights. Fixed in authz and service membership queries; non-member access is
+  `NOT_FOUND`. Regression test added.
+- **P2 same-ID envelope substitution:** crypto now verifies the ciphertext digest
+  against `body_objects.ciphertext_digest`, not only the envelope's own header.
+- **P2 lifecycle integrity:** schema CHECKs for pending/ready sequence and body-object
+  requirements; body-object FK; trigger idempotency completion scoped by speaker and
+  project; `next_seq = MAX(next_seq, new_seq)`.
+- **P2 built artifact:** migrations are copied into `dist/` and the DB opener has a
+  working-directory fallback.
+- **P2 unknown credential shape:** bearer lookup verifies every credential matching the
+  public prefix instead of trusting the first row.
+- **P2 idempotency payload digest:** intentionally an unauthenticated SHA-256 of the
+  canonical request input, used only for same-key conflict detection; it is not the
+  message body digest and is scoped to `(speaker, project, key)`.
+- **P2 provisional visibility:** every read path filters `body_state` and committed rows;
+  a DB view is deferred.
+- **External gap:** live D1 (trigger/`RETURNING`/error-shape) remains unverified; the
+  shared contract has a skipped D1 marker. No Cloudflare runtime/credentials here.
+
+These corrections are landing before the slice-A checkpoint; the exact integrated tree
+will be re-audited.
 
 ## Product requirement — native ChatGPT Web plugin (2026-11-03)
 
@@ -129,9 +207,10 @@ Do not infer any of these from local MCP behavior or from another plan.
 
 1. Migration 001 + `SqlDatabase` port + SQLite adapter + adapter-agnostic contract
    tests (D1 adapter deferred to slice B by recorded exception). Include a
-   `ciphertext_digest` column; the plaintext digest lives only in the sealed
-   envelope/AAD, not as an unauthenticated DB copy.
-2. AES-256-GCM envelope with digest-bound AAD + local blob store + tamper/failure
+   `ciphertext_digest` column; the plaintext digest lives only inside the encrypted
+   payload, not as an unauthenticated DB copy.
+2. AES-256-GCM envelope with metadata-only AAD and embedded plaintext digest + local
+   blob store + tamper/failure
    tests; sender `body_digest` verification; secret bootstrap CLI.
 3. Credential/speaker auth + authorization service + active-status policy + negative
    tests (spoofing, revocation, cross-project).
@@ -142,22 +221,49 @@ Do not infer any of these from local MCP behavior or from another plan.
 
 ## Open questions
 
-- License choice (maintainer).
 - Cloudflare Workers/D1/R2 live staging (later; not blocking local slice).
-- ChatGPT plan write capability (Phase 5; external).
+- ChatGPT Web plugin plan capabilities: installation, linking, conversation tool
+  invocation and sharing/publishing must each be tested on the intended workspace
+  (Phase 5; external).
 
 ## Slot ledger
 
 | Slot | Assignment | Status |
 | --- | --- | --- |
-| Commander | this session | active (bootstrap/integration) |
-| Feature owners | to be spawned after bootstrap checkpoint | idle |
-| Security/audit | used for bootstrap; to be re-run per checkpoint | idle |
+| Commander | this session | active (integration/state) |
+| Feature owner A | persistence + ordered-replay finalization | complete, integrated |
+| Feature owner B | digest-bound envelope + blob stores | complete, integrated |
+| Feature owner C | validation + credentials + authorization | complete, integrated |
+| Feature owner D | credential-bound message service | complete, integrated |
+| Feature owner E | HTTP API + Node server + CLI | complete, integrated |
+| Security/audit | final exact-tree review | active after staging |
 
 ## Known limitations
 
+- Scanner P2 edges: untracked symlinks are followed; intent-to-add fallback treats
+  permission errors as absent; token families are high-signal, not exhaustive.
+- Live D1/R2 is not implemented or tested; D1-specific trigger/RETURNING/error behavior
+  is unverified. No Cloudflare credentials or staging binding are available here.
+- Same-key concurrent sends can transiently orphan a blob/body-object row; messages and
+  sequences stay unique, and the orphan is reclaimable.
+- `q` case-insensitivity inherits SQLite `LIKE` (ASCII only).
+- No expiry worker; expiry is a state transition only.
+- No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
+- HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
+  unconsumed request streams on non-body routes are drained by Node, so concurrent large
+  unauthenticated uploads still add memory pressure. A reverse-proxy body limit remains
+  recommended.
+- `language` and `client_sent_at` lack tight length/format caps beyond the request-body
+  limit; an authenticated sender can inflate stored/echoed metadata.
+- Node timeout enforcement is quantized by the default 30s connection-check interval.
+- Adapter-generated 413s bypass the request logger; `revoke-key` audits success even if
+  the credential was already revoked.
+- Two truly concurrent first sends with the same key may both answer `201`, but return
+  the same message; replay inherits the committed body state.
+- Project listing uses `instr` over app-written capability JSON for pagination.
+- Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
+  unverified.
 - No human web session or OAuth yet.
-- No server/CLI/migrations yet (planned interface only).
 - No attachments, expiry worker, rate limiting, or MCP.
 - No Workers adapter.
 - Server-readable encryption only; not E2EE.

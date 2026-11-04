@@ -1,8 +1,7 @@
 # Security operations
 
-Status: baseline for the self-hosted Node.js deployment. **The server, bootstrap CLI,
-and migrations are not implemented yet**; runnable instructions are planned.
-Cloudflare-specific steps are planned.
+Status: implemented for the Node.js 24 + SQLite self-hosted deployment (vertical slice
+A). Cloudflare-specific steps are planned.
 
 ## Secrets and keys
 
@@ -19,10 +18,12 @@ manager or treat it as a backup secret. Rules:
 
 - Never write these values to the repository, SQLite settings, logs, CI output, or
   agent transcripts.
-- The planned bootstrap command (`dist/scripts/corkboard.js init` after build; source
-  `scripts/corkboard.ts`, **not implemented yet**) will create a `secrets.env` file
-  with mode `0600` outside the repository (default `~/.config/corkboard/`) and print
-  only the path.
+- The bootstrap command (`dist/scripts/corkboard.js init --data-dir <dir>` after build;
+  source `scripts/corkboard.ts`) creates `<dir>` with mode `0700` and `<dir>/secrets.env`
+  with mode `0600`, and prints only the secrets-file path. It refuses to overwrite
+  without `--force`.
+- `bootstrap-owner` reads an optional password from `CORKBOARD_BOOTSTRAP_PASSWORD`;
+  it is never accepted on argv and never printed.
 - The process loads secrets from environment variables (or the file via the service
   manager). It never serves or echoes them.
 - The root key is a **service key version**, not a per-message DEK, in the first slice.
@@ -49,20 +50,22 @@ manager or treat it as a backup secret. Rules:
 - SQLite: WAL, `foreign_keys=ON`, `busy_timeout` set. Database file and blob directory
   are readable only by the service user (`0700` directories, `0600` files).
 - Blobs are stored under random opaque keys, never served statically.
-- Ciphertext is AES-256-GCM with a fresh 96-bit nonce per encryption. AAD binds service
-  ID, project ID, message ID, object ID, format version, compression, and the
-  sender-verified plaintext SHA-256.
-- Only the ciphertext SHA-256 is stored. The plaintext digest is sealed inside the
-  authenticated envelope and bound into the AAD. Reads verify the ciphertext digest,
-  decrypt, then verify the plaintext digest before returning any content; a mismatch
-  creates no receipt. No cross-tenant deduplication.
+- Ciphertext is AES-256-GCM with a fresh 96-bit nonce per encryption. AAD binds only
+  pre-decryption metadata: service ID, project ID, message ID, object ID, format
+  version, and compression.
+- Only the ciphertext SHA-256 is stored in the database. The sender-verified plaintext
+  digest is encrypted inside the payload, never in the outer header or AAD. Reads
+  verify the ciphertext digest, decrypt, then verify the embedded plaintext digest
+  before returning any content; a mismatch creates no receipt. No cross-tenant
+  deduplication.
 
 ## Logging and audit
 
 - Log request ID, route, status, duration, actor IDs, and stable error codes.
 - Never log message bodies, summaries, tokens, keys, full IPs, or password material.
-- `audit_events` records credential issuance/revocation, membership changes, expiry,
-  and administrative actions. Bounded retention; no body content.
+- `audit_events` records credential issuance/revocation and membership grant/removal,
+  plus body-integrity failures. Expiry and broader administrative events will be added
+  with the expiry worker. Bounded retention; no body content.
 
 ## Environment separation
 
@@ -96,5 +99,5 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
 - Hard deletion of metadata/backups is not implemented; expiry is a tombstone, not
   comprehensive erasure.
 - Rate limiting and abuse controls are not implemented in the first slice.
-- No web session layer yet; bootstrap and credential issuance are planned to be
-  CLI-only in the first slice.
+- No web session layer yet; bootstrap, credential issuance/revocation, and membership
+  grant/removal are CLI-only in slice A.
