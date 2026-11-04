@@ -412,3 +412,47 @@ prevented regression; when to remove the advice.
   without `migrations/`.
 - **Prevents:** deployment failure that tests running from source would miss.
 - **Remove when:** migrations are packaged or embedded as strings in the adapter.
+
+## 2026-11-04 — The adapter buffers only routes it knows read a body
+
+- **Failure:** `POST /login` was added as a form route, but the Node adapter's
+  body gate listed only the existing POST routes, so the request reached the core
+  with no body and every sign-in failed the CSRF check.
+- **Reproducer:** Start `startServer()` and submit the dashboard login form.
+- **Fix:** Add the single-segment `POST /login` route to the adapter's body gate and
+  cover the full flow over real HTTP, not only through `createApp()`.
+- **Prevents:** An HTML form that works in handler tests but cannot sign in through
+  the only server adapter.
+- **Remove when:** the adapter buffers bodies generically for every route that may
+  read one (for example by content type), removing the allowlist.
+
+## 2026-11-04 — A session viewer is not a credential
+
+- **Failure:** Reusing `authorizeProject` for a session as if it were a speaker
+  principal would have required inventing a credential and grant, or bypassing the
+  grant check; either choice would misstate the trust model.
+- **Reproducer:** Derive a viewer from an account-owned membership and call the
+  bearer authorization path without a credential row.
+- **Fix:** Mark session viewers with a code-set `sessionViewer: true` flag (never a
+  credential-id prefix or request value), add an explicit branch that re-checks
+  project, membership, speaker ownership, and account state, and authorize only
+  `project.read`/`message.read` from the membership capabilities. The bearer path is
+  unchanged.
+- **Prevents:** Treating an account session as a speaker credential, granting write
+  authority to a read-only surface, or discriminating on an operator-controllable id.
+- **Remove when:** sessions are modeled as first-class principals with their own
+  authorization port and a documented read-only capability set.
+
+## 2026-11-04 — Capability denial on a session viewer must look like absence
+
+- **Failure:** A member whose membership lacks the requested capability would get
+  `FORBIDDEN`, which distinguishes an existing project from a missing or foreign one
+  on the HTML surface.
+- **Reproducer:** Give an account-owned speaker a membership without `message.read`
+  and open the project timeline.
+- **Fix:** `resolveSessionViewer` finds only memberships that already grant the read;
+  the session authorization branch also returns `NOT_FOUND` when the capability is
+  absent. The dashboard maps `FORBIDDEN` to the same uniform `404`.
+- **Prevents:** Project-existence enumeration through the dashboard.
+- **Remove when:** the product deliberately exposes discoverability separately from
+  read authorization with a reviewed policy.

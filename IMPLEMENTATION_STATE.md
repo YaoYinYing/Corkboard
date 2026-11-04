@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–K implemented and pushed |
+| Phase | 0 complete; vertical slices A–K implemented and pushed; slice L candidate unpushed |
 | Last pushed checkpoint | `f0e43d3` (operator retention/prune, audited tree `1a5d207`) on `origin/main`; CI pending |
-| Branch | `main`, clean; the `slice-k-retention` five-commit candidate was fast-forwarded |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
+| Branch | `slice-l-dashboard`, candidate `43d1937` (tree `d6fae0b`), independent review PENDING; `main` remains at `f0e43d3` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice L: candidate `43d1937` on tree `d6fae0b`, independent review PENDING |
+| Next milestone | Independent review of the slice-L dashboard; ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
 
@@ -33,6 +33,7 @@ as the work it describes.
 | `691eca2` | `6f403f7` | Vertical slice K: operator-run bounded session/OAuth retention (`prune`) | superseded by later K commits |
 | `31ac9fb` | `e6fbd45` | Slice K security audit fixes: retain OAuth ownership with a live refresh row, bound grace to the Date range, add regression/exact-boundary tests | superseded by final K commit |
 | `f0e43d3` | `1a5d207` | Slice K final: retention plus docs/validation/test corrections | security PASS; contract PASS (delta on `1a5d207`) |
+| `43d1937` | `d6fae0b` | Vertical slice L: read-only human web dashboard (en/zh, session-derived viewer, server-rendered, explicit body reveal) | independent review PENDING |
 
 ## GitHub Issue coordination
 
@@ -744,6 +745,57 @@ pushed.
   prune. No blob/message/audit deletion is added. Independent review passed on security
   and contract for trees `9c5991e` and `1a5d207`; the remaining audit P2s were
   documentation/state wording corrected in this checkpoint.
+
+## Vertical slice L — read-only human dashboard (candidate)
+
+- **Scope.** Server-rendered pages for `/login`, `/`, `/projects/:projectId`, and
+  `/projects/:projectId/messages/:messageId/body`, plus the constant
+  `/static/app.css`. English default and Simplified Chinese via `?lang=zh`. No
+  write, edit, membership, credential, key, expiry, or admin action; no SPA,
+  frontend dependency, client script, or inline style.
+- **Authorization.** The session authenticates an account. `resolveSessionViewer`
+  selects active, non-removed memberships of speakers owned by that account in the
+  target project, intersects them with `project.read` or `message.read`, and builds
+  the normal `Principal` shape with `sessionViewer: true`. `authorizeProject` has a
+  session branch that re-checks project, membership, speaker ownership, and account
+  state and uses the membership capability set; it never creates or consults a
+  credential or grant. The branch permits only `project.read`/`message.read`, so a
+  session viewer cannot authorize a write even if misrouted. Union across owned
+  speakers means "at least one owned speaker grants the capability". Unreadable
+  projects, removed memberships, foreign projects, and no eligible speaker are a
+  uniform `404`; revoked/expired/suspended sessions redirect to `/login`.
+- **Rendering and security.** `src/app/html.ts` owns the single `escapeHtml` boundary
+  and the strict CSP (`default-src 'none'; style-src 'self'; form-action 'self';
+  base-uri 'none'; frame-ancestors 'none'`). Every dynamic value is escaped; bodies
+  appear only in `<pre>` after explicit reveal through the existing verified decrypt
+  path. Pages are `no-store`, `nosniff`, `no-referrer`, and `X-Frame-Options: DENY`.
+  Login is a form-encoded double-submit CSRF flow with same-origin-only
+  `return_to`. No message content or token is logged.
+- **i18n and accessibility.** en/zh catalogs cover every string; `lang` is `en` or
+  `zh-Hans` with `dir="ltr"`; dates use `Intl.DateTimeFormat` in UTC; the visible
+  switch preserves the path. Landmarks, heading hierarchy, skip link, labeled
+  controls, description lists, text (not color-only) state, and visible focus are
+  present.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (334 tests: 333 pass, 1
+  pre-existing skip for the live D1 marker); `npm run build` exit 0. New tests cover
+  eligible/removed/foreign authorization, uniform 404, revoked/expired/suspended
+  sessions, the read-only scope guard, XSS in titles/summaries/display names/bodies,
+  CSP and hardening headers, CSRF and `return_to` rejection, i18n fallback and path
+  preservation, ascending sequence/pagination bounds/tombstones/read receipts,
+  body reveal and safe failure pages, and a real HTTP flow through `startServer`.
+- **Browser evidence.** A local headless Chrome CDP run (outside the repository; the
+  harness is deleted) observed: login page `lang=en` with a CSRF form; successful
+  sign-in to `/`; project list showing the project and member name; timeline order
+  "First smoke message | Second smoke message" with reply and read-receipt labels;
+  two body links; the first body rendered as text in a `PRE` (`hello <world> &
+  "quoted"`); clicking the Chinese switch changed the document to `lang=zh-Hans`,
+  showed the Chinese timeline label, and preserved the body path. This is local
+  Chrome evidence, not Workers/D1 or an exact-revision independent review.
+- **Limitations.** Read-only only; the project list is capped at 100 with no UI
+  pager; no filters, search, replay scrubber, attachments, previews, or image
+  rendering; no project/speaker/membership/credential management or registration/
+  recovery; no Workers/D1 UI parity; no client-side navigation. Independent review
+  is PENDING.
 
 ## Implemented and verified at this tree
 
