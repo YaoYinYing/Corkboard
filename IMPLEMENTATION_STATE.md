@@ -8,17 +8,18 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; **vertical slice A implemented; final gate pending commit** |
-| Checkpoint | `df99e90` (reviewed tree `0459cfb`); slice A candidate on `integration/slice-a` |
-| Branch | `integration/slice-a` (merged to `main` only after exact-tree review) |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: foundations review BLOCKED (1 P1) — fixes landed; final audits pending |
-| Next milestone | Commit slice A; then D1/R2 parity and Phase 5 (MCP/OAuth/ChatGPT Web plugin) |
+| Phase | 0 complete; **vertical slice A implemented and checkpointed** |
+| Checkpoint | `b5c421d` (audited tree `048065f`) |
+| Branch | `main` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f` |
+| Next milestone | D1/R2 parity and Phase 5 (MCP/OAuth/ChatGPT Web plugin) |
 
 ## Checkpoint history
 
 | Commit | Tree | Capability | Reviews |
 | --- | --- | --- | --- |
 | `df99e90` | `0459cfb` | Phase 0 docs, toolchain, secret hygiene | security PASS; contract PASS |
+| `b5c421d` | `048065f` | Vertical slice A: encrypted messaging, ordered replay, REST API, CLI | security PASS; contract PASS |
 
 Do not treat later phases as verified until their checkpoints exist.
 
@@ -171,9 +172,9 @@ hardening P2s. Disposition:
   working-directory fallback.
 - **P2 unknown credential shape:** bearer lookup verifies every credential matching the
   public prefix instead of trusting the first row.
-- **P2 idempotency payload digest:** intentionally an unauthenticated SHA-256 of the
-  canonical request input, used only for same-key conflict detection; it is not the
-  message body digest and is scoped to `(speaker, project, key)`.
+- **P2 idempotency payload digest:** intentionally an HMAC-SHA256 (pepper-keyed) digest
+  of the canonical request input, used only for same-key conflict detection; it is not
+  the message body digest and is scoped to `(speaker, project, key)`.
 - **P2 provisional visibility:** every read path filters `body_state` and committed rows;
   a DB view is deferred.
 - **External gap:** live D1 (trigger/`RETURNING`/error-shape) remains unverified; the

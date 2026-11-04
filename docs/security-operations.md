@@ -10,7 +10,7 @@ The server needs two independent secrets plus one configuration path:
 | Name | Kind | Purpose | Format |
 | --- | --- | --- | --- |
 | `CORKBOARD_ROOT_KEY` | secret | AES-256-GCM root key version `v1` | 32 random bytes, base64 |
-| `CORKBOARD_CREDENTIAL_PEPPER` | secret | HMAC-SHA256 verifier for speaker tokens | 32 random bytes, base64 |
+| `CORKBOARD_CREDENTIAL_PEPPER` | secret | HMAC-SHA256 key for speaker-token verifiers and idempotency payload digests | 32 random bytes, base64 |
 | `CORKBOARD_DATA_DIR` | config | SQLite and blob directory location (key material stays separate) | filesystem path |
 
 `CORKBOARD_DATA_DIR` is configuration, not key material; do not place it in a secret
@@ -65,7 +65,7 @@ manager or treat it as a backup secret. Rules:
 - Never log message bodies, summaries, tokens, keys, full IPs, or password material.
 - `audit_events` records credential issuance/revocation and membership grant/removal,
   plus body-integrity failures. Expiry and broader administrative events will be added
-  with the expiry worker. Bounded retention; no body content.
+  with the expiry worker. Retention is not yet bounded or enforced; no body content.
 
 ## Environment separation
 

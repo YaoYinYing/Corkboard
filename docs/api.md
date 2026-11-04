@@ -229,7 +229,8 @@ content was fetched, not proof of understanding or execution.
 ## Planned, not implemented
 
 HTTP endpoints for project create/edit, membership management, and speaker/credential
-management are deferred (the CLI provides bootstrap equivalents in slice A). Also
+management are deferred (the CLI provides bootstrap, project-create, speaker-create,
+membership, and credential commands in slice A; project edit is not implemented). Also
 deferred: OAuth discovery and grants, MCP `/mcp`, attachments, expiry worker, admin
 cleanup, and the human session API. They will use the same service authorization layer.
 
