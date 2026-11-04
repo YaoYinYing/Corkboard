@@ -716,10 +716,13 @@ pushed.
   grants, so refresh and RFC 7009 access-token revocation still work. Once the refresh
   row is pruned past grace, the credential, association, and grants are deleted
   together. `validateRetentionOptions` bounds grace to the representable JavaScript
-  `Date` range, so an overflowing `--grace-hours` is rejected before the database is
-  opened (exit 2). Regression tests cover the full refresh → revoke → prune sequence
-  and grace-0 exact boundaries (exactly at cutoff deleted, 1 ms younger retained).
-- **Tests.** New `tests/integration/retention.test.ts` (11 service tests with an
+  `Date` range **minus the session idle window**, so an accepted value cannot overflow
+  the idle cutoff for a normal clock and an overflowing `--grace-hours` is rejected
+  before the database is opened (exit 2). Regression tests cover the full refresh →
+  revoke → prune sequence, grace-0 exact boundaries (exactly at cutoff deleted, 1 ms
+  younger retained), and per-table limits for refresh rows, associations (including
+  orphan cleanup), and OAuth credentials.
+- **Tests.** New `tests/integration/retention.test.ts` (12 service tests with an
   injected clock) and `tests/integration/retention-cli.test.ts` (5 real-process CLI
   tests). Coverage includes active/just-inside/just-over grace boundaries per class,
   idle expiry, consumed/expired codes, rotated/revoked/expired refresh rows, orphan and
@@ -727,7 +730,7 @@ pushed.
   limits and no-op rerun, injected rollback, untouched message/receipt/blob/audit
   tables, input validation before writes, real temp-directory `--json` counts, exit
   codes, pre-open bounds and overflow rejection, and output secrecy.
-- **Tests run.** `npm ci`, `npm run check` (320 tests: 319 pass, 1 pre-existing skip
+- **Tests run.** `npm ci`, `npm run check` (321 tests: 320 pass, 1 pre-existing skip
   for the live D1 marker), and `npm run build`. Exact counts are recorded in the
   checkpoint commit trailer.
 - **Limitations.** The command is Node/SQLite-only (it uses the local

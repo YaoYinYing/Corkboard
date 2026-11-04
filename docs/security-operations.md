@@ -168,11 +168,13 @@ written) is not prevented; no stronger guarantee is claimed. See
   an HMAC verifier of the CSRF value are stored, all keyed by
   `CORKBOARD_CREDENTIAL_PEPPER` (no new secret). Raw tokens and CSRF values exist only
   in the browser cookies.
-- **Cleanup.** There is no automatic session-row purge and no CLI command for it.
-  Expired/revoked rows are inert because validation rejects them. An operator may
-  delete rows where `expires_at <= now` or `revoked_at IS NOT NULL` during maintenance;
-  deleting a row immediately invalidates that session. Backups containing session rows
-  are not authentication material without the pepper.
+- **Cleanup.** There is no automatic session-row purge. The supported way to remove
+  unusable rows is the operator-run `prune` command (see **Retention and pruning**):
+  after a 24-hour default grace it deletes revoked, absolutely expired, and idle-expired
+  sessions in bounded batches. Expired/revoked rows are inert for authentication because
+  validation rejects them. Do not delete session rows by hand unless `prune` is
+  unavailable; a manual delete immediately invalidates that session. Backups containing
+  session rows are not authentication material without the pepper.
 - **Abuse control.** Login attempts are limited per SHA-256 digest of the normalized
   email to 10/minute with burst 5, process-local, returning `429` + `Retry-After`.
   Addresses are not retained in the limiter. Unknown, wrong-password, inactive, and
@@ -223,8 +225,13 @@ or as authority to act as a speaker.
 - **Headers and pages.** Every OAuth response is `Cache-Control: no-store` and
   `X-Content-Type-Options: nosniff`. HTML pages have no inline JavaScript, no
   third-party resources, escaped values, and the CSP documented in `oauth.md`.
-- **Cleanup.** Expired/rotated OAuth rows are inert but are not purged automatically;
-  no command removes them. Deleting a refresh row invalidates that chain; deleting a
+- **Cleanup.** Expired/rotated OAuth rows are rejected on use but are not purged
+  automatically. The operator-run `prune` command removes consumed/expired codes,
+  expired/revoked/rotated refresh rows, orphan associations, and OAuth credentials
+  after a default 24-hour grace (see **Retention and pruning**). An expired or revoked
+  access credential with a live refresh row remains refreshable and revocable until
+  that refresh row ages out past grace; the credential, association, and grants are
+  then deleted together. Deleting a refresh row invalidates that chain; deleting a
   credential row makes its access token unauthenticated.
 
 ## MCP transport
@@ -386,10 +393,10 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   period (default **24 hours**, `--grace-hours`). There is no timer and no automatic
   deletion. Eligible rows are: sessions revoked, absolutely expired, or idle-expired
   past grace; consumed or expired authorization codes; expired, revoked, or rotated
-  refresh tokens; `oauth_token_clients` associations whose credential is gone or is
-  revoked/expired past grace; and OAuth access credentials revoked/expired past grace
-  with no remaining refresh-token row. A still-valid credential, refresh row, session,
-  or association is never eligible.
+  refresh tokens; `oauth_token_clients` associations whose credential is gone, or is
+  revoked/expired past grace **and no refresh row references it**; and OAuth access
+  credentials revoked/expired past grace with no remaining refresh-token row. A
+  still-valid credential, refresh row, session, or association is never eligible.
 - The grace period absorbs clock skew, a request already in flight when the boundary
   passes, and the ordinary delay before an operator run. A 24-hour grace with a **daily**
   schedule is the recommended policy. `--grace-hours 0` deletes at the boundary
@@ -399,8 +406,10 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   events, speaker (`cb_`) credentials, or any token/credential that is still usable. It
   does not write audit rows (nothing is selected from the audit table). Deletes run in
   one `BEGIN IMMEDIATE` transaction in FK-safe order, bounded by `--limit` (default
-  1000, 1–10000) per table, so a failure rolls everything back and the command can be
-  run repeatedly. A credential blocked by a still-live refresh row is retained
+  1000, 1–10000) per session/OAuth artifact table; an OAuth credential's
+  `credential_project_grants` rows are removed with the credential and are not counted
+  separately. A failure rolls everything back and the command can be run repeatedly.
+  A credential blocked by a still-live refresh row is retained
   **together with its `oauth_token_clients` association and grants**, so refresh and
   RFC 7009 access-token revocation keep working. Once that refresh row itself ages out
   past grace, the credential, association, and grants are deleted together in the same

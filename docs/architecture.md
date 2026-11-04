@@ -189,7 +189,9 @@ unusable at the run time **and** became unusable at or before `now - grace`:
 
 All deletes run in one `BEGIN IMMEDIATE` transaction in FK-safe order
 (codes → refresh tokens → grants/token-client associations → OAuth credentials →
-sessions), each bounded by `limit`. The write lock makes the set stable and every
+sessions), with each session/OAuth artifact table bounded by `limit`. An OAuth
+credential's associated `credential_project_grants` rows are removed with the credential
+and are not counted separately against the limit. The write lock makes the set stable and every
 delete re-checks its predicate, so concurrent runs cannot delete a row that became
 valid in between. Any failure rolls back and the command exits non-zero. Messages,
 receipts, body objects/blobs, and audit events are never selected or modified.

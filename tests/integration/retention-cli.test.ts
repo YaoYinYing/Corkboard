@@ -225,6 +225,7 @@ test("prune rejects usage and config errors with exit 2 before opening the datab
     ["prune", "--data-dir", fresh, "--grace-hours", "NaN"],
     ["prune", "--data-dir", fresh, "--grace-hours", "Infinity"],
     ["prune", "--data-dir", fresh, "--grace-hours", "9999999999"],
+    ["prune", "--data-dir", fresh, "--grace-hours", "2400000000"],
     ["prune", "--data-dir", fresh, "--limit", "0"],
     ["prune", "--data-dir", fresh, "--limit", "10001"],
     ["prune", "--data-dir", fresh, "--limit", "1.5"],

@@ -703,6 +703,72 @@ test("limit is a per-table batch and a second run is a no-op", async (t) => {
   assert.equal(await count(fx, "oauth_authorization_codes"), 0);
 });
 
+test("limit is enforced for refresh, association, and credential tables too", async (t) => {
+  const fx = await withFixture(t);
+  const base = await seedBase(fx);
+  await addCredential(fx, {
+    id: "cred_oat_live",
+    speakerId: base.speakerId,
+    revokedAt: null,
+    expiresAt: at(NOW, HOUR_MS),
+  });
+  await addTokenClient(fx, "cred_oat_live", base.clientId);
+  for (const suffix of ["1", "2", "3"]) {
+    await addRefresh(fx, base, {
+      id: `rt_expired_${suffix}`,
+      credentialId: "cred_oat_live",
+      expiresAt: at(CUTOFF, -1),
+      revokedAt: null,
+      rotatedAt: null,
+    });
+    const credentialId = `cred_rev_${suffix}`;
+    await addCredential(fx, {
+      id: credentialId,
+      speakerId: base.speakerId,
+      revokedAt: at(CUTOFF, -1),
+      expiresAt: at(NOW, HOUR_MS),
+    });
+    await addTokenClient(fx, credentialId, base.clientId);
+    await fx.db.run(
+      "INSERT INTO credential_project_grants (credential_id, project_id, granted_at) VALUES (?, ?, ?)",
+      [credentialId, base.projectId, at(NOW, -DAY_MS)],
+    );
+  }
+  // Three dangling associations exercise the orphan cleanup budget.
+  await fx.db.exec("PRAGMA foreign_keys = OFF");
+  for (const suffix of ["1", "2", "3"]) {
+    await addTokenClient(fx, `cred_orphan_${suffix}`, base.clientId);
+  }
+  await fx.db.exec("PRAGMA foreign_keys = ON");
+
+  const deps = retentionDeps(fx);
+  const expected = [
+    { refreshTokens: 2, tokenClients: 2, oauthCredentials: 2 },
+    { refreshTokens: 1, tokenClients: 2, oauthCredentials: 1 },
+    { refreshTokens: 0, tokenClients: 2, oauthCredentials: 0 },
+    { refreshTokens: 0, tokenClients: 0, oauthCredentials: 0 },
+  ];
+  for (const counts of expected) {
+    const summary = await pruneRetention(deps, { limit: 2 });
+    assert.deepEqual(
+      {
+        refreshTokens: summary.refreshTokens,
+        tokenClients: summary.tokenClients,
+        oauthCredentials: summary.oauthCredentials,
+      },
+      counts,
+    );
+    for (const value of Object.values(counts)) {
+      assert.ok(value <= 2, "each table stays within the requested limit");
+    }
+  }
+
+  assert.equal(await count(fx, "oauth_refresh_tokens"), 0);
+  assert.equal(await count(fx, "oauth_token_clients"), 1);
+  assert.equal(await count(fx, "credentials"), 1);
+  assert.equal(await count(fx, "credential_project_grants"), 0);
+});
+
 test("an injected delete failure rolls back every table", async (t) => {
   const fx = await withFixture(t);
   const base = await seedBase(fx);
@@ -803,6 +869,7 @@ test("invalid grace and limit are rejected before any delete", async (t) => {
     { graceHours: -1 },
     { graceHours: Number.NaN },
     { graceHours: Number.POSITIVE_INFINITY },
+    { graceHours: 2_400_000_000 },
     { limit: 0 },
     { limit: 10_001 },
     { limit: 1.5 },

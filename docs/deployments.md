@@ -129,8 +129,8 @@ node dist/scripts/corkboard.js prune --data-dir /var/lib/corkboard --json
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--data-dir <dir>` | `CORKBOARD_DATA_DIR` | Data directory containing `corkboard.sqlite` |
-| `--grace-hours <N>` | `24` | Hours an artifact must have been unusable; non-negative |
-| `--limit <N>` | `1000` | Maximum rows deleted per table in this run; integer 1–10000 |
+| `--grace-hours <N>` | `24` | Hours an artifact must have been unusable; non-negative and within the representable date range |
+| `--limit <N>` | `1000` | Maximum rows deleted per session/OAuth artifact table in this run; integer 1–10000. Grants are removed with their credential and are not counted separately |
 | `--json` | off | Print one JSON summary line instead of short count lines |
 
 It deletes only definitely unusable sessions and OAuth rows (sessions, authorization

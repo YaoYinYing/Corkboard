@@ -11,8 +11,11 @@ export const RETENTION_MAX_LIMIT = 10_000;
 
 const HOUR_MS = 60 * 60 * 1000;
 // Largest magnitude a JS Date can represent. A larger grace cannot produce a
-// cutoff ISO string, so reject it before the CLI opens the database.
+// cutoff ISO string, so reject it before the CLI opens the database. The bound
+// also reserves the session idle window, so an accepted grace cannot overflow
+// the idle cutoff for a normal clock after the database is open.
 const MAX_DATE_MS = 8_640_000_000_000_000;
+const MAX_GRACE_MS = MAX_DATE_MS - SESSION_IDLE_MS;
 
 export interface RetentionDeps {
   db: SqlDatabase;
@@ -46,7 +49,7 @@ export function validateRetentionOptions(
     !Number.isFinite(graceHours) ||
     graceHours < 0 ||
     !Number.isFinite(graceMs) ||
-    graceMs > MAX_DATE_MS
+    graceMs > MAX_GRACE_MS
   ) {
     throw new RangeError(
       "graceHours must be a finite non-negative number of hours within the representable date range",

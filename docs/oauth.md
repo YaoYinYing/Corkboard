@@ -364,8 +364,11 @@ refresh token, access token, cookie, CSRF value, or client secret.
 
 ### Row lifecycle and retention
 
-Expired/rotated OAuth rows are inert immediately but are **not** purged automatically.
-The operator runs `prune` explicitly; there is no timer and no server-side deletion.
+Expired/rotated OAuth rows are rejected on use but are **not** purged automatically.
+An expired or revoked access credential that still has a live refresh row remains
+refreshable (and revocable through that row's ownership association) until the refresh
+row ages out past grace. The operator runs `prune` explicitly; there is no timer and no
+server-side deletion.
 After a grace period (default 24 hours, `--grace-hours`) the command removes only rows
 that are definitely unusable:
 
