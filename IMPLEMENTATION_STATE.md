@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–L implemented and pushed; slice M implemented as an unpushed candidate (`a4a6ef3`), with audit P2 fixes committed (`a5bb688`) |
-| Last pushed checkpoint | `45e5637` (read-only dashboard, audited code tree `5ea2439`) on `origin/main`; CI pending |
-| Branch | Worktree branch `slice-m-dashboard-filters` from `0d3f34b`; candidate `a4a6ef3` (tree `c733ab9`, audited final tree `ea34f5d`) and audit-fix candidate `a5bb688` (tree `dbb72be`) are unpushed; `main` remains clean at `0d3f34b` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixes committed as candidate `a5bb688` (tree `dbb72be`), review PENDING |
+| Phase | 0 complete; vertical slices A–M implemented and pushed |
+| Last pushed checkpoint | `47c5af8` (dashboard filters/search/replay, audited tree `aaab817`) on `origin/main`; CI pending |
+| Branch | `main`, clean; the `slice-m-dashboard-filters` candidate was fast-forwarded |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits) |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
@@ -35,6 +35,8 @@ as the work it describes.
 | `f0e43d3` | `1a5d207` | Slice K final: retention plus docs/validation/test corrections | security PASS; contract PASS (delta on `1a5d207`) |
 | `43d1937` | `d6fae0b` | Vertical slice L: read-only human web dashboard (en/zh, session-derived viewer, server-rendered, explicit body reveal) | superseded by final L commit |
 | `45e5637` | `5ea2439` | Slice L final: read-only session viewer rights, bounded login redirect, parsed capability listing, docs/test corrections | security PASS; contract PASS (delta on `5ea2439`) |
+| `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary search, cursor replay, responsive layout, en/zh | superseded by final M commit |
+| `47c5af8` | `aaab817` | Slice M final: active read-only filter state, pager/empty-state docs, `h1` wrapping, `hasMore` non-serialization tests | security PASS; contract PASS (delta on `aaab817`) |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | independent review PENDING |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | independent review PENDING; security PENDING |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | independent review PENDING; security PENDING |
@@ -45,7 +47,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `45e5637`; remote HEAD verified; CI run pending |
+| Last pushed checkpoint | `47c5af8`; remote HEAD verified; CI run pending |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -1178,6 +1180,12 @@ Do not infer any of these from local MCP behavior or from another plan.
   assumes a single registrable domain; `Origin: null` and the scheme are treated as
   "no assertion" and rely on `Sec-Fetch-Site` plus the double-submit value; the host
   comparison assumes the reverse proxy preserves `Host`.
+- Slice-M audit debt (non-blocking): summary search uses SQLite `LIKE` (ASCII-only case
+  folding, in-project scan, no index); `sender` requires an exact speaker id and has no
+  member picker; `unread=false` is URL-reachable but not a form control; an `after_seq`
+  page infers the older link and can land once on an empty page; browser/responsive
+  evidence remains local headless Chrome prose, not an exact-revision artifact; no
+  axe/WCAG audit or D1/Workers parity.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
   unauthenticated uploads still add memory pressure. A reverse-proxy body limit remains
