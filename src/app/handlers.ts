@@ -17,6 +17,7 @@ import {
   type ListMessagesQuery,
   type MessageMetadata,
 } from "../service/messages.ts";
+import { expireMessageBody } from "../service/expiry.ts";
 
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const DEFAULT_LIMIT = 50;
@@ -223,6 +224,7 @@ function messageJson(message: MessageMetadata): Record<string, unknown> {
     language: message.language,
     reply_to_id: message.replyToId,
     body_state: message.bodyState,
+    body_expires_at: message.bodyExpiresAt,
     client_sent_at: message.clientSentAt,
     received_at: message.receivedAt,
     committed_at: message.committedAt,
@@ -345,6 +347,9 @@ async function handleSendMessage(
   const clientSentAt = body.client_sent_at === undefined || body.client_sent_at === null
     ? null
     : (body.client_sent_at as string);
+  const bodyExpiresAt = body.body_expires_at === undefined || body.body_expires_at === null
+    ? null
+    : (body.body_expires_at as string);
 
   const idempotencyKey = request.headers.get("idempotency-key") ?? "";
   // A prior row means this is a replay of an already accepted request.
@@ -364,6 +369,7 @@ async function handleSendMessage(
     bodyDigest: body.body_digest as string,
     replyToId: replyTo,
     clientSentAt,
+    bodyExpiresAt,
   });
   return json(replay ? 200 : 201, {
     message_id: result.messageId,
@@ -493,6 +499,16 @@ async function route(
       message_id: receipt.messageId,
       speaker_id: receipt.speakerId,
       read_at: receipt.readAt,
+    });
+  }
+
+  if (segments.length === 7 && segments[6] === "expire") {
+    if (method !== "POST") return methodNotAllowed("POST", requestId);
+    const principal = await authenticate(deps, request, context);
+    const result = await expireMessageBody(deps, principal, projectId, messageId);
+    return json(200, {
+      message_id: result.messageId,
+      body_state: result.bodyState,
     });
   }
 

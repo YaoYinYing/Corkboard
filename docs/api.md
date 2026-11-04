@@ -1,7 +1,7 @@
 # HTTP API
 
-**Status: implemented for the Node.js + SQLite vertical slice A.** Cloudflare Workers/
-D1 and the "Planned, not implemented" section below are not implemented. See
+**Status: implemented for the Node.js + SQLite vertical slices A and B.** Cloudflare
+Workers/D1 and the "Planned, not implemented" section below are not implemented. See
 `IMPLEMENTATION_STATE.md` for the current evidence.
 
 Base path: `/api/v1`. JSON in, JSON out, UTF-8. All timestamps are server-generated
@@ -28,6 +28,13 @@ intersection of credential scopes and the membership capability set. Defaults:
 
 A credential with `message.send` but no `project.read` cannot list projects or read
 project metadata. There is no implicit scope.
+
+The bootstrap CLI `issue-key` accepts `--scopes <comma-separated>`; without it the
+default remains `project.read`, `message.read`, `message.send`, `receipt.write`.
+Every requested scope must be known and be a subset of the speaker's **active
+membership capabilities** for `--project`. Empty lists, duplicates, and unknown or
+ungranted scopes are rejected. This is how an operator issues the `project.edit`
+credential used by the expire endpoint.
 
 Effective rights also require an **active account, active speaker, active project, and
 active membership**; suspended or disabled principals are denied even with a live
@@ -111,7 +118,8 @@ Body:
   "text": "Full body text",
   "body_digest": "sha256:<hex>",
   "reply_to_id": null,
-  "client_sent_at": "2026-11-04T12:00:00.000Z"
+  "client_sent_at": "2026-11-04T12:00:00.000Z",
+  "body_expires_at": "2026-11-05T12:00:00.000Z"
 }
 ```
 
@@ -127,6 +135,16 @@ Body:
   payload and verified again after decryption; it is not in the AAD or outer header.
 - `reply_to_id`: optional; must exist in the same project (tombstones allowed).
 - `client_sent_at`: optional untrusted metadata, stored for diagnostics only.
+- `body_expires_at`: optional strict RFC 3339 **UTC** timestamp. Accepted form: four-digit
+  year, two-digit month and day, `T`, `HH:MM:SS`, an optional `.` plus 1–3 fractional
+  digits, and `Z`; the date must be a real calendar date, hours are 00–23, and
+  minutes and seconds are 00–59.
+  Offsets (`+hh:mm`), lowercase `z`, hour `24`, leap second `60`, and impossible
+  dates (for example Feb 30 or Feb 29 in a non-leap year) are rejected. It must be
+  strictly after the server `received_at` and no more than 366 days ahead; otherwise
+  `VALIDATION_ERROR` before any write. Stored normalized to UTC milliseconds. `null`
+  or omission means no expiry. It participates in the idempotency payload, so the same
+  key with a different expiry is `CONFLICT`.
 - `speaker_id`, `received_at`, `seq`, `committed_at`, and compression fields are
   server-written; if supplied they are rejected with `VALIDATION_ERROR`.
 - Compression is server-selected from `none|gzip`; clients cannot request an algorithm.
@@ -138,8 +156,10 @@ Response `201`:
   "committed_at": "...", "body_state": "ready", "digest": "sha256:<plaintext hex>" }
 ```
 
-Repeating the same key with the same payload returns the same result (`200`). A
-different payload under the same key returns `CONFLICT`.
+Repeating the same key with the same payload returns `200` with the same
+`message_id`, `seq`, `committed_at`, and `digest`; `body_state` reflects the current
+committed state (for example `expired`), not a cached `ready`. A different payload
+under the same key, including a different `body_expires_at`, returns `CONFLICT`.
 
 ### `GET /api/v1/projects/:projectId/messages`
 
@@ -165,6 +185,7 @@ never returned and a cursor never advances past an unpublished lower sequence.
   "sender": { "id": "spk_...", "display_name": "Codex" },
   "summary": "...", "type": "request", "language": "en",
   "reply_to_id": null, "body_state": "ready",
+  "body_expires_at": null,
   "client_sent_at": null, "received_at": "...", "committed_at": "..." } ],
   "next_cursor": 42 }
 ```
@@ -177,9 +198,11 @@ forward page. For older history, pass the smallest returned `seq` as `before_seq
 ### `GET /api/v1/projects/:projectId/messages/:messageId`
 
 Requires `message.read` plus membership. Returns exactly one message object in the
-same shape as the list endpoint, plus `"read_by": [{ "speaker_id", "read_at" }]`.
-All receipts for that message are visible to any project member with `message.read`.
-Metadata only; never marks read.
+same shape as the list endpoint (including `body_expires_at`), plus
+`"read_by": [{ "speaker_id", "read_at" }]`. All receipts for that message are visible
+to any project member with `message.read`. Metadata only; never marks read. Expired
+bodies remain visible here with their retained `seq`, summary, sender, timestamps and
+`body_expires_at`.
 
 ### `GET /api/v1/projects/:projectId/messages/:messageId/body`
 
@@ -213,6 +236,35 @@ inaccessible messages are not acknowledged and create no receipt (`BODY_EXPIRED`
 `{ "message_id", "speaker_id", "read_at" }`. A receipt is a client assertion that the
 content was fetched, not proof of understanding or execution.
 
+### `POST /api/v1/projects/:projectId/messages/:messageId/expire`
+
+Requires `project.edit` plus membership. Ordinary member capabilities do not include
+`project.edit`; the owner membership does. Authorization and state ordering:
+
+1. Not a member or membership removed → `NOT_FOUND`; member without `project.edit`
+   (credential or membership) → `FORBIDDEN`.
+2. Unknown, never committed (pending/provisional), or `failed` → `NOT_FOUND`.
+3. Already `expired` → idempotent `200`.
+4. Otherwise atomically mark `ready → expired` in one conditional UPDATE, then
+   best-effort record an audit event (`message.expire`, `success`, actor
+   speaker/project, no content), delete the ciphertext, and mark the `body_objects`
+   row deleted. The audit row uses a deterministic id derived from the message id and
+   `INSERT OR IGNORE`, so it is written once. Because the destructive transition is
+   the authority, the endpoint returns `200` even if the audit insert fails; the
+   already-expired path retries the insert, and the operator-run worker reconciles any
+   still-missing row (with a system actor).
+
+Returns `{ "message_id": "msg_...", "body_state": "expired" }`. Metadata, sequence,
+sender, timestamps and receipts are retained; subsequent body fetches return
+`BODY_EXPIRED` and no receipt can be created. A concurrent or repeated call never
+transitions twice and still returns `200`. If the atomic transition fails internally,
+the endpoint returns `UNAVAILABLE` and does not mark the message expired. If the
+best-effort blob delete fails, the message is still expired and the operator-run
+`expire-bodies` command retries the orphan.
+
+Expiry is enforcement, not a scheduler: no in-process timer exists. Operators run the
+cleanup command (see `deployments.md`) for due `body_expires_at` values.
+
 ## Validation limits summary
 
 | Field | Limit |
@@ -222,6 +274,7 @@ content was fetched, not proof of understanding or execution.
 | `type` | 32 ASCII chars, `^[a-z][a-z0-9_.-]{0,31}$` |
 | `language` | canonical BCP 47 |
 | `body_digest` | `sha256:` + 64 lowercase hex characters |
+| `body_expires_at` | strict RFC 3339 UTC `Z`; real calendar date; seconds 00–59; optional 1–3 fraction digits; after `received_at`; ≤366 days ahead |
 | `Idempotency-Key` | 1–128 non-space printable ASCII (0x21–0x7E) |
 | List `limit` | 1–100 |
 | Request body | 64 KiB (first slice; attachments separate and not implemented) |
@@ -231,8 +284,11 @@ content was fetched, not proof of understanding or execution.
 HTTP endpoints for project create/edit, membership management, and speaker/credential
 management are deferred (the CLI provides bootstrap, project-create, speaker-create,
 membership, and credential commands in slice A; project edit is not implemented). Also
-deferred: OAuth discovery and grants, MCP `/mcp`, attachments, expiry worker, admin
-cleanup, and the human session API. They will use the same service authorization layer.
+deferred: OAuth discovery and grants, MCP `/mcp`, attachments, a separate audited
+hard-delete/admin cleanup path (body expiry retains metadata), and the human session
+API. Expiry is implemented as the endpoint above plus the operator-run `expire-bodies`
+command; there is no scheduler daemon. They will use the same service authorization
+layer.
 
 MCP callers do not pass `body_digest` or `idempotency_key`: the trusted MCP adapter
 computes the digest from `text` and derives the idempotency key from transport/request

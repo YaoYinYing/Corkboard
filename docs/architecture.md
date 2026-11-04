@@ -164,10 +164,28 @@ ciphertext. Content hashes detect corruption; no cross-tenant deduplication.
 
 ## Deletion and expiry
 
-Default `body_expires_at` is `NULL` (no automatic deletion). Expiry is two-stage:
-`ready → expired` (body unfetchable, metadata retained) and then ciphertext deletion
-with retries. Sequence numbers are never reused. A separate audited hard-delete path
-for privacy requests is not part of the first slice and is documented as a limit.
+Implemented for the Node.js/SQLite deployment. Default `body_expires_at` is `NULL` (no
+automatic deletion). Expiry is two-stage and idempotent:
+
+1. `ready → expired` with one conditional `UPDATE ... WHERE body_state = 'ready'`.
+   The transition is audited (`message.expire`, success, identifiers only) under a
+   deterministic id derived from the message id with `INSERT OR IGNORE`; the endpoint
+   records the authenticated principal and the worker a system actor. The transition
+   is authoritative, so the endpoint returns success even if the audit insert fails;
+   the already-expired path retries it and the worker reconciles missing rows.
+   Metadata, sequence, sender, timestamps and receipts are retained as a tombstone;
+   body fetches return `BODY_EXPIRED` and no new receipt is possible.
+2. Ciphertext deletion only after the message is durably `expired`. The blob is
+   deleted (a missing blob counts as success) and the `body_objects` row is marked
+   `state = 'deleted'`, `storage_key = NULL`. A crash or delete failure leaves the
+   message expired and the blob row intact, and the next cleanup run retries it.
+
+The service-layer helper is shared by the HTTP `POST .../expire` endpoint and the
+operator-run `expire-bodies` command. The endpoint requires `project.edit`; the
+command runs both phases over due rows and is safe to repeat. Nothing deletes a blob
+for a non-expired message, and no in-process scheduler exists: operators schedule the
+command externally. Sequence numbers are never reused. A separate audited hard-delete
+path for privacy requests is not implemented and is documented as a limit.
 
 ## Deliberate deferments
 

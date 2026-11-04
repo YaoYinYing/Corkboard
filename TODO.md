@@ -309,8 +309,8 @@ recorded there.
 - [ ] Implement server-generated UTC `received_at`/`committed_at`, validation of summaries, language/type, reference and project ownership.
 - [ ] Require and independently verify the sender-supplied plaintext SHA-256 (`body_digest`) before allocating a sequence or committing; mismatch returns `INTEGRITY_MISMATCH`.
 - [ ] Add reliable provisional-message (`seq = NULL`) → private blob write → atomic finalization workflow (single UPDATE assigns seq, publishes `ready`, trigger completes idempotency), retry/reconciliation, ordered-replay concurrency tests, crash recovery, and orphan garbage collection; run the shared contract against SQLite and a D1 adapter (live D1 recorded as an external gap if unavailable).
-- [ ] Implement scoped, indexed list/replay/pagination and metadata-only search; test stable ordered replay across gaps/tombstones and bounded queries.
-- [ ] Implement `read` receipt table, explicit idempotent `mark_read`, and summarized read state only for authorized project members. Require both `message.read` and `receipt.write`; verify the message is committed and its body integrity passes; pending, expired, corrupt, or inaccessible messages create no receipt. Receipts are client assertions, not proof of understanding or execution.
+- [x] Implement scoped, indexed list/replay/pagination and metadata-only search; test stable ordered replay across gaps/tombstones and bounded queries.
+- [x] Implement `read` receipt table, explicit idempotent `mark_read`, and summarized read state only for authorized project members. Require both `message.read` and `receipt.write`; verify the message is committed and its body integrity passes; pending, expired, corrupt, or inaccessible messages create no receipt. Receipts are client assertions, not proof of understanding or execution.
 - [ ] Validate D1 query-result/page-size and deployment limits; no per-project DDL.
 
 **Gate 1:** same end-to-end database contract on D1 and SQLite; concurrency, restart/retry, cross-project isolation, pagination and idempotency tests green.
@@ -324,7 +324,7 @@ recorded there.
 - [ ] Implement private R2/local object storage with opaque path, safe atomic local file creation, strict permissions and no public buckets/fileserver exposure.
 - [ ] Enforce text/attachment size, MIME/type/extension checks, content signatures where applicable, request-body streaming limits, bounded decompression and file count. Image and document previews are off until sanitized viewers exist.
 - [ ] Choose and implement `none|gzip` with measured benefit threshold, immutable original content, and compression metadata verified on read. Avoid compressing previously compressed files by default.
-- [ ] Implement body expiry and tombstone transition with retryable worker/cron. Default expiration disabled; no surprise rotational deletion.
+- [x] Implement body expiry and tombstone transition with retryable worker/cron. Default expiration disabled; no surprise rotational deletion.
 
 **Gate 2:** ciphertext roundtrip and tamper-failure in both targets; no unauthenticated R2/local blob access; upload bombs, crashes, body expiry and key restore fail safely.
 

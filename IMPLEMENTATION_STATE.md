@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; **vertical slice A implemented and checkpointed** |
-| Checkpoint | `b5c421d` (audited tree `048065f`) |
-| Branch | `main` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f` |
+| Phase | 0 complete; **vertical slices A and B implemented** (slice B checkpoint pending) |
+| Checkpoint | Slice A `b5c421d` (audited tree `048065f`); slice B candidate on branch `slice-b-expiry` |
+| Branch | `main` (slice A); `slice-b-expiry` (slice B, not pushed) |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: pending independent audit |
 | Next milestone | D1/R2 parity and Phase 5 (MCP/OAuth/ChatGPT Web plugin) |
 
 ## Checkpoint history
@@ -72,6 +72,55 @@ The Node.js/SQLite local product now works end-to-end:
   `serve`).
 - Tests: 127 total, 126 pass, 1 skipped (live D1 marker). `npm run check` and
   `npm run build` pass; build copies migrations into `dist/`.
+
+## Vertical slice B — body expiry and tombstone (implemented at this tree)
+
+- `POST /messages` accepts optional `body_expires_at`: strict RFC 3339 UTC `Z`
+  timestamps only (real calendar date, hours 00–23, seconds 00–59, optional 1–3
+  fractional digits; offsets, hour 24, leap second 60, and impossible dates rejected).
+  It must be strictly after server `received_at` and at most 366 days ahead; otherwise
+  `VALIDATION_ERROR` before any write. It is part of the idempotency payload digest,
+  so the same key with a different expiry is `CONFLICT`. A committed replay returns
+  the same `message_id`/`seq`/`committed_at`/`digest`; `body_state` reflects the
+  current committed state. Note: adding `bodyExpiresAt` to the canonical payload means
+  pre-release idempotency rows created before this change are not replay-compatible
+  (no upgrade guarantee yet).
+- List and single-message metadata include `body_expires_at`.
+- `POST /projects/:projectId/messages/:messageId/expire` requires `project.edit` plus
+  membership; non-member/removed → `NOT_FOUND`, member without scope → `FORBIDDEN`,
+  pending/failed/unknown → `NOT_FOUND`, already expired → idempotent `200`. One
+  conditional `ready → expired` transition per row, then best-effort ciphertext
+  deletion. The transition is authoritative: the endpoint returns `200` even if the
+  audit insert fails. Audit rows use a deterministic id derived from the message id
+  with `INSERT OR IGNORE`; the endpoint records the authenticated principal and the
+  worker records a system actor (null account/speaker). The already-expired endpoint
+  path retries the insert; the worker reconciles any still-missing rows.
+- Service helper `deleteExpiredBodyBlob` deletes ciphertext only for expired messages
+  and marks `body_objects.state = 'deleted'`, `storage_key = NULL`; a missing blob
+  counts as success.
+- `expire-bodies [--limit N]` (default 500, 1–5000) runs both phases: mark due rows
+  expired, then delete blobs for expired/undeleted objects, then reconcile missing
+  audit rows. `examined` counts **distinct** messages, so a row in both phase 1 and
+  phase 2 is counted once. Per-row failures are counted and do not stop the run; one
+  JSON summary line is printed and the process exits non-zero when `failures > 0`.
+  Safe to repeat and after crashes.
+- `issue-key --scopes <comma-separated>` issues a narrower credential; the default
+  remains the four member capabilities. Empty, duplicate, unknown, or not-granted
+  scopes (not a subset of the speaker's active membership capabilities) are rejected.
+- Read races: the receipt INSERT requires `body_state = 'ready'` and reports
+  `BODY_EXPIRED` if a concurrent expiry won; the body-open path reports
+  `BODY_EXPIRED` (without an integrity audit) when expiry cleaned the object after the
+  route's state check.
+- Expiry requires an external scheduler: there is no in-process timer or daemon. The
+  server only enforces an explicit endpoint; the operator schedules the command.
+- Tests: 147 total, 146 pass, 1 skipped (live D1 marker): strict timestamp validation,
+  tombstone metadata, fetch/receipt denial plus retention of existing receipts,
+  endpoint authorization/state ordering, concurrent transition, expiry/read races,
+  audit repair/reconciliation, worker due/orphan/unexpired behavior and distinct
+  examined counts, the due-query index plan, CLI scopes and failure exit, and wire-up.
+- Commands executed: `npm run check`, `npm run build`, and a temp-data-directory CLI
+  smoke (`init` → service send with near expiry → `expire-bodies` → body fetch fails,
+  metadata survives).
 
 ## Implemented and verified at this tree
 
@@ -248,7 +297,9 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Same-key concurrent sends can transiently orphan a blob/body-object row; messages and
   sequences stay unique, and the orphan is reclaimable.
 - `q` case-insensitivity inherits SQLite `LIKE` (ASCII only).
-- No expiry worker; expiry is a state transition only.
+- Expiry cleanup is an operator-run command with no in-process scheduler; deployments
+  must schedule `expire-bodies` externally. No hard-delete/admin erasure path exists;
+  expiry retains metadata and does not rewrite backups.
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
@@ -265,7 +316,7 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
 - No human web session or OAuth yet.
-- No attachments, expiry worker, rate limiting, or MCP.
+- No attachments, rate limiting, or MCP.
 - No Workers adapter.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.
