@@ -18,6 +18,22 @@ export interface CredentialOptions {
   scopes?: readonly Scope[];
   expiresAt?: Date | null;
   revokedAt?: Date | null;
+  /**
+   * Test-provisioning convenience: grant every active membership the speaker
+   * already has at credential creation. Production mints grants explicitly per
+   * credential; grant/denial behavior is covered by dedicated tests.
+   */
+  autoGrantMemberships?: boolean;
+  /** Explicit grant IDs in addition to any auto-granted memberships. */
+  grantProjects?: readonly string[];
+}
+
+export interface MembershipOptions {
+  /**
+   * Test-provisioning convenience: grant this project to credentials the
+   * speaker already has. Set false to test a membership that grants nothing.
+   */
+  grantExistingCredentials?: boolean;
 }
 
 export interface ServiceFixture {
@@ -28,8 +44,15 @@ export interface ServiceFixture {
   addAccount(id: string, status?: string): Promise<void>;
   addSpeaker(id: string, accountId: string, status?: string): Promise<void>;
   addProject(id: string, ownerAccountId: string, status?: string): Promise<void>;
-  addMembership(projectId: string, speakerId: string, capabilities?: readonly Scope[]): Promise<void>;
+  addMembership(
+    projectId: string,
+    speakerId: string,
+    capabilities?: readonly Scope[],
+    options?: MembershipOptions,
+  ): Promise<void>;
   addCredential(options: CredentialOptions): Promise<{ token: string; credentialId: string }>;
+  grantProject(credentialId: string, projectId: string): Promise<void>;
+  revokeProjectGrant(credentialId: string, projectId: string): Promise<void>;
   expireMessage(messageId: string): Promise<void>;
   authenticate(token: string): Promise<Principal>;
   close(): void;
@@ -83,12 +106,20 @@ export async function createServiceFixture(): Promise<ServiceFixture> {
       projectId: string,
       speakerId: string,
       capabilities: readonly Scope[] = ALL_SCOPES,
+      options: MembershipOptions = {},
     ): Promise<void> {
       await db.run(
         `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
          VALUES (?, ?, ?, ?)`,
         [projectId, speakerId, JSON.stringify(capabilities), stamp()],
       );
+      if (options.grantExistingCredentials !== false) {
+        await db.run(
+          `INSERT OR IGNORE INTO credential_project_grants (credential_id, project_id, granted_at)
+           SELECT id, ?, ? FROM credentials WHERE speaker_id = ?`,
+          [projectId, stamp(), speakerId],
+        );
+      }
     },
     async addCredential(options: CredentialOptions): Promise<{ token: string; credentialId: string }> {
       const credentialId = options.id ?? `cred_${crypto.randomUUID()}`;
@@ -114,7 +145,35 @@ export async function createServiceFixture(): Promise<ServiceFixture> {
           stamp(),
         ],
       );
+      if (options.autoGrantMemberships !== false) {
+        await db.run(
+          `INSERT OR IGNORE INTO credential_project_grants (credential_id, project_id, granted_at)
+           SELECT ?, project_id, ? FROM project_memberships
+            WHERE speaker_id = ? AND removed_at IS NULL`,
+          [credentialId, stamp(), options.speakerId],
+        );
+      }
+      for (const projectId of options.grantProjects ?? []) {
+        await db.run(
+          `INSERT OR IGNORE INTO credential_project_grants (credential_id, project_id, granted_at)
+           VALUES (?, ?, ?)`,
+          [credentialId, projectId, stamp()],
+        );
+      }
       return { token, credentialId };
+    },
+    async grantProject(credentialId: string, projectId: string): Promise<void> {
+      await db.run(
+        `INSERT OR IGNORE INTO credential_project_grants (credential_id, project_id, granted_at)
+         VALUES (?, ?, ?)`,
+        [credentialId, projectId, stamp()],
+      );
+    },
+    async revokeProjectGrant(credentialId: string, projectId: string): Promise<void> {
+      await db.run(
+        `DELETE FROM credential_project_grants WHERE credential_id = ? AND project_id = ?`,
+        [credentialId, projectId],
+      );
     },
     async expireMessage(messageId: string): Promise<void> {
       await db.run("UPDATE messages SET body_state = 'expired' WHERE id = ?", [messageId]);

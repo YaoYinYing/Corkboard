@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; **vertical slices A and B implemented and pushed** |
+| Phase | 0 complete; vertical slices A, B, and **C implemented at this tree (audit pending)** |
 | Last pushed checkpoint | `7b5a63b` (audited tree `2bfaa9b`) on `origin/main`; CI success |
-| Branch | `main` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b` |
-| Next milestone | P0 credential-project binding and non-destructive init (Issues #2/#3), then D1/R2 parity and Phase 5 |
+| Branch | `slice-c-authz-init` (candidate; not pushed) |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: audits pending on this tree |
+| Next milestone | Independent exact-tree security/contract audit of slice C, then D1/R2 parity and Phase 5 |
 
 ## Checkpoint history
 
@@ -30,7 +30,7 @@ as the work it describes.
 | Pending P0 Issues | #2 credential-to-project grants; #3 non-destructive key bootstrap |
 | Last pushed checkpoint | `7b5a63b`; remote HEAD verified; CI run 41817856459 success |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8), next run 2026-11-04 03:55 local; **not durable across process exit**, auto-expires after 7 days |
-| Status | Issue #2/#3 remain open until fixed, pushed, audited revisions are linked |
+| Status | Slice-C fixes for #2/#3 implemented at the candidate tree; Issues remain open until the audited checkpoint is pushed and the exact revision is linked |
 
 Do not treat later phases as verified until their checkpoints exist.
 
@@ -83,6 +83,51 @@ The Node.js/SQLite local product now works end-to-end:
   `serve`).
 - Tests: 127 total, 126 pass, 1 skipped (live D1 marker). `npm run check` and
   `npm run build` pass; build copies migrations into `dist/`.
+
+## Vertical slice C — credential-project grants and safe bootstrap (implemented at this tree)
+
+Closes the two P0 findings from Issues #2 and #3. Candidate tree, not yet audited or
+pushed.
+
+- Migration 002 adds `credential_project_grants (credential_id, project_id,
+  granted_at)` with a `project_id` index, the slice-B `(body_state, body_expires_at)`
+  index (so existing v1 databases receive it), and a nullable
+  `audit_events.detail` column. `src/storage/db.ts` now reads ordered
+  `migrations/NNN_*.sql` files, applies unapplied versions, and records each in
+  `schema_migrations`; the module-relative (`dist/migrations`) and cwd fallbacks are
+  retained. A definitive v1 database is upgraded in a regression test.
+- Authorization is deny-by-default per credential. `authorizeProject` re-reads the
+  credential and requires an explicit grant after the active project/membership/
+  speaker/account checks. A valid credential with an active membership but no grant is
+  `FORBIDDEN`; unknown/inactive project or missing/removed membership stays
+  `NOT_FOUND`. All message, body, receipt, expiry, project-detail, and enumeration
+  paths use this same function. Membership alone, account ownership, and newly joined
+  projects confer nothing, and a grant adds no scope.
+- `GET /api/v1/me` and `GET /api/v1/projects` join the calling credential's grants and
+  omit ungranted projects. Grant revocation is read on every request, so it applies to
+  an already-authenticated principal on the next call.
+- CLI: `issue-key` accepts one or more `--project` occurrences, rejects zero and
+  duplicates, validates an active membership and scope subset for every project,
+  inserts the credential then one grant per project, and deletes the new credential if
+  a grant insert fails. `grant-key-project` requires an active membership and inserts
+  `INSERT OR IGNORE`; `revoke-key-project` errors when the grant is absent. Both audit
+  `credential.project.grant`/`credential.project.revoke`. Issuance audit rows carry
+  sanitized JSON `detail` with granted project IDs and the scope list. No token, key,
+  or content is stored.
+- `init` is bootstrap-only: `--force` is removed (strict parsing rejects it), and init
+  refuses — writing nothing and generating no keys — when `corkboard.sqlite` exists in
+  the data directory or the secrets file exists. The default secrets path is
+  `$XDG_CONFIG_HOME/corkboard/secrets.env`, else `~/.config/corkboard/secrets.env`,
+  with the directory `0700` and file `0600`; `--secrets-file` overrides it and is
+  rejected if it resolves inside the data directory. Only the secrets path is printed.
+  Rotation remains unimplemented and is documented as separate from bootstrap.
+- Tests: 156 total, 155 pass, 1 skipped (live D1 marker). New coverage includes v1→v2
+  migration and the missing index/detail column, deny-by-default at the service layer,
+  A-only/B-only grants, no widening on a new membership, grant-only without membership
+  (`NOT_FOUND`), enumeration filtering, immediate grant revocation, CLI multi-project
+  issuance, grant/revoke audit rows, init non-destruction (including `--force` as an
+  unknown option), default secrets isolation, in-data secrets rejection, and token
+  authentication plus body decryption surviving a refused reinitialization.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
 
@@ -165,7 +210,7 @@ candidate SHA and review verdicts.
 | Node LTS and package manager pinned; lint/typecheck/test/build/audit scripts | Done (`lint` = strict typecheck for now) |
 | Clean install from upstream, not a mirror | Done via npm registry |
 | Checkpoint and audit report schema | Done |
-| Key/secret bootstrap implementation | Done (`init` writes 0700 dir + 0600 secrets.env; prints path only) |
+| Key/secret bootstrap implementation | Done (`init` writes secrets outside the data directory, dir `0700`/file `0600`, refuses to overwrite or touch an existing DB, prints path only) |
 | Branch protection / serialized integrator discipline | Policy documented; branch protection not configured |
 | Staging/prod secret separation | Documented; no deployment yet |
 
@@ -311,13 +356,22 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Expiry cleanup is an operator-run command with no in-process scheduler; deployments
   must schedule `expire-bodies` externally. No hard-delete/admin erasure path exists;
   expiry retains metadata and does not rewrite backups.
-- Slice-B P2 debt from exact-tree audits: the `(body_state, body_expires_at)` index is
-  added only to migration 001, so existing v1 databases do not receive it (no upgrade
-  guarantee yet); worker orphan/audit passes scan the growing expired population;
-  an already-expired retry can record the retrying caller as the audit actor;
-  `issue-key --scopes` does not persist the granted scope set in its audit row; a body
-  fetch that passes its state check immediately before expiry may still return the
+- Slice-B P2 debt resolved in slice C: migration 002 adds the
+  `(body_state, body_expires_at)` index to existing databases and `issue-key` persists
+  the granted scope/project set in the sanitized audit `detail` column. Remaining
+  slice-B debt: worker orphan/audit passes scan the growing expired population; an
+  already-expired retry can record the retrying caller as the audit actor; a body fetch
+  that passes its state check immediately before expiry may still return the
   already-decrypted content.
+- Slice-C limitations: the `SqlDatabase` port has no interactive transaction, so
+  `issue-key` inserts the credential then its grants; a grant-insert failure deletes
+  the credential, but a process crash between the two steps leaves a grantless
+  credential (denied by default, revocable). Migration 002 does not backfill grants, so
+  pre-release credentials lose project access until explicitly granted. Grants and
+  membership management are CLI-only; no endpoint manages them. Key rotation remains
+  unimplemented. A crash after a migration's SQL runs but before its
+  `schema_migrations` row is recorded would require manual repair (multi-statement
+  migrations are not wrapped in an interactive transaction).
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large

@@ -26,21 +26,43 @@ intersection of credential scopes and the membership capability set. Defaults:
 | Owner | all seven |
 | Member (first slice) | `project.read`, `message.read`, `message.send`, `receipt.write` |
 
-A credential with `message.send` but no `project.read` cannot list projects or read
-project metadata. There is no implicit scope.
+**Explicit credential-to-project grants.** A credential is bound to the projects it may
+act in by `credential_project_grants` rows. Every project-scoped service path (messages,
+bodies, receipts, expiry, project detail, enumeration) requires all three of: an active
+membership, an explicit grant for `(credential, project)`, and the requested scope in
+the credential/membership intersection.
 
-The bootstrap CLI `issue-key` accepts `--scopes <comma-separated>`; without it the
-default remains `project.read`, `message.read`, `message.send`, `receipt.write`.
+- **Deny by default.** A principal with a valid credential and an active membership but
+  no grant for that project receives `FORBIDDEN`. Grants are never inferred from
+  membership, account ownership, or knowledge of a project ID.
+- **A grant is not a membership and a membership is not a grant.** `grant-key-project`
+  requires an active membership; `add-member` does not grant any credential.
+- **No implicit widening.** Joining a new project never widens an existing credential.
+  Multiple credentials for one speaker are independent: each needs its own grant.
+- **Revocation is immediate.** `revoke-key-project` deletes the grant; the next request
+  is denied. Grant state is read on every request; there is no authorization cache.
+- **Pre-release migration.** This is a pre-release schema change. Credentials issued
+  before migration 002 have no grants and therefore lose all project access until an
+  operator runs `grant-key-project` for each intended project.
+- An existing grant does not add rights. Without the scope in both the credential and
+  the membership, the request is still `FORBIDDEN`.
+
+The bootstrap CLI `issue-key` accepts one or more `--project <id>` occurrences and
+`--scopes <comma-separated>`; without `--scopes` the default remains `project.read`,
+`message.read`, `message.send`, `receipt.write`. At least one project is required.
 Every requested scope must be known and be a subset of the speaker's **active
-membership capabilities** for `--project`. Empty lists, duplicates, and unknown or
-ungranted scopes are rejected. This is how an operator issues the `project.edit`
-credential used by the expire endpoint.
+membership capabilities** for every selected project. Empty lists, duplicates, unknown
+or ungranted scopes, and duplicate project occurrences are rejected. Issuance writes the
+credential and one grant per project; if a grant write fails the credential is deleted.
+This is how an operator issues the `project.edit` credential used by the expire
+endpoint. `grant-key-project --credential <id> --project <id>` and
+`revoke-key-project --credential <id> --project <id>` manage grants after issuance.
 
 Effective rights also require an **active account, active speaker, active project, and
 active membership**; suspended or disabled principals are denied even with a live
-credential. Decision order: no valid credential → `UNAUTHENTICATED`; not a member or
-otherwise unable to see the object → `NOT_FOUND`; member but insufficient scope →
-`FORBIDDEN`.
+credential. Decision order: no valid credential → `UNAUTHENTICATED`; not a member,
+membership removed, or unknown/inactive project → `NOT_FOUND`; active member without a
+grant or without sufficient scope → `FORBIDDEN`.
 
 ## Error envelope
 
@@ -76,11 +98,14 @@ Returns the authenticated actor:
   "projects": ["proj_..."] }
 ```
 
-`projects` lists only projects with an active membership and `project.read`.
+`projects` lists only projects with an active membership, an explicit grant for the
+calling credential, and `project.read`.
 
 ### `GET /api/v1/projects?cursor=&limit=`
 
-Requires `project.read` plus an active membership. `limit` 1–100, default 50.
+Requires `project.read`, an active membership, and an explicit grant for the calling
+credential. `limit` 1–100, default 50. Ungranted projects are omitted rather than
+revealed.
 
 ```json
 { "projects": [ { "id": "proj_...", "title": "...", "summary": "...",
@@ -93,8 +118,9 @@ strictly-greater-than predicate. It is `null` when no further page exists.
 
 ### `GET /api/v1/projects/:projectId`
 
-Requires `project.read` plus membership. Returns project metadata and the caller's
-effective capabilities. A non-member receives `NOT_FOUND`.
+Requires `project.read`, membership, and a grant for the calling credential. Returns
+project metadata and the caller's effective capabilities. A non-member receives
+`NOT_FOUND`; an active member without a grant receives `FORBIDDEN`.
 
 ```json
 { "project": { "id", "title", "summary", "status", "created_at", "updated_at" },
@@ -103,7 +129,7 @@ effective capabilities. A non-member receives `NOT_FOUND`.
 
 ### `POST /api/v1/projects/:projectId/messages`
 
-Requires `message.send` plus active membership. Header `Idempotency-Key` is mandatory
+Requires `message.send`, active membership, and a grant for the calling credential. Header `Idempotency-Key` is mandatory
 (1–128 non-space printable ASCII characters, 0x21–0x7E). Idempotency is scoped to `(authenticated speaker, project, key)`: the same
 key in another speaker or project is independent, and a response is never returned
 across those boundaries.
@@ -163,7 +189,7 @@ under the same key, including a different `body_expires_at`, returns `CONFLICT`.
 
 ### `GET /api/v1/projects/:projectId/messages`
 
-Requires `message.read` plus membership. Query:
+Requires `message.read`, membership, and a grant for the calling credential. Query:
 
 | Param | Meaning |
 | --- | --- |
@@ -197,7 +223,7 @@ forward page. For older history, pass the smallest returned `seq` as `before_seq
 
 ### `GET /api/v1/projects/:projectId/messages/:messageId`
 
-Requires `message.read` plus membership. Returns exactly one message object in the
+Requires `message.read`, membership, and a grant for the calling credential. Returns exactly one message object in the
 same shape as the list endpoint (including `body_expires_at`), plus
 `"read_by": [{ "speaker_id", "read_at" }]`. All receipts for that message are visible
 to any project member with `message.read`. Metadata only; never marks read. Expired
@@ -206,7 +232,7 @@ bodies remain visible here with their retained `seq`, summary, sender, timestamp
 
 ### `GET /api/v1/projects/:projectId/messages/:messageId/body`
 
-Requires `message.read` plus membership. Authorization precedes state decisions:
+Requires `message.read`, membership, and a grant for the calling credential. Authorization precedes state decisions:
 
 1. Not a member → `NOT_FOUND`; member without `message.read` → `FORBIDDEN`.
 2. Message never committed (pending/provisional) or unknown → `NOT_FOUND`.
@@ -229,7 +255,7 @@ body fetch never marks a message read.
 
 ### `POST /api/v1/projects/:projectId/messages/:messageId/read`
 
-Requires `message.read` **and** `receipt.write`, plus membership. The target must be a
+Requires `message.read` **and** `receipt.write`, plus membership and a grant for the calling credential. The target must be a
 committed (`ready`) message whose body integrity verifies: expired, pending, corrupt, or
 inaccessible messages are not acknowledged and create no receipt (`BODY_EXPIRED`,
 `NOT_FOUND`, or `INTEGRITY_FAILURE`). Idempotent; stamps server time. Returns
@@ -238,7 +264,7 @@ content was fetched, not proof of understanding or execution.
 
 ### `POST /api/v1/projects/:projectId/messages/:messageId/expire`
 
-Requires `project.edit` plus membership. Ordinary member capabilities do not include
+Requires `project.edit`, membership, and a grant for the calling credential. Ordinary member capabilities do not include
 `project.edit`; the owner membership does. Authorization and state ordering:
 
 1. Not a member or membership removed → `NOT_FOUND`; member without `project.edit`

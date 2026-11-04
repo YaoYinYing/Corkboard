@@ -6,6 +6,40 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — A membership alone is not a credential grant
+
+- **Failure:** Authorization intersected credential scopes with *any* active membership
+  of the speaker, so a key issued for project A could read and send to project B when
+  the speaker was also a member there.
+- **Reproducer:** Issue a key with `--project A` for a speaker who is a member of A and
+  B, then call a project-B message endpoint with that token. It succeeded.
+- **Fix:** `credential_project_grants (credential_id, project_id)` plus a deny-by-default
+  check in `authorizeProject` on every project-scoped path; project enumeration joins
+  the calling credential's grants; CLI `grant-key-project`/`revoke-key-project`.
+  Membership and grant are independent: a grant requires a membership, and a membership
+  grants no credential.
+- **Prevents:** Credential least-privilege failure and silent widening when the speaker
+  joins another project.
+- **Remove when:** Not expected; keep as a rule for OAuth delegated grants too.
+
+## 2026-11-04 — Bootstrap must refuse, not overwrite
+
+- **Failure:** `init --force` regenerated the root key and pepper over an existing
+  database, making stored bodies unreadable and issued token verifiers invalid. Secrets
+  also defaulted inside the data directory, coupling key backups to ciphertext backups.
+- **Reproducer:** `init`, issue a token, send a message, then `init --force` and try to
+  authenticate/decrypt with the same secrets bytes.
+- **Fix:** Remove `--force`; refuse when the database or secrets file exists without
+  generating keys; default secrets to `$XDG_CONFIG_HOME/corkboard/secrets.env` (or
+  `~/.config/...`), reject in-data paths, create dir `0700`/file `0600`, and document
+  rotation as a separate unimplemented operation. Regression tests assert unchanged
+  bytes and continued decryption.
+- **Prevents:** Irreversible local key loss and secret/data backup co-location.
+- **Remove when:** A versioned, explicitly confirmed rotation command with re-encryption
+  exists.
+
+
+
 ## 2026-11-04 — Fixtures that bypass provisioning hide unreachable features
 
 - **Failure:** The expiry endpoint required `project.edit`, but `issue-key` could only

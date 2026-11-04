@@ -333,7 +333,7 @@ recorded there.
 - [ ] Define actors (human account, platform admin, project owner/member, speaker, bearer credential, OAuth grant) and explicit permissions matrix.
 - [ ] Implement bootstrap owner creation and default invite-only registration. Verify passwords (if native login), email uniqueness, recovery token handling, CSRF, secure cookies, rate limits and anti-enumeration behavior.
 - [ ] Implement 256-bit speaker key creation, hash/pepper verifier, once-only display, TTL, key rotation/revocation and emergency project-disable path.
-- [ ] Enforce authorization at service layer and again at blob access with no metadata leaks on forbidden IDs. Model project membership as server-provisioned and revocable.
+- [x] Enforce authorization at service layer and again at blob access with no metadata leaks on forbidden IDs. Model project membership as server-provisioned and revocable. (Credential-to-project grants are explicit and deny-by-default per Issue #2; a membership alone grants no credential.)
 - [ ] Implement audit events for login, token issuance/revocation, permission grant, membership removal, project deletion and manual cleanup; exclude bodies and credentials.
 - [ ] Implement hard impersonation boundary via isolated agent credential broker / OS permissions (document threat limitations and prove a subagent lacking the secret cannot send as parent).
 - [ ] Run adversarial probes for object-level access control, JWT claims, idempotency ownership, time-of-check races, spoofed sender, hostile headers and injection attempts.
@@ -461,7 +461,7 @@ This is a narrowly adapted version of REvoCompute's existing campaign rules, not
 
 - [ ] Set up a clean repo and private/redacted original archive handling, then write/verify the docs and threat model.
 - [ ] Create the minimal account/project/speaker/message schema and test D1↔SQLite contract semantics.
-- [ ] Implement credential-bound sender and scoped authorization **before** exposing send/list endpoints.
+- [x] Implement credential-bound sender and scoped authorization **before** exposing send/list endpoints. (Issues #2/#3: explicit grants, deny-by-default, non-destructive bootstrap.)
 - [ ] Deliver local encrypted send→replay→mark_read flow with idempotency and crash-recovery tests.
 - [ ] Add the same flow for Workers/D1/R2, then a real two-agent MCP smoke test.
 - [ ] Record exact-head independent review for each vertical feature and checkpoint commit; keep `IMPLEMENTATION_STATE.md` and `LESSIONS.md` current.

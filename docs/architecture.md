@@ -121,21 +121,35 @@ Shared relational schema; no table-per-project.
   first-slice member gets `project.read`, `message.read`, `message.send`,
   `receipt.write`.
 - `credentials` — speaker-bound token prefix, HMAC verifier, scopes, expiry/revocation.
+- `credential_project_grants` — `(credential_id, project_id, granted_at)`, the explicit
+  set of projects a credential may act in. This is the deny-by-default boundary:
+  authorization requires an active membership **and** a grant for the calling
+  credential, then intersects credential scopes with membership capabilities. A grant
+  adds no rights, a membership grants no credential, and joining a project never widens
+  an existing credential. Grant rows are read on every request; revocation deletes the
+  row and takes effect immediately.
 - `messages` — immutable `(project_id, seq)`, sender, summary metadata, body state.
 - `message_receipts` — `(message_id, speaker_id)` with server-stamped read time.
 - `body_objects` — ciphertext location, nonce, key version, compression, ciphertext
   digest. The plaintext digest is not stored in the DB; it is encrypted inside the
   payload, and the AAD binds only pre-decryption metadata.
 - `idempotency_keys` — `(speaker_id, project_id, key)` with payload digest and result.
-- `audit_events` — sanitized security events.
+- `audit_events` — sanitized security events; the optional `detail` column carries
+  identifier/scope JSON only (never tokens or message content).
 - `service_settings` — non-secret deployment preferences only.
 
-Indexes are listed in `migrations/001_init.sql` when implemented. Every tenant-owned
-query filters on `project_id`; object access alone is never sufficient authorization.
+Migrations are ordered `migrations/NNN_*.sql` files applied once each and recorded in
+`schema_migrations`; migration 002 adds credential-project grants, the slice-B expiry
+index for existing databases, and the audit `detail` column.
+
+Indexes are listed in `migrations/001_init.sql` and `migrations/002_*.sql` when
+implemented. Every tenant-owned query filters on `project_id`; object access alone is
+never sufficient authorization.
 
 ## Message commit protocol
 
-1. Authenticate bearer credential → speaker. Authorize credential scope ∩ membership.
+1. Authenticate bearer credential → speaker. Authorize credential scope ∩ membership ∩
+   explicit credential-project grant.
 2. Validate payload, verify the sender-supplied `body_digest` against the received
    text bytes (`INTEGRITY_MISMATCH` before any write), and validate the reply
    reference in the target project.

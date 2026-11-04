@@ -137,8 +137,10 @@ export async function authenticateBearer(
 }
 
 // Decision order: unknown/inactive project, missing membership, or an inactive
-// principal is NOT_FOUND (no existence leak); a member without the scope is
-// FORBIDDEN. Credential state is reloaded so revocation is checked per request.
+// principal is NOT_FOUND (no existence leak); an active member whose credential
+// has no explicit grant for this project, or lacks the scope, is FORBIDDEN.
+// Credential state and the grant are reloaded so revocation is checked per
+// request. A grant never adds rights: it is only a precondition.
 export async function authorizeProject(
   deps: ServiceDeps,
   principal: Principal,
@@ -187,6 +189,15 @@ export async function authorizeProject(
     "SELECT scope_json, expires_at, revoked_at FROM credentials WHERE id = ? AND speaker_id = ?",
     [principal.credentialId, principal.speakerId],
   );
+
+  // Deny by default: the credential must carry an explicit grant for this
+  // project. Membership alone (including a newly joined project) grants nothing.
+  const grant = await deps.db.first<{ present: number }>(
+    `SELECT 1 AS present FROM credential_project_grants
+      WHERE credential_id = ? AND project_id = ?`,
+    [principal.credentialId, projectId],
+  );
+  if (grant === undefined) throw new AppError("FORBIDDEN");
 
   const capabilities = parseScopeJson(membership.capabilities);
   const credentialScopes =

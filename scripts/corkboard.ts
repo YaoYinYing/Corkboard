@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Bootstrap CLI. Prints only ids, the secrets file path, or a one-time token —
 // never key material, proxy configuration, or stored message content.
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { scryptSync } from "node:crypto";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { generateSpeakerToken, hashSecret } from "../src/auth/credentials.ts";
@@ -23,14 +24,14 @@ const DEFAULT_CAPABILITIES: readonly Scope[] = [
 
 const OPTIONS = {
   "data-dir": { type: "string" },
-  force: { type: "boolean" },
+  "secrets-file": { type: "string" },
   email: { type: "string" },
   account: { type: "string" },
   title: { type: "string" },
   summary: { type: "string" },
   name: { type: "string" },
   description: { type: "string" },
-  project: { type: "string" },
+  project: { type: "string", multiple: true },
   speaker: { type: "string" },
   credential: { type: "string" },
   owner: { type: "boolean" },
@@ -48,6 +49,28 @@ function randomId(prefix: string): string {
 function requireValue(value: string | undefined, name: string): string {
   if (value === undefined || value === "") throw new Error(`${name} is required`);
   return value;
+}
+
+// --project is repeatable for issue-key; the single-project commands accept
+// exactly one occurrence.
+function singleProject(value: readonly string[] | undefined): string {
+  if (value === undefined || value.length !== 1) {
+    throw new Error("--project is required exactly once");
+  }
+  return requireValue(value[0], "--project");
+}
+
+function distinctProjects(value: readonly string[] | undefined): string[] {
+  if (value === undefined || value.length === 0) {
+    throw new Error("at least one --project is required");
+  }
+  const projects: string[] = [];
+  for (const raw of value) {
+    const project = requireValue(raw, "--project");
+    if (projects.includes(project)) throw new Error(`duplicate --project: ${project}`);
+    projects.push(project);
+  }
+  return projects;
 }
 
 function dataDirFromEnv(): string {
@@ -92,6 +115,7 @@ async function withDb<T>(fn: (db: SqlDatabase) => Promise<T>, dataDir?: string):
 }
 
 // CLI audit rows are sanitized: identifiers and operation only, no content.
+// `detail` may carry JSON identifier/scope lists, never tokens or message text.
 async function insertAudit(
   db: SqlDatabase,
   input: {
@@ -99,18 +123,20 @@ async function insertAudit(
     speakerId: string;
     accountId: string | null;
     projectId: string | null;
+    detail?: string | null;
   },
 ): Promise<void> {
   await db.run(
     `INSERT INTO audit_events
-       (id, actor_account_id, actor_speaker_id, project_id, operation, outcome, request_id, created_at)
-     VALUES (?, ?, ?, ?, ?, 'success', NULL, ?)`,
+       (id, actor_account_id, actor_speaker_id, project_id, operation, outcome, request_id, detail, created_at)
+     VALUES (?, ?, ?, ?, ?, 'success', NULL, ?, ?)`,
     [
       randomId("evt_"),
       input.accountId,
       input.speakerId,
       input.projectId,
       input.operation,
+      input.detail ?? null,
       new Date().toISOString(),
     ],
   );
@@ -125,14 +151,54 @@ async function speakerAccount(db: SqlDatabase, speakerId: string): Promise<strin
   return row.owner_account_id;
 }
 
+// The default keeps key material outside the data directory. XDG_CONFIG_HOME is
+// honored when set, otherwise ~/.config.
+function defaultSecretsFile(): string {
+  const configured = process.env.XDG_CONFIG_HOME;
+  const base =
+    configured !== undefined && configured !== ""
+      ? configured
+      : join(homedir(), ".config");
+  return join(base, "corkboard", "secrets.env");
+}
+
+function isInside(parent: string, child: string): boolean {
+  const parentPath = resolve(parent);
+  const childPath = resolve(child);
+  return childPath === parentPath || childPath.startsWith(`${parentPath}${sep}`);
+}
+
+// Bootstrap only. Refuses to touch an existing installation: no key material is
+// generated, no file is written, and there is no overwrite mode. Intentional
+// key rotation is a separate, unimplemented operation (see docs/security-operations.md).
 async function initCommand(values: Values): Promise<void> {
   const dataDir = requireValue(values["data-dir"], "--data-dir");
+  const secretsFile =
+    values["secrets-file"] === undefined || values["secrets-file"] === ""
+      ? defaultSecretsFile()
+      : values["secrets-file"];
+
+  if (isInside(dataDir, secretsFile)) {
+    throw new Error("--secrets-file must resolve outside the data directory");
+  }
+  const databaseFile = join(dataDir, "corkboard.sqlite");
+  if (existsSync(databaseFile)) {
+    throw new Error(
+      `${databaseFile} exists; init refuses to modify an existing installation`,
+    );
+  }
+  if (existsSync(secretsFile)) {
+    throw new Error(`${secretsFile} exists; refusing to overwrite existing secrets`);
+  }
+
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
+  const secretsDir = dirname(secretsFile);
+  await mkdir(secretsDir, { recursive: true, mode: 0o700 });
+  await chmod(secretsDir, 0o700);
 
   const rootKey = crypto.getRandomValues(new Uint8Array(32));
   const pepper = crypto.getRandomValues(new Uint8Array(32));
-  const file = join(dataDir, "secrets.env");
   const content = [
     `CORKBOARD_ROOT_KEY=${Buffer.from(rootKey).toString("base64")}`,
     `CORKBOARD_CREDENTIAL_PEPPER=${Buffer.from(pepper).toString("base64")}`,
@@ -141,15 +207,15 @@ async function initCommand(values: Values): Promise<void> {
   ].join("\n");
 
   try {
-    await writeFile(file, content, { mode: 0o600, flag: values.force ? "w" : "wx" });
+    await writeFile(secretsFile, content, { mode: 0o600, flag: "wx" });
   } catch (error) {
     if ((error as { code?: unknown }).code === "EEXIST") {
-      throw new Error(`${file} exists; use --force to overwrite`);
+      throw new Error(`${secretsFile} exists; refusing to overwrite existing secrets`);
     }
     throw error;
   }
-  await chmod(file, 0o600);
-  console.log(file);
+  await chmod(secretsFile, 0o600);
+  console.log(secretsFile);
 }
 
 async function bootstrapOwnerCommand(values: Values): Promise<void> {
@@ -198,7 +264,7 @@ async function createSpeakerCommand(values: Values): Promise<void> {
 }
 
 async function addMemberCommand(values: Values): Promise<void> {
-  const projectId = requireValue(values.project, "--project");
+  const projectId = singleProject(values.project);
   const speakerId = requireValue(values.speaker, "--speaker");
   const capabilities = values.owner ? SCOPES : DEFAULT_CAPABILITIES;
   await withDb(async (db) => {
@@ -222,7 +288,7 @@ async function addMemberCommand(values: Values): Promise<void> {
 }
 
 async function removeMemberCommand(values: Values): Promise<void> {
-  const projectId = requireValue(values.project, "--project");
+  const projectId = singleProject(values.project);
   const speakerId = requireValue(values.speaker, "--speaker");
   await withDb(async (db) => {
     const removed = await db.run(
@@ -281,9 +347,44 @@ function parseIssuedScopes(raw: string | undefined): Scope[] {
   return SCOPES.filter((scope) => requested.has(scope));
 }
 
+// Active membership capabilities for the (project, speaker) pair, or undefined
+// when any principal in the chain is missing/inactive.
+async function activeMembershipCapabilities(
+  db: SqlDatabase,
+  projectId: string,
+  speakerId: string,
+): Promise<Set<Scope> | undefined> {
+  const membership = await db.first<{ capabilities: string }>(
+    `SELECT m.capabilities
+       FROM project_memberships m
+       JOIN projects p ON p.id = m.project_id
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
+        AND p.status = 'active' AND s.status = 'active' AND a.status = 'active'`,
+    [projectId, speakerId],
+  );
+  if (membership === undefined) return undefined;
+
+  let granted: unknown;
+  try {
+    granted = JSON.parse(membership.capabilities);
+  } catch {
+    granted = [];
+  }
+  return new Set(
+    Array.isArray(granted)
+      ? granted.filter(
+          (value): value is Scope =>
+            typeof value === "string" && (SCOPES as readonly string[]).includes(value),
+        )
+      : [],
+  );
+}
+
 async function issueKeyCommand(values: Values): Promise<void> {
   const speakerId = requireValue(values.speaker, "--speaker");
-  const projectId = requireValue(values.project, "--project");
+  const projectIds = distinctProjects(values.project);
   const requestedScopes = parseIssuedScopes(values.scopes);
 
   let expiresAt: string | null = null;
@@ -297,42 +398,23 @@ async function issueKeyCommand(values: Values): Promise<void> {
   const pepper = pepperFromEnv();
 
   await withDb(async (db) => {
-    const membership = await db.first<{ capabilities: string }>(
-      `SELECT m.capabilities
-         FROM project_memberships m
-         JOIN projects p ON p.id = m.project_id
-         JOIN speakers s ON s.id = m.speaker_id
-         JOIN accounts a ON a.id = s.owner_account_id
-        WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
-          AND p.status = 'active' AND s.status = 'active' AND a.status = 'active'`,
-      [projectId, speakerId],
-    );
-    if (membership === undefined) {
-      throw new Error("an active project membership is required to issue a key");
-    }
-
-    let granted: unknown;
-    try {
-      granted = JSON.parse(membership.capabilities);
-    } catch {
-      granted = [];
-    }
-    const allowed = new Set(
-      Array.isArray(granted)
-        ? granted.filter(
-            (value): value is Scope =>
-              typeof value === "string" && (SCOPES as readonly string[]).includes(value),
-          )
-        : [],
-    );
-    for (const scope of requestedScopes) {
-      if (!allowed.has(scope)) {
-        throw new Error(`scope not granted by the speaker's active membership: ${scope}`);
+    for (const projectId of projectIds) {
+      const allowed = await activeMembershipCapabilities(db, projectId, speakerId);
+      if (allowed === undefined) {
+        throw new Error(
+          `an active project membership is required to issue a key: ${projectId}`,
+        );
+      }
+      for (const scope of requestedScopes) {
+        if (!allowed.has(scope)) {
+          throw new Error(`scope not granted by the speaker's active membership: ${scope}`);
+        }
       }
     }
 
     const { token, publicPrefix } = generateSpeakerToken();
     const credentialId = randomId("cred_");
+    const createdAt = new Date().toISOString();
     await db.run(
       `INSERT INTO credentials
          (id, speaker_id, public_prefix, secret_verifier, scope_json, expires_at, created_at)
@@ -344,17 +426,94 @@ async function issueKeyCommand(values: Values): Promise<void> {
         await hashSecret(token, pepper),
         JSON.stringify(requestedScopes),
         expiresAt,
-        new Date().toISOString(),
+        createdAt,
       ],
     );
+    try {
+      for (const projectId of projectIds) {
+        await db.run(
+          `INSERT OR IGNORE INTO credential_project_grants
+             (credential_id, project_id, granted_at)
+           VALUES (?, ?, ?)`,
+          [credentialId, projectId, createdAt],
+        );
+      }
+    } catch (error) {
+      // The SqlDatabase port has no interactive transaction (D1-compatible SQL
+      // only), so undo the credential if a grant insert fails. A crash between
+      // the credential insert and the grants leaves a grantless credential,
+      // which is denied by default and can be revoked or granted explicitly.
+      await db.run("DELETE FROM credentials WHERE id = ?", [credentialId]);
+      throw error;
+    }
     await insertAudit(db, {
       operation: "credential.issue",
       speakerId,
       accountId: await speakerAccount(db, speakerId),
-      projectId,
+      projectId: projectIds.length === 1 ? (projectIds[0] ?? null) : null,
+      detail: JSON.stringify({
+        projects: projectIds,
+        scopes: requestedScopes,
+      }),
     });
     console.log(token);
   });
+}
+
+async function grantKeyProjectCommand(values: Values): Promise<void> {
+  const credentialId = requireValue(values.credential, "--credential");
+  const projectId = singleProject(values.project);
+  await withDb(async (db) => {
+    const credential = await db.first<{ speaker_id: string }>(
+      "SELECT speaker_id FROM credentials WHERE id = ?",
+      [credentialId],
+    );
+    if (credential === undefined) throw new Error(`credential not found: ${credentialId}`);
+    if ((await activeMembershipCapabilities(db, projectId, credential.speaker_id)) === undefined) {
+      throw new Error("an active project membership is required to grant a project");
+    }
+    const grantedAt = new Date().toISOString();
+    await db.run(
+      `INSERT OR IGNORE INTO credential_project_grants
+         (credential_id, project_id, granted_at)
+       VALUES (?, ?, ?)`,
+      [credentialId, projectId, grantedAt],
+    );
+    await insertAudit(db, {
+      operation: "credential.project.grant",
+      speakerId: credential.speaker_id,
+      accountId: await speakerAccount(db, credential.speaker_id),
+      projectId,
+      detail: JSON.stringify({ projects: [projectId] }),
+    });
+  });
+  console.log(`project granted: ${credentialId} ${projectId}`);
+}
+
+async function revokeKeyProjectCommand(values: Values): Promise<void> {
+  const credentialId = requireValue(values.credential, "--credential");
+  const projectId = singleProject(values.project);
+  await withDb(async (db) => {
+    const credential = await db.first<{ speaker_id: string }>(
+      "SELECT speaker_id FROM credentials WHERE id = ?",
+      [credentialId],
+    );
+    if (credential === undefined) throw new Error(`credential not found: ${credentialId}`);
+    const removed = await db.run(
+      `DELETE FROM credential_project_grants
+        WHERE credential_id = ? AND project_id = ?`,
+      [credentialId, projectId],
+    );
+    if (removed.changes === 0) throw new Error("project grant not found");
+    await insertAudit(db, {
+      operation: "credential.project.revoke",
+      speakerId: credential.speaker_id,
+      accountId: await speakerAccount(db, credential.speaker_id),
+      projectId,
+      detail: JSON.stringify({ projects: [projectId] }),
+    });
+  });
+  console.log(`project grant revoked: ${credentialId} ${projectId}`);
 }
 
 function parseExpiryLimit(raw: string | undefined): number {
@@ -403,6 +562,10 @@ async function main(): Promise<void> {
       return removeMemberCommand(values);
     case "issue-key":
       return issueKeyCommand(values);
+    case "grant-key-project":
+      return grantKeyProjectCommand(values);
+    case "revoke-key-project":
+      return revokeKeyProjectCommand(values);
     case "revoke-key":
       return revokeKeyCommand(values);
     case "expire-bodies":
@@ -412,7 +575,7 @@ async function main(): Promise<void> {
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|revoke-key|expire-bodies|serve> [options]; issue-key accepts --scopes <comma-separated>; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|serve> [options]; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }
