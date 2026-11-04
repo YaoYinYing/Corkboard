@@ -18,6 +18,7 @@ import {
   routeLabelFor,
 } from "../../app/metrics.ts";
 import { keyProviderFromEnv } from "../../crypto/keys.ts";
+import { nodePasswordVerifier } from "./password.ts";
 import type { ServiceDeps } from "../../service/auth.ts";
 import { LocalBlobStore } from "../../storage/blobs/local.ts";
 import { openSqliteDatabase } from "../../storage/db.ts";
@@ -250,6 +251,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       pepper: decodePepper(env.CORKBOARD_CREDENTIAL_PEPPER),
       serviceId: "corkboard",
       now: () => new Date(),
+      passwordVerifier: nodePasswordVerifier,
     };
     const metrics = new MetricsRegistry();
     const app = createApp(deps, {

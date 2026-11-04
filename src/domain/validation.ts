@@ -11,6 +11,9 @@ const PRINTABLE_ASCII = /^[\x21-\x7e]{1,128}$/;
 const RFC3339_UTC_TIMESTAMP =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
 const MAX_BODY_EXPIRY_AHEAD_MS = 366 * 24 * 60 * 60 * 1000;
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+$/;
+const MAX_EMAIL_LENGTH = 254;
+const MAX_LOGIN_PASSWORD_BYTES = 1024;
 
 function isLeapYear(year: number): boolean {
   return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
@@ -134,6 +137,26 @@ export function validateIdempotencyKey(value: unknown): string {
 
 export function validateBodyDigest(value: unknown): string {
   return parseSha256Digest(value);
+}
+
+// Shared by CLI bootstrap and HTTP login so the stored and looked-up forms
+// cannot drift. The shape check intentionally matches the pre-session CLI.
+export function normalizeEmail(value: unknown, field = "email"): string {
+  const email = requireString(value, field).trim().toLowerCase();
+  if (email.length > MAX_EMAIL_LENGTH || !EMAIL_SHAPE.test(email)) {
+    throw new AppError("VALIDATION_ERROR", `${field} is not a valid email`);
+  }
+  return email;
+}
+
+// Passwords are opaque bytes for PBKDF2; only the type and a DoS cap are
+// validated. Wrong or empty values remain a uniform authentication failure.
+export function validateLoginPassword(value: unknown): string {
+  const password = requireString(value, "password");
+  if (UTF8_ENCODER.encode(password).length > MAX_LOGIN_PASSWORD_BYTES) {
+    throw new AppError("VALIDATION_ERROR", "password must be at most 1024 UTF-8 bytes");
+  }
+  return password;
 }
 
 // Shape only: callers must validate the time window before a new write. Replays

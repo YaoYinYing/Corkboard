@@ -3,13 +3,14 @@
 // never key material, proxy configuration, or stored message content.
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
-import { scryptSync } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, basename, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { generateSpeakerToken, hashSecret } from "../src/auth/credentials.ts";
+import { hashPassword } from "../src/auth/password.ts";
 import { SCOPES, type Scope } from "../src/domain/authz.ts";
+import { normalizeEmail } from "../src/domain/validation.ts";
 import { startServer } from "../src/platforms/node/main.ts";
 import { DoctorError, formatDoctorReport, runDoctor } from "../src/service/doctor.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
@@ -109,16 +110,8 @@ function pathOrLinkExists(target: string): boolean {
   }
 }
 
-function hashPassword(password: string): string {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const hash = scryptSync(password, salt, 64);
-  return `scrypt$${Buffer.from(salt).toString("base64")}$${hash.toString("base64")}`;
-}
-
-function normalizeEmail(raw: string): string {
-  const email = raw.trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new Error("--email is not a valid email");
-  return email;
+function normalizeEmailArg(raw: string): string {
+  return normalizeEmail(raw, "--email");
 }
 
 async function withDb<T>(fn: (db: SqlDatabase) => Promise<T>, dataDir?: string): Promise<T> {
@@ -285,12 +278,12 @@ async function initCommand(values: Values): Promise<void> {
 }
 
 async function bootstrapOwnerCommand(values: Values): Promise<void> {
-  const email = normalizeEmail(requireValue(values.email, "--email"));
+  const email = normalizeEmailArg(requireValue(values.email, "--email"));
   const accountId = randomId("acct_");
   // Never accept the password in argv; only the environment is read.
   const password = process.env.CORKBOARD_BOOTSTRAP_PASSWORD;
   const passwordHash =
-    password === undefined || password === "" ? null : hashPassword(password);
+    password === undefined || password === "" ? null : await hashPassword(password);
   await withDb((db) =>
     db.run(
       `INSERT INTO accounts (id, email, password_hash, status, created_at)

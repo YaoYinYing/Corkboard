@@ -298,7 +298,10 @@ test("bootstrap commands produce usable ids and a token that authenticates", asy
       [accountId],
     );
     assert.equal(account?.email, "owner@example.test");
-    assert.match(account?.password_hash ?? "", /^scrypt\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/);
+    assert.match(
+      account?.password_hash ?? "",
+      /^pbkdf2-sha256\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/,
+    );
 
     const membership = await db.first<{ capabilities: string }>(
       "SELECT capabilities FROM project_memberships WHERE project_id = ? AND speaker_id = ?",

@@ -64,6 +64,54 @@ history; audit records; administrative privilege; availability; metadata privacy
     SHA-256 is verified before decryption. Stored-content mismatch fails closed
     (`INTEGRITY_FAILURE`) with no content and no read receipt.
 
+## Human account sessions (slice I)
+
+A session authenticates an account to three routes only. It is **not** a speaker
+credential and grants no project, message, MCP, or administrative authority.
+
+- **Session fixation.** The server always generates a new 256-bit session token at
+  sign-in and the client cannot supply a session id. A pre-existing cookie value is
+  ignored and replaced. Tokens are not accepted in query parameters or response bodies.
+- **CSRF.** The session cookie is `SameSite=Strict`, which blocks cross-site form and
+  fetch attachment in modern browsers, and every state-changing session request
+  (`DELETE /api/v1/session`) additionally requires `X-CSRF-Token` matching an
+  independent random value delivered in the `corkboard_csrf` cookie. The header is
+  compared as a keyed HMAC digest at fixed length; a cross-origin client that cannot
+  read the CSRF cookie cannot construct the header. There are no other cookie-
+  authenticated state-changing routes. A missing/wrong session is `401` before the
+  CSRF check, so the two failures are distinguishable (`401` vs `403`) but neither
+  reveals account data.
+- **Enumeration and timing.** Unknown email, wrong password, inactive account, and an
+  account without a password hash all return the same `401 UNAUTHENTICATED`. When there
+  is no stored hash the password is verified against a dummy PBKDF2 hash, so the KDF
+  work is comparable. A per-email login bucket (keyed by a digest, not the address) is
+  checked before account lookup, so rate-limit behavior does not depend on existence.
+  Absolute timing equality is not claimed: PBKDF2 work is similar but not bit-for-bit
+  identical across the legacy `scrypt$` Node path, and DB lookup time varies.
+- **Cookie theft.** The session cookie is `HttpOnly`, so page script cannot read it;
+  `Secure` prevents transmission over plaintext HTTP; the `__Host-` name prefix forbids
+  `Domain` scope and requires `Path=/`. The CSRF cookie is intentionally readable by
+  same-origin script. Neither raw value is written to the database, responses, logs, or
+  audit rows; only keyed verifiers are stored. TLS termination is a deployment
+  requirement.
+- **Revocation and expiry limits.** Sign-out revokes only the presented row, so other
+  devices stay signed in (the operator can revoke all rows directly). Sessions have a
+  30-minute idle timeout and a 12-hour absolute lifetime, and an inactive account is
+  rejected on every request. A stolen token is usable until expiry/revocation; there is
+  no per-request re-authentication factor or device binding. Expired/revoked rows are
+  not automatically purged, but an expired row cannot authenticate.
+- **Password storage.** PBKDF2-HMAC-SHA-256 with 600,000 iterations, a 16-byte random
+  salt, and a 32-byte output. The iteration count is stored with the hash so it can be
+  raised later. Legacy `scrypt$` hashes are accepted only by the Node adapter and are
+  never written; an unknown format fails closed. Password input is capped at 1024 UTF-8
+  bytes to bound KDF work.
+- **Logging.** Request logs contain method, path, status, duration, and actor IDs only.
+  They never include `Cookie`, `Authorization`, `X-CSRF-Token`, passwords, session
+  tokens, CSRF values, or email addresses.
+- **Login abuse.** The per-email limiter is process-local: separate processes and
+  Workers isolates enforce their own buckets, and a restart clears them. Per-IP and
+  volumetric controls remain the reverse proxy's responsibility.
+
 ## Attack cases to cover
 
 Cross-project `message_id` guessing; sender spoofing in HTTP/MCP parameters; forged

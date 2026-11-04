@@ -18,9 +18,13 @@ function toHex(bytes: Uint8Array): string {
   return hex;
 }
 
+/** Opaque random value for session/CSRF tokens; never reused for bearer keys. */
+export function randomBase64url(byteLength: number): string {
+  return base64url(crypto.getRandomValues(new Uint8Array(byteLength)));
+}
+
 export function generateSpeakerToken(): { token: string; publicPrefix: string } {
-  const secret = crypto.getRandomValues(new Uint8Array(SECRET_BYTES));
-  const token = TOKEN_PREFIX + base64url(secret);
+  const token = TOKEN_PREFIX + randomBase64url(SECRET_BYTES);
   return { token, publicPrefix: token.slice(0, PUBLIC_PREFIX_LENGTH) };
 }
 

@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–H implemented and pushed |
+| Phase | 0 complete; vertical slices A–H pushed; slice I (human account sessions) candidate, review pending |
 | Last pushed checkpoint | `5d0ae9f` (metrics hardening, audited tree `f45a3b4`) on `origin/main`; CI run 41878712983 |
 | Branch | `main`, clean; the `slice-h-metrics` candidate was fast-forwarded |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: review pending |
 | Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, attachments, queue-to-commit and per-project observability |
 
 ## Checkpoint history
@@ -504,6 +504,57 @@ pushed.
   HTTP request duration only. Disabling the endpoint stops neither counting nor memory
   use (the registry is bounded by the fixed label/status/error sets).
 
+## Vertical slice I — human account sessions (candidate; review pending)
+
+- **Scope.** An owner account with a password can sign in, read its session, use the
+  session on the session routes, and sign out. Registration, email verification,
+  password reset, OAuth 2.1/PKCE, ChatGPT integration, a web UI, speaker impersonation,
+  and dashboard endpoints are not implemented. A session authenticates an account and
+  never a speaker: bearer routes and `/mcp` do not consult it, and the session token is
+  not a bearer credential.
+- **Migration 003.** `sessions(id, account_id REFERENCES accounts, token_prefix,
+  token_verifier, csrf_verifier, created_at, last_seen_at, expires_at, revoked_at)` with
+  `account_id` and `token_prefix` indexes. Applies on a fresh database and on a
+  migration-002 database; the normal opener records version 3 atomically.
+- **Password KDF port.** New hashes are portable PBKDF2 via WebCrypto:
+  `pbkdf2-sha256$<iterations>$<salt base64>$<hash base64>`, 600,000 iterations,
+  fresh 16-byte salt, 32-byte derived key, fixed-length hex comparison.
+  `ServiceDeps.passwordVerifier` is the injectable port; core defaults to the portable
+  verifier. The Node adapter adds legacy `scrypt$<salt>$<hash>` verification with
+  `timingSafeEqual`; it is never written, and unknown formats fail closed. The CLI
+  bootstrap now writes PBKDF2.
+- **Tokens and CSRF.** `cb_sess_` + 43 base64url chars (256 random bits) and an
+  independent 256-bit CSRF value. The database stores the token's first 16 characters
+  and keyed HMAC-SHA-256 verifiers for both values under the existing credential pepper;
+  no new secret. Cookies: `__Host-corkboard_session` (`HttpOnly; Secure; SameSite=Strict;
+  Path=/; Max-Age=43200`) and `corkboard_csrf` (`Secure; SameSite=Strict; Path=/;
+  Max-Age=43200`, readable). `DELETE` requires a matching `X-CSRF-Token`; comparison is
+  a fixed-length digest via `digestsEqual`.
+- **Lifetime and validity.** Absolute 12 hours, idle 30 minutes since `last_seen_at`,
+  refreshed lazily on accepted session requests. Revoked, expired, idle-expired,
+  unknown, or inactive-account sessions are uniform `401 UNAUTHENTICATED`. No
+  authorization cache.
+- **Endpoints.** `POST /api/v1/session` (uniform 401 for unknown email, wrong password,
+  inactive account, and no-password account; unknown/no-password verify a dummy PBKDF2
+  hash), `GET /api/v1/session` (account only), `DELETE /api/v1/session` (revokes one
+  row, clears cookies, `204`). `Set-Cookie` is emitted only on success.
+- **Login abuse control.** Separate process-local token bucket keyed by the SHA-256 of
+  the normalized email: 10/minute with burst 5, injected clock, `429 RATE_LIMITED` with
+  `Retry-After`. The address is never retained in the limiter. Not distributed.
+- **Logging.** Request logs remain method/path/status/duration/actor only; `Cookie`,
+  `X-CSRF-Token`, passwords, tokens, CSRF values, and emails are not logged.
+- **Docs.** `api.md`, `architecture.md`, `threat-model.md`, `security-operations.md`,
+  `deployments.md`, `TODO.md` (completed Phase 3 subset only), and `LESSIONS.md` updated.
+- **Tests.** New `tests/security/session.test.ts` and
+  `tests/integration/sessions.test.ts`; migration expectations in the storage contract,
+  doctor, built-adapter, and CLI tests updated. Full-suite counts are recorded in the
+  checkpoint commit trailer.
+- **Limitations.** Login limiting is process-local; absolute timing indistinguishability
+  is not claimed (especially vs. the Node-only scrypt path). Session rows are not
+  automatically purged and there is no cleanup command. No browser UI, registration,
+  recovery, OAuth, or speaker delegation exists. `WWW-Authenticate: Bearer` is emitted
+  by the shared 401 envelope on session routes even though those routes use cookies.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -740,9 +791,11 @@ Do not infer any of these from local MCP behavior or from another plan.
   follows and chmods the target (secrets are not written there, and `serve` rejects it);
   metadata-only reads remain request-start-only by design; a bounded `..` filesystem
   test variant is still missing.
-- Bearer-authenticated MCP is implemented locally. No human web session, OAuth 2.1/
-  PKCE, ChatGPT Web installation/linking, or conversation-level ChatGPT tool
-  invocation is implemented or verified.
+- Bearer-authenticated MCP is implemented locally. Human account sessions are
+  implemented as slice I (candidate): sign-in, session read, and sign-out only. No
+  browser UI, registration, email verification, password reset, OAuth 2.1/PKCE, ChatGPT
+  Web installation/linking, or conversation-level ChatGPT tool invocation is
+  implemented or verified. A session cannot act as a speaker credential.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
   unauthenticated uploads still add memory pressure. A reverse-proxy body limit remains
@@ -757,7 +810,8 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Project listing uses `instr` over app-written capability JSON for pagination.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
-- No human web session or OAuth yet.
+- Human account sessions are implemented without a browser UI (slice I). OAuth is not
+  implemented.
 - Slice-G audit debt: idle/LRU eviction resets a bucket to full burst, which can exceed
   the configured sustained rate when `burst > 2 * perMinute` (non-default config);
   authentication/verification work and unauthenticated requests are not rate limited;
@@ -788,5 +842,11 @@ Do not infer any of these from local MCP behavior or from another plan.
   only); `SessionEntry.sessionId` is dead; the MCP 413-before-auth ordering exception on
   oversized unauthenticated POSTs needs explicit docs/tests.
 - No Workers adapter.
+- Slice-I audit debt (P2, non-blocking): login rate limiting is process-local and keyed
+  by email digest (an attacker who knows an address can consume that bucket); failure
+  timing is comparable but not identical across PBKDF2 and the Node-only legacy scrypt
+  path; session rows are never purged automatically and no cleanup command exists; the
+  shared 401 envelope includes `WWW-Authenticate: Bearer` on cookie routes; there is no
+  UI, registration, email verification, password reset, OAuth, or speaker delegation.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.

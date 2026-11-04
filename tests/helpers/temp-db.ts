@@ -199,6 +199,7 @@ const TABLES = [
   "service_settings",
   "schema_migrations",
   "credential_project_grants",
+  "sessions",
 ];
 
 /**
@@ -221,7 +222,7 @@ export function runStorageContract(
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2],
+      [1, 2, 3],
     );
 
     const tables = await storage.db.all<{ name: string }>(
@@ -247,7 +248,7 @@ export function runStorageContract(
       );
       assert.deepEqual(
         after.map((row) => row.version),
-        [1, 2],
+        [1, 2, 3],
       );
     } finally {
       reopened.close();

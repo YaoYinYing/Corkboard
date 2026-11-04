@@ -96,7 +96,7 @@ test("several connections can open the same file concurrently", async (t) => {
   }
 });
 
-test("an existing v1 database receives migration 002", async (t) => {
+test("an existing v1 database receives the remaining migrations", async (t) => {
   const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
   const dir = mkdtempSync(join(tmpdir(), "corkboard-v1-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -113,7 +113,7 @@ test("an existing v1 database receives migration 002", async (t) => {
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2],
+      [1, 2, 3],
     );
 
     const table = await db.first<{ name: string }>(
@@ -165,7 +165,7 @@ test("an interrupted migration rolls back and the database reopens", async (t) =
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2],
+      [1, 2, 3],
     );
     const columns = await db.all<{ name: string }>("PRAGMA table_info(audit_events)");
     assert.equal(columns.filter((column) => column.name === "detail").length, 1);
@@ -215,7 +215,7 @@ db.close();
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2],
+      [1, 2, 3],
     );
     const columns = await db.all<{ name: string }>("PRAGMA table_info(audit_events)");
     assert.equal(columns.filter((column) => column.name === "detail").length, 1);
@@ -223,6 +223,68 @@ db.close();
     db.close();
   }
 });
+
+test("an existing v2 database receives migration 003 sessions", async (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "corkboard-v2-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "legacy.sqlite");
+
+  createLegacyV2(dbPath, repoRoot);
+
+  const db = await openSqliteDatabase(dbPath);
+  try {
+    const versions = await db.all<{ version: number }>(
+      "SELECT version FROM schema_migrations ORDER BY version",
+    );
+    assert.deepEqual(
+      versions.map((row) => row.version),
+      [1, 2, 3],
+    );
+    const table = await db.first<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+    );
+    assert.equal(table?.name, "sessions");
+    for (const index of ["idx_sessions_account", "idx_sessions_token_prefix"]) {
+      const row = await db.first<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+        [index],
+      );
+      assert.equal(row?.name, index);
+    }
+    const columns = await db.all<{ name: string }>("PRAGMA table_info(sessions)");
+    assert.deepEqual(
+      columns.map((column) => column.name),
+      [
+        "id",
+        "account_id",
+        "token_prefix",
+        "token_verifier",
+        "csrf_verifier",
+        "created_at",
+        "last_seen_at",
+        "expires_at",
+        "revoked_at",
+      ],
+    );
+  } finally {
+    db.close();
+  }
+});
+
+function createLegacyV2(dbPath: string, repoRoot: string): void {
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(readFileSync(join(repoRoot, "migrations", "001_init.sql"), "utf8"));
+  legacy.exec(
+    readFileSync(join(repoRoot, "migrations", "002_credential_project_grants.sql"), "utf8"),
+  );
+  const insert = legacy.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  );
+  insert.run(1, new Date().toISOString());
+  insert.run(2, new Date().toISOString());
+  legacy.close();
+}
 
 function createLegacyV1(dbPath: string, repoRoot: string): void {
   const legacy = new DatabaseSync(dbPath);
@@ -243,6 +305,7 @@ test("built adapter opens its bundled migration from dist", async (t) => {  cons
   );
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "001_init.sql")));
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "002_credential_project_grants.sql")));
+  assert.ok(existsSync(join(repoRoot, "dist", "migrations", "003_sessions.sql")));
 
   const dir = mkdtempSync(join(tmpdir(), "corkboard-built-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -256,7 +319,7 @@ test("built adapter opens its bundled migration from dist", async (t) => {  cons
   const script = `
 import { openSqliteDatabase } from ${JSON.stringify(moduleUrl)};
 const db = await openSqliteDatabase(${JSON.stringify(dbPath)});
-const row = await db.first("SELECT version FROM schema_migrations WHERE version = 2");
+const row = await db.first("SELECT version FROM schema_migrations WHERE version = 3");
 if (row === undefined) throw new Error("migration not applied");
 db.close();
 `;

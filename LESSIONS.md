@@ -6,6 +6,28 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — A human session is not a speaker credential
+
+- **Failure pattern:** Reusing the bearer principal for browser cookies would let a
+  logged-in account act as a speaker without a scoped credential and would bypass
+  project membership/grant checks. Sharing one token format also lets a session value
+  probe the bearer route.
+- **Fix:** Sessions live in their own `sessions` table and service module. Only the
+  three `/api/v1/session` routes read the cookie; bearer routes and `/mcp` never do.
+  Sign-in issues a fresh server-generated token (no client-supplied session id), the
+  database stores only a prefix plus keyed HMAC verifiers, and account authorization
+  never substitutes for speaker scopes.
+- **Also fixed while testing:** Verify unknown emails and no-password accounts against a
+  dummy PBKDF2 hash so the uniform `401` is not an obvious timing oracle; key the login
+  limiter by a hash of the normalized email so addresses are not retained; perform the
+  CSRF check before touching `last_seen_at` so a forged state-changing request has no
+  side effect.
+- **Prevents:** Speaker impersonation from a browser session, session-token replay on
+  bearer endpoints, CSRF-driven logout, and account enumeration by timing or rate-limit
+  behavior.
+- **Remove when:** OAuth or another delegated-identity layer replaces password sessions;
+  keep the cookie/session vs. speaker-credential boundary rule.
+
 ## 2026-11-04 — Metrics need fixed labels and a nonexistent-looking disabled route
 
 - **Failure pattern:** Recording raw pathnames or method strings lets any caller grow an

@@ -44,6 +44,7 @@ export type RouteLabel =
   | "/mcp"
   | "/metrics"
   | "/api/v1/me"
+  | "/api/v1/session"
   | "/api/v1/projects"
   | "/api/v1/projects/:projectId"
   | "/api/v1/projects/:projectId/messages"
@@ -68,6 +69,7 @@ export function routeLabelFor(pathname: string): RouteLabel {
   if (segments[0] !== "api" || segments[1] !== "v1") return "unknown";
   if (segments.length === 3) {
     if (segments[2] === "me") return "/api/v1/me";
+    if (segments[2] === "session") return "/api/v1/session";
     if (segments[2] === "projects") return "/api/v1/projects";
     return "unknown";
   }

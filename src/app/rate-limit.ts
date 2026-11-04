@@ -21,6 +21,16 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   burst: DEFAULT_RATE_LIMIT_BURST,
 };
 
+// Login attempts are limited per normalized email (keyed by its SHA-256, so no
+// address is retained). It is intentionally tighter than the per-credential API
+// limit and is process-local like every other bucket.
+export const DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE = 10;
+export const DEFAULT_LOGIN_RATE_LIMIT_BURST = 5;
+export const DEFAULT_LOGIN_RATE_LIMIT: RateLimitConfig = {
+  perMinute: DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE,
+  burst: DEFAULT_LOGIN_RATE_LIMIT_BURST,
+};
+
 export interface RateLimitDecision {
   allowed: boolean;
   /** Whole seconds until a token is available; 0 when allowed. */

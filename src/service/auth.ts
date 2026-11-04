@@ -1,4 +1,5 @@
 import { credentialIsActive, verifySecret } from "../auth/credentials.ts";
+import type { PasswordVerifier } from "../auth/password.ts";
 import {
   SCOPES,
   authorizeProjectAccess,
@@ -17,6 +18,11 @@ export interface ServiceDeps {
   pepper: Uint8Array;
   serviceId: string;
   now: () => Date;
+  /**
+   * Human password verification port. Core defaults to portable PBKDF2; the
+   * Node adapter additionally understands legacy scrypt hashes.
+   */
+  passwordVerifier?: PasswordVerifier;
 }
 
 export interface Principal {

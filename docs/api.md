@@ -1,9 +1,9 @@
 # HTTP API
 
-**Status: implemented for the Node.js + SQLite vertical slices A–D and the
-bearer-authenticated MCP slice.** Cloudflare Workers/D1, OAuth, ChatGPT Web integration,
-and the "Planned, not implemented" section below are not implemented. See
-`IMPLEMENTATION_STATE.md` for the current evidence.
+**Status: implemented for the Node.js + SQLite vertical slices A–D, the
+bearer-authenticated MCP slice, and human account sessions (slice I).** Cloudflare
+Workers/D1, OAuth, ChatGPT Web integration, and the "Planned, not implemented" section
+below are not implemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 
 Base path: `/api/v1`. JSON in, JSON out, UTF-8. All timestamps are server-generated
 UTC ISO-8601 with milliseconds unless stated otherwise.
@@ -12,11 +12,19 @@ UTC ISO-8601 with milliseconds unless stated otherwise.
 
 - Agents and local integrations: `Authorization: Bearer <speaker-token>`.
 - Remote MCP: the same scoped speaker bearer credential authenticates
-  `POST/GET/DELETE /mcp`. See [`mcp.md`](./mcp.md). OAuth 2.1 and human web sessions
-  are planned; they are not implemented.
+  `POST/GET/DELETE /mcp`. See [`mcp.md`](./mcp.md).
+- Humans: a server-managed account session obtained from `POST /api/v1/session`. The
+  browser carries it in an opaque `HttpOnly` cookie plus a non-`HttpOnly` CSRF cookie.
+  OAuth 2.1/PKCE and ChatGPT Web remain unimplemented.
 
 A bearer token authenticates a **speaker**. The server derives `speaker_id` from the
 token; clients cannot submit an authoritative sender.
+
+A human session authenticates an **account**, never a speaker and never a credential.
+It is accepted only by the three `/api/v1/session` routes. It cannot call `/api/v1/me`,
+project, message, or `/mcp` routes, and a session token is not a valid bearer token.
+Conversely, bearer routes never accept a session cookie. OAuth grants, which may later
+map an account to a speaker/scope delegation, are not implemented.
 
 Scopes: `project.read`, `message.read`, `message.send`, `receipt.write`,
 `project.edit`, `member.read`, `member.manage`.
@@ -149,7 +157,79 @@ authorization semantics.
   credentials, with entries idle for 2 minutes evicted. This is not distributed or
   global rate limiting.
 
+### Login attempts
+
+`POST /api/v1/session` has a separate, tighter bucket keyed by the **SHA-256 of the
+normalized email** (the address itself is never stored in the limiter). The default is
+**10 attempts/minute with burst 5**, with the same bounded map (10,000 entries, 2-minute
+idle sweep). It is checked before account lookup or password verification and applied
+whether or not the account exists, so it does not reveal account existence. Exceeding it
+returns the normal `429 RATE_LIMITED` envelope with `Retry-After` and no `Set-Cookie`.
+Like the API limiter, it is **process-local**, resets on restart, and is additional
+denial only; per-IP volumetric limits belong at the reverse proxy. An attacker who knows
+an email can consume that address's login attempts; the window is small and the bucket
+refills continuously.
+
 ## Endpoints
+
+### `POST /api/v1/session`
+
+Signs in an account with `{ "email": "...", "password": "..." }`. The email is trimmed,
+lowercased, and shape-validated (at most 254 characters); the password must be a string
+of at most 1024 UTF-8 bytes. Other fields are ignored. Invalid JSON, a non-string field,
+or an over-limit body is `VALIDATION_ERROR` / `REQUEST_TOO_LARGE`.
+
+All credential failures are deliberately uniform: unknown email, wrong password,
+inactive/suspended account, and an account with no password hash return the same
+`401 UNAUTHENTICATED` envelope and no `Set-Cookie`. Unknown/no-password cases are
+verified against a dummy PBKDF2 hash so they do the same KDF work as a wrong password
+(the error text never distinguishes them). Passwords are stored and verified with
+PBKDF2-HMAC-SHA-256: `pbkdf2-sha256$<iterations>$<salt base64>$<hash base64>` with
+600,000 iterations, a fresh 16-byte salt, and a 32-byte derived key. The Node adapter
+additionally accepts legacy `scrypt$<salt>$<hash>` bootstrap hashes; the portable core
+does not. Unknown formats fail closed.
+
+Success returns `200`:
+
+```json
+{ "account": { "id": "acct_...", "email": "owner@example.test" } }
+```
+
+and exactly two cookies, both `Secure`, `SameSite=Strict`, `Path=/`, and
+`Max-Age=43200` (12 hours):
+
+| Cookie | Attributes | Value |
+| --- | --- | --- |
+| `__Host-corkboard_session` | `HttpOnly; Secure; SameSite=Strict; Path=/` | `cb_sess_` + 43 base64url chars (256 random bits) |
+| `corkboard_csrf` | `Secure; SameSite=Strict; Path=/` (not `HttpOnly`) | 43 base64url chars (256 random bits) |
+
+The database stores only the session token's first 16 characters plus keyed
+HMAC-SHA-256 verifiers for both values under `CORKBOARD_CREDENTIAL_PEPPER`; neither raw
+value is stored or logged. Every sign-in creates a new session row (no client-supplied
+session id), so a pre-login session value cannot be fixed by an attacker.
+
+**Lifetime.** A session has an absolute lifetime of **12 hours** from creation and an
+idle lifetime of **30 minutes** since its last accepted use. Each accepted
+`GET`/`DELETE /api/v1/session` request refreshes `last_seen_at`; expired, idle-expired,
+revoked, unknown, or inactive-account sessions return the same `401 UNAUTHENTICATED`.
+There is no authorization cache and no sliding extension of the absolute lifetime.
+Cookie `Max-Age` matches the absolute lifetime; server-side idle expiry is stricter.
+
+### `GET /api/v1/session`
+
+Requires the session cookie and returns the same account object as login. It never
+returns the session token, CSRF value, password material, speaker identity, or scopes.
+Missing/invalid/expired/revoked session → `401 UNAUTHENTICATED`.
+
+### `DELETE /api/v1/session`
+
+Requires a valid session cookie (else `401 UNAUTHENTICATED`) **and** a matching
+`X-CSRF-Token` header (else `403 FORBIDDEN`). The header must equal the value in the
+`corkboard_csrf` cookie; the server compares keyed HMAC digests at fixed length. A
+failed CSRF check does not revoke, and a missing/wrong session still yields `401` first.
+Success revokes **only the presented session row** (`revoked_at` set; other sessions
+for the account stay valid), clears both cookies with `Max-Age=0`, and returns `204`
+with no body. Reusing the old cookie afterwards returns `401`.
 
 ### `GET /healthz`
 
@@ -218,7 +298,8 @@ Counters cover every response produced by the app, including errors and `429`
 `RATE_LIMITED`, with error codes extracted from the standard Corkboard envelope. `/mcp`
 is one route label; each initialize, tool call, and other `/mcp` HTTP request increments
 it. No tool name or tool-argument content is read. Route labels are fixed templates:
-`/healthz`, `/mcp`, `/metrics`, `/api/v1/me`, `/api/v1/projects`,
+`/healthz`, `/mcp`, `/metrics`, `/api/v1/me`, `/api/v1/session`,
+`/api/v1/projects`,
 `/api/v1/projects/:projectId`, `/api/v1/projects/:projectId/messages`,
 `/api/v1/projects/:projectId/messages/:messageId`, and the `/body`, `/read`, `/expire`
 variants; every other path is `unknown`. Raw pathnames, query strings, project/message
@@ -469,6 +550,8 @@ implemented or verified**.
 | `body_expires_at` | strict RFC 3339 UTC `Z`; real calendar date; seconds 00–59; optional 1–3 fraction digits; after `received_at`; ≤366 days ahead |
 | `Idempotency-Key` | 1–128 non-space printable ASCII (0x21–0x7E) |
 | List `limit` | 1–100 |
+| Login `email` | trimmed, lowercased, ≤254 characters, non-empty local/domain around one `@` |
+| Login `password` | string, ≤1024 UTF-8 bytes (credential failures are uniform `401`) |
 | Request body | 64 KiB (first slice; attachments separate and not implemented) |
 
 ## Planned, not implemented
@@ -478,8 +561,11 @@ management are deferred (the CLI provides bootstrap, project-create, speaker-cre
 membership, and credential commands in slice A; project edit is not implemented). Also
 deferred: OAuth discovery and grants, ChatGPT Web plugin installation/linking,
 attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
-metadata), and the human session API. The bearer-authenticated `/mcp` surface is
-implemented (see above and `mcp.md`); only its OAuth/ChatGPT integration is deferred. Expiry is implemented as the endpoint above plus the operator-run `expire-bodies`
+metadata), account registration/invite provisioning, email verification, password
+reset, and a browser UI. Human sign-in/session read/sign-out is implemented as described
+above. The bearer-authenticated `/mcp` surface is implemented (see above and `mcp.md`);
+only its OAuth/ChatGPT integration is deferred. Expiry is implemented as the endpoint
+above plus the operator-run `expire-bodies`
 command; there is no scheduler daemon. They will use the same service authorization
 layer.
 

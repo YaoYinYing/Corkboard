@@ -1,7 +1,8 @@
 # Security operations
 
 Status: implemented for the Node.js 24 + SQLite self-hosted deployment (vertical
-slices A and B). Cloudflare-specific steps are planned.
+slices A and B, plus the human account session slice). Cloudflare-specific steps are
+planned.
 
 ## Secrets and keys
 
@@ -10,7 +11,7 @@ The server needs two independent secrets plus one configuration path:
 | Name | Kind | Purpose | Format |
 | --- | --- | --- | --- |
 | `CORKBOARD_ROOT_KEY` | secret | AES-256-GCM root key version `v1` | 32 random bytes, base64 |
-| `CORKBOARD_CREDENTIAL_PEPPER` | secret | HMAC-SHA256 key for speaker-token verifiers and idempotency payload digests | 32 random bytes, base64 |
+| `CORKBOARD_CREDENTIAL_PEPPER` | secret | HMAC-SHA256 key for speaker-token verifiers, idempotency payload digests, and session/CSRF verifiers | 32 random bytes, base64 |
 | `CORKBOARD_DATA_DIR` | config | SQLite and blob directory location (key material stays separate) | filesystem path |
 
 `CORKBOARD_DATA_DIR` is configuration, not key material; do not place it in a secret
@@ -34,7 +35,11 @@ manager or treat it as a backup secret. Rules:
   overwrite/`--force` mode; an unknown `--force` is a command-line error. Key material
   is never generated when initialization is refused.
 - `bootstrap-owner` reads an optional password from `CORKBOARD_BOOTSTRAP_PASSWORD`;
-  it is never accepted on argv and never printed.
+  it is never accepted on argv and never printed. New hashes use portable
+  PBKDF2-HMAC-SHA-256 (600,000 iterations, 16-byte random salt, 32-byte output) stored
+  as `pbkdf2-sha256$<iterations>$<salt base64>$<hash base64>`. The Node server
+  also verifies legacy `scrypt$` hashes written by earlier bootstrap builds; unknown
+  formats fail closed. No password, hash, or session value is logged.
 - The process loads secrets from environment variables (or the file via the service
   manager). It never serves or echoes them.
 - The root key is a **service key version**, not a per-message DEK, in the first slice.
@@ -132,6 +137,45 @@ written) is not prevented; no stronger guarantee is claimed. See
 - `remove-member` deletes that speaker's grants for the project. It writes the
   `credential.project.revoke` audit row only when at least one grant was actually
   deleted; `membership.remove` is always audited.
+
+## Human account sessions
+
+- **HTTPS is mandatory.** Session and CSRF cookies are `Secure`; the session cookie is
+  named `__Host-corkboard_session`, which requires `Secure`, `Path=/`, and no `Domain`
+  attribute. Serve Corkboard only through a TLS reverse proxy. A client cannot obtain or
+  use a session over plain HTTP in a conforming browser.
+- **Cookie split.** The session cookie is `HttpOnly; Secure; SameSite=Strict; Path=/`.
+  The separate `corkboard_csrf` cookie is `Secure; SameSite=Strict; Path=/` and
+  intentionally readable by same-origin script so the client can send its value in the
+  `X-CSRF-Token` header for `DELETE /api/v1/session`. Do not make the session cookie
+  script-readable or relax `SameSite` without a new threat review.
+- **What a session can do.** Read the signed-in account (`GET /api/v1/session`) and sign
+  out (`DELETE`). It cannot read projects or messages, send, mark read, expire, or call
+  MCP, and it is not accepted as a bearer token. Speaker operations still require a
+  separately issued scoped credential.
+- **Lifetime and revocation.** A session expires after **12 hours absolute** and after
+  **30 minutes idle** (refreshed lazily on accepted session requests). Sign-out sets
+  `revoked_at` for that row only and clears the cookies; other sessions stay valid.
+  Revoking an account/session directly in SQL takes effect on the next request because
+  no authorization cache exists.
+- **Storage.** Only `sessions.token_prefix`, an HMAC verifier of the session token, and
+  an HMAC verifier of the CSRF value are stored, all keyed by
+  `CORKBOARD_CREDENTIAL_PEPPER` (no new secret). Raw tokens and CSRF values exist only
+  in the browser cookies.
+- **Cleanup.** There is no automatic session-row purge and no CLI command for it.
+  Expired/revoked rows are inert because validation rejects them. An operator may
+  delete rows where `expires_at <= now` or `revoked_at IS NOT NULL` during maintenance;
+  deleting a row immediately invalidates that session. Backups containing session rows
+  are not authentication material without the pepper.
+- **Abuse control.** Login attempts are limited per SHA-256 digest of the normalized
+  email to 10/minute with burst 5, process-local, returning `429` + `Retry-After`.
+  Addresses are not retained in the limiter. Unknown, wrong-password, inactive, and
+  no-password failures are uniform `401`. Apply per-IP and volumetric limits at the
+  reverse proxy; the application does not trust or read forwarding headers.
+
+OAuth 2.1/PKCE, ChatGPT Web account linking, registration, email verification, and
+password reset are not implemented. Do not describe a session as OAuth or as authority
+to act as a speaker.
 
 ## MCP transport
 
@@ -264,8 +308,9 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
 - Log request ID, route, status, duration, and actor IDs. Log a stable error code only
   when the response uses the Corkboard JSON envelope; MCP tool-level failures are HTTP
   `200` with `isError: true` and are not logged as error codes.
-- Never log message bodies, summaries, tokens, keys, full IPs, credential headers, MCP
-  session ids, or password material.
+- Never log message bodies, summaries, tokens, keys, full IPs, credential headers,
+  `Cookie`, `X-CSRF-Token`, passwords or password hashes, session tokens, CSRF values,
+  email addresses, MCP session ids, or password material.
 - `audit_events` records credential issuance/revocation, credential-project
   grant/revocation, membership grant/removal, body-integrity failures, and successful
   body expiry (`message.expire`), with identifiers and outcome only and no body
@@ -377,5 +422,8 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
   limiter and no application-level per-IP limiting (delegated to the reverse proxy).
 - Metrics are per-process in-memory counters with no persistence, aggregation, or
   per-project views; the latency histogram is request duration, not queue-to-commit.
-- No web session layer yet; bootstrap, credential issuance/revocation, and membership
-  grant/removal are CLI-only in slice A.
+- Human sessions are implemented as server-side rows with 12-hour absolute / 30-minute
+  idle expiry and per-session revocation. There is no browser UI, registration, email
+  verification, password reset, OAuth 2.1/PKCE, or ChatGPT Web linking. Login rate
+  limiting and outcome uniformity are bounded but not perfectly timing-equivalent
+  across PBKDF2 and the Node-only legacy scrypt path.

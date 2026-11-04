@@ -2,8 +2,11 @@
 // reuses the service authorization layer; no parallel authz path exists here.
 import { SCOPES, type Scope } from "../domain/authz.ts";
 import { AppError, RateLimitError, type ErrorCode } from "../domain/errors.ts";
+import { sha256Hex } from "../domain/digest.ts";
+import { normalizeEmail, validateLoginPassword } from "../domain/validation.ts";
 import { createMcpEndpoint } from "../mcp/http.ts";
 import {
+  DEFAULT_LOGIN_RATE_LIMIT,
   DEFAULT_RATE_LIMIT,
   RateLimiter,
   type RateLimitConfig,
@@ -21,6 +24,16 @@ import {
   type ServiceDeps,
 } from "../service/auth.ts";
 import { getPrincipalIdentity } from "../service/identity.ts";
+import {
+  CSRF_COOKIE_NAME,
+  CSRF_HEADER_NAME,
+  SESSION_ABSOLUTE_MS,
+  SESSION_COOKIE_NAME,
+  authenticateSession,
+  loginAccount,
+  revokeSession,
+  sessionTokenFromCookie,
+} from "../service/sessions.ts";
 import { listProjects } from "../service/projects.ts";
 import {
   getMessage,
@@ -36,6 +49,9 @@ import { expireMessageBody } from "../service/expiry.ts";
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const MAX_LIMIT = 100;
 const DECODER = new TextDecoder();
+const EMAIL_ENCODER = new TextEncoder();
+const SESSION_MAX_AGE_SECONDS = SESSION_ABSOLUTE_MS / 1000;
+const COOKIE_EXPIRY_EPOCH = "Thu, 01 Jan 1970 00:00:00 GMT";
 
 const FORBIDDEN_SEND_FIELDS: ReadonlySet<string> = new Set([
   "speaker_id",
@@ -71,6 +87,15 @@ export interface CreateAppOptions {
   metricsToken?: string;
   /** Injectable clock (milliseconds) for deterministic latency tests. */
   metricsNow?: () => number;
+  /**
+   * Per-normalized-email login-attempt limiter. Defaults to 10/minute with
+   * burst 5. Bounded and process-local like the per-credential limiter.
+   */
+  loginRateLimit?: RateLimitConfig;
+  /** Injectable clock (milliseconds) for deterministic login-limit tests. */
+  loginRateLimitNow?: () => number;
+  loginRateLimitMaxKeys?: number;
+  loginRateLimitIdleMs?: number;
 }
 
 interface RequestContext {
@@ -93,15 +118,55 @@ function randomRequestId(): string {
   return `req_${btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
 }
 
-function json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
+function json(
+  status: number,
+  body: unknown,
+  extra: Record<string, string | readonly string[]> = {},
+): Response {
   const headers = new Headers({
     "cache-control": "no-store",
     "content-type": "application/json; charset=utf-8",
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
   });
-  for (const [name, value] of Object.entries(extra)) headers.set(name, value);
+  for (const [name, value] of Object.entries(extra)) {
+    if (typeof value === "string") {
+      headers.set(name, value);
+    } else {
+      for (const item of value) headers.append(name, item);
+    }
+  }
   return new Response(JSON.stringify(body), { status, headers });
+}
+
+// 204 keeps the same hardening headers and carries no body or content type.
+function noContent(extra: Record<string, string | readonly string[]> = {}): Response {
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  });
+  for (const [name, value] of Object.entries(extra)) {
+    if (typeof value === "string") {
+      headers.set(name, value);
+    } else {
+      for (const item of value) headers.append(name, item);
+    }
+  }
+  return new Response(null, { status: 204, headers });
+}
+
+function sessionCookie(token: string): string {
+  return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
+}
+
+function csrfCookie(token: string): string {
+  return `${CSRF_COOKIE_NAME}=${token}; Path=/; Secure; SameSite=Strict; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
+}
+
+function clearedCookie(name: string, httpOnly: boolean): string {
+  const httpOnlyFlag = httpOnly ? "HttpOnly; " : "";
+  return `${name}=; Path=/; ${httpOnlyFlag}Secure; SameSite=Strict; Max-Age=0; Expires=${COOKIE_EXPIRY_EPOCH}`;
 }
 
 function errorBody(code: ErrorCode, message: string, requestId: string): unknown {
@@ -260,6 +325,49 @@ async function handleMe(deps: ServiceDeps, principal: Principal): Promise<Respon
   });
 }
 
+async function handleSessionLogin(
+  deps: ServiceDeps,
+  request: Request,
+  limiter: RateLimiter,
+): Promise<Response> {
+  const body = await readJsonObject(request);
+  const email = normalizeEmail(body.email);
+  const password = validateLoginPassword(body.password);
+  // Keying by the email digest keeps the bucket map free of addresses. This is
+  // process-local and runs before account lookup or password verification.
+  const decision = limiter.check(await sha256Hex(EMAIL_ENCODER.encode(email)));
+  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
+
+  const login = await loginAccount(deps, { email, password });
+  return json(
+    200,
+    { account: { id: login.accountId, email: login.email } },
+    { "set-cookie": [sessionCookie(login.token), csrfCookie(login.csrfToken)] },
+  );
+}
+
+async function handleSessionGet(deps: ServiceDeps, request: Request): Promise<Response> {
+  const principal = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  return json(200, { account: { id: principal.accountId, email: principal.email } });
+}
+
+async function handleSessionDelete(deps: ServiceDeps, request: Request): Promise<Response> {
+  await revokeSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+    request.headers.get(CSRF_HEADER_NAME) ?? undefined,
+  );
+  return noContent({
+    "set-cookie": [
+      clearedCookie(SESSION_COOKIE_NAME, true),
+      clearedCookie(CSRF_COOKIE_NAME, false),
+    ],
+  });
+}
+
 async function handleProjectList(
   deps: ServiceDeps,
   principal: Principal,
@@ -377,6 +485,7 @@ async function route(
   context: RequestContext,
   mcp: ReturnType<typeof createMcpEndpoint>,
   limiter: RateLimiter,
+  loginLimiter: RateLimiter,
   metrics: MetricsRegistry,
   metricsToken: string | undefined,
 ): Promise<Response> {
@@ -413,6 +522,15 @@ async function route(
 
   const isApi = segments[0] === "api" && segments[1] === "v1";
   if (!isApi) return notFound(requestId);
+
+  // Human session routes consult the session cookie only. They never fall back
+  // to a bearer credential, and bearer routes never accept a session cookie.
+  if (segments.length === 3 && segments[2] === "session") {
+    if (method === "POST") return handleSessionLogin(deps, request, loginLimiter);
+    if (method === "GET") return handleSessionGet(deps, request);
+    if (method === "DELETE") return handleSessionDelete(deps, request);
+    return methodNotAllowed("POST, GET, DELETE", requestId);
+  }
 
   if (segments.length === 3 && segments[2] === "me") {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
@@ -538,6 +656,15 @@ export function createApp(
     ...(options.rateLimitMaxKeys === undefined ? {} : { maxKeys: options.rateLimitMaxKeys }),
     ...(options.rateLimitIdleMs === undefined ? {} : { idleMs: options.rateLimitIdleMs }),
   });
+  const loginLimiter = new RateLimiter(options.loginRateLimit ?? DEFAULT_LOGIN_RATE_LIMIT, {
+    ...(options.loginRateLimitNow === undefined ? {} : { now: options.loginRateLimitNow }),
+    ...(options.loginRateLimitMaxKeys === undefined
+      ? {}
+      : { maxKeys: options.loginRateLimitMaxKeys }),
+    ...(options.loginRateLimitIdleMs === undefined
+      ? {}
+      : { idleMs: options.loginRateLimitIdleMs }),
+  });
   const metrics = options.metrics ?? new MetricsRegistry();
   const clock = options.metricsNow ?? ((): number => performance.now());
   return async (request: Request): Promise<Response> => {
@@ -553,6 +680,7 @@ export function createApp(
         context,
         mcp,
         limiter,
+        loginLimiter,
         metrics,
         metricsToken,
       );

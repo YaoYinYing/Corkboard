@@ -1,8 +1,9 @@
 # Deployments
 
 Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slices
-A–E, including the bearer-authenticated MCP slice, plus read-only `doctor`
-diagnostics), and the commands below are runnable after `npm run build`. Cloudflare Workers/D1/R2, OAuth 2.1/PKCE, and ChatGPT Web integration
+A–E, including the bearer-authenticated MCP slice, read-only `doctor` diagnostics, and
+human account sessions), and the commands below are runnable after `npm run build`.
+Cloudflare Workers/D1/R2, OAuth 2.1/PKCE, and ChatGPT Web integration
 are planned and are not implemented or tested.
 
 ## Self-hosted Node.js 24 LTS
@@ -38,6 +39,20 @@ secrets file outside the database/blob directory and back it up separately.
 
 The server binds `127.0.0.1` by default. Set `HOST=0.0.0.0` only behind a trusted
 reverse proxy.
+
+**HTTPS is required for human sessions.** Session and CSRF cookies are `Secure` and the
+session cookie uses the `__Host-` prefix, so a conforming browser will not send them
+over plaintext HTTP. Terminate TLS at the reverse proxy (Caddy, nginx, or the platform)
+and do not expose the application directly beyond localhost.
+
+Human sign-in is `POST /api/v1/session` with `{email,password}`. The owner password set
+through `CORKBOARD_BOOTSTRAP_PASSWORD` is stored as PBKDF2-HMAC-SHA-256
+(600,000 iterations, random 16-byte salt). The Node server also accepts legacy
+`scrypt$` hashes from earlier bootstrap builds; new hashes are never scrypt. Sessions
+expire after 30 idle minutes and 12 hours absolute, and sign-out revokes only the
+presented session. There is no session-cleanup command: expired/revoked rows are inert
+and may be deleted manually during maintenance. Login attempts are limited per hashed
+email (10/minute, burst 5, process-local); per-IP limits remain the reverse proxy's job.
 
 Environment:
 

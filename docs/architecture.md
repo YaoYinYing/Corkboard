@@ -46,7 +46,8 @@ backups and storage artifacts, not the operator.
 | Module | Responsibility |
 | --- | --- |
 | `src/domain/` | Validation, authorization decisions, message semantics |
-| `src/auth/` | Credential hashing, bearer authentication, (later) sessions/OAuth |
+| `src/auth/` | Credential hashing, bearer authentication, portable password KDF, session/CSRF tokens |
+| `src/service/` | Session login/validation/revocation beside the bearer service layer |
 | `src/storage/` | `SqlDatabase` port and SQLite/D1 adapters |
 | `src/storage/blobs/` | `BlobStore` port and local/R2 adapters |
 | `src/crypto/` | AES-256-GCM envelope, key provider, AAD |
@@ -111,6 +112,9 @@ required.
 Shared relational schema; no table-per-project.
 
 - `accounts` — human identity, normalized email, password/external subject.
+- `sessions` — server-managed human session rows: account, token prefix + keyed HMAC
+  verifier, CSRF keyed HMAC verifier, created/last-seen/expires/revoked timestamps.
+  Raw token and CSRF values are never stored.
 - `projects` — opaque ID, owner account, title/summary/status, `next_seq`.
 - `speakers` — agent persona owned by an account.
 - `project_memberships` — `(project_id, speaker_id)` plus a capability set using the
@@ -140,7 +144,8 @@ Shared relational schema; no table-per-project.
 
 Migrations are ordered `migrations/NNN_*.sql` files applied once each and recorded in
 `schema_migrations`; migration 002 adds credential-project grants, the slice-B expiry
-index for existing databases, and the audit `detail` column.
+index for existing databases, and the audit `detail` column. Migration 003 adds
+`sessions` with `account_id` and `token_prefix` indexes.
 
 Indexes are listed in `migrations/001_init.sql` and `migrations/002_*.sql` when
 implemented. Every tenant-owned query filters on `project_id`; object access alone is
@@ -217,6 +222,43 @@ guarantee. A revocation that commits after the final re-check but before the ato
 statement, the already-expired audit-repair/blob deletion, or the plaintext response
 write is not prevented, and no such stronger guarantee is claimed. There is no authorization cache: credential, grant,
 membership, speaker, account, and project state are read from storage on each decision.
+
+## Human account sessions
+
+`src/service/sessions.ts` implements the only human authentication path. It is a
+separate trust domain from speaker bearer credentials:
+
+- **Sign-in.** `POST /api/v1/session` looks up the normalized email and verifies the
+  password through an injectable `PasswordVerifier`. The portable core writes and
+  verifies PBKDF2-HMAC-SHA-256 (`pbkdf2-sha256$<iterations>$<salt>$<hash>`,
+  600,000 iterations, fresh 16-byte salt, 32-byte key) using WebCrypto only, so it
+  remains Workers-portable. `ServiceDeps.passwordVerifier` lets the Node adapter add
+  legacy `scrypt$` verification without importing `node:crypto` into core. Unknown email,
+  wrong password, inactive account, and no-password account verify against a real or
+  dummy hash and return the same `UNAUTHENTICATED` error.
+- **Token boundary.** A 256-bit random `cb_sess_` token and an independent 256-bit CSRF
+  value are generated server-side. The database stores `sessions.token_prefix` plus
+  keyed HMAC-SHA-256 verifiers (same `CORKBOARD_CREDENTIAL_PEPPER` as bearer tokens), not
+  the raw values. The session cookie is `HttpOnly; Secure; SameSite=Strict; Path=/`
+  under the `__Host-corkboard_session` name; the CSRF cookie is readable by the
+  browser (`corkboard_csrf`) so a same-origin client can echo it in `X-CSRF-Token`.
+- **Validation.** Every session request selects candidate rows by prefix, verifies the
+  keyed verifier, then requires `revoked_at IS NULL`, an active account,
+  `expires_at > now`, and `last_seen_at + 30 minutes > now`. Accepted requests refresh
+  `last_seen_at`; the absolute lifetime is 12 hours. There is no cache.
+- **Authorization boundary.** A session authenticates an account, not a speaker. Only
+  the three `/api/v1/session` routes read the cookie. Bearer routes and `/mcp` never
+  consult it, and the session token is not a bearer credential. Account-owned speaker
+  operations still require a separately issued scoped bearer credential.
+- **Sign-out.** `DELETE /api/v1/session` requires the session and a matching
+  `X-CSRF-Token` HMAC digest, revokes only that row, and clears both cookies. Other
+  sessions for the account remain valid.
+- **Abuse control.** Login attempts use a bounded token bucket keyed by the SHA-256 of
+  the normalized email (10/minute, burst 5, injected clock), returned as `429` with
+  `Retry-After`. It is process-local and not distributed.
+
+OAuth 2.1/PKCE, ChatGPT Web account linking, registration, email verification, and
+password reset remain unimplemented; no OAuth or session flow grants speaker scopes.
 
 ## Deletion and expiry
 
