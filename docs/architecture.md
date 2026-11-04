@@ -47,7 +47,7 @@ backups and storage artifacts, not the operator.
 | --- | --- |
 | `src/domain/` | Validation, authorization decisions, message semantics |
 | `src/auth/` | Credential hashing, bearer authentication, portable password KDF, session/CSRF tokens |
-| `src/service/` | Session login/validation/revocation, OAuth client/code/token/consent logic beside the bearer service layer |
+| `src/service/` | Session login/validation/revocation, OAuth client/code/token/consent logic, operator-run retention beside the bearer service layer |
 | `src/storage/` | `SqlDatabase` port and SQLite/D1 adapters |
 | `src/storage/blobs/` | `BlobStore` port and local/R2 adapters |
 | `src/crypto/` | AES-256-GCM envelope, key provider, AAD |
@@ -159,6 +159,37 @@ OAuth tables and their lookup indexes.
 Indexes are listed in `migrations/001_init.sql` and `migrations/002_*.sql` when
 implemented. Every tenant-owned query filters on `project_id`; object access alone is
 never sufficient authorization.
+
+## Retention and pruning
+
+Message bodies have their own opt-in expiry path (`expiry.ts`). Session and OAuth
+artifacts have a separate, **explicit** retention path in `src/service/retention.ts`,
+invoked only by the operator CLI `prune`. Nothing schedules it; a server restart or a
+request never deletes these rows.
+
+`pruneRetention` takes an injected clock and a per-table `limit` (default 1000, max
+10000) and a `graceHours` (default 24, may be 0). A row is eligible only when it is
+unusable at the run time **and** became unusable at or before `now - grace`:
+
+- `sessions`: `revoked_at`, `expires_at`, or `last_seen_at + SESSION_IDLE_MS`
+  (the same idle window imported from `sessions.ts`) is at or before the cutoff. A
+  still-active session is never eligible.
+- `oauth_authorization_codes`: consumed or expired at or before the cutoff.
+- `oauth_refresh_tokens`: expired, revoked, or rotated at or before the cutoff.
+- `oauth_token_clients`: the credential row is gone, or the credential is
+  revoked/expired at or before the cutoff. A still-valid credential's association is
+  never deleted.
+- OAuth access `credentials`: the row has an `oauth_token_clients` association,
+  is revoked/expired at or before the cutoff, and no `oauth_refresh_tokens` row still
+  references it. Speaker credentials have no such association and are never eligible.
+  Associated `credential_project_grants` rows are removed with the credential.
+
+All deletes run in one `BEGIN IMMEDIATE` transaction in FK-safe order
+(codes → refresh tokens → grants/token-client associations → OAuth credentials →
+sessions), each bounded by `limit`. The write lock makes the set stable and every
+delete re-checks its predicate, so concurrent runs cannot delete a row that became
+valid in between. Any failure rolls back and the command exits non-zero. Messages,
+receipts, body objects/blobs, and audit events are never selected or modified.
 
 ## Message commit protocol
 

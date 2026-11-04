@@ -6,6 +6,24 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — Retention must preserve the marker that proves a row is OAuth-issued
+
+- **Failure pattern:** The only structural difference between an OAuth access credential
+  and a `cb_` speaker credential is the `oauth_token_clients` association. Deleting the
+  association before the credential (needed for the FK) would make the credential
+  unclassifiable, and guessing from a `cb_oat_`/`cb_` prefix is probabilistic because a
+  random speaker token can share the prefix.
+- **Fix:** Inside one `BEGIN IMMEDIATE` transaction, capture the eligible OAuth
+  credential ids while the association still exists, delete grants and associations,
+  then delete each credential with a conditional predicate. Everything else deletes
+  with its own `WHERE ... <= cutoff` predicate, so a rerun is a no-op and a concurrent
+  run cannot widen the set. Import `SESSION_IDLE_MS` from `sessions.ts` instead of
+  copying the idle window.
+- **Prevents:** Deleting a speaker credential, racing a live token, or leaving a
+  non-deterministic set of rows between runs.
+- **Remove when:** The schema gains an immutable credential kind/issuer column with its
+  own index.
+
 ## 2026-11-04 — OAuth access tokens should be ordinary credentials
 
 - **Failure pattern:** A second token table (or a JWT branch) for OAuth would duplicate

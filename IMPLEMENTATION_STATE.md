@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–J implemented and pushed |
+| Phase | 0 complete; vertical slices A–J implemented and pushed; slice K (operator retention) candidate, review pending |
 | Last pushed checkpoint | `aac6f2e` (OAuth 2.1 core; audited code tree `a439df4`, docs-only tail) on `origin/main`; CI pending |
 | Branch | `main`, clean; the `slice-j-oauth` three-commit candidate was fast-forwarded |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), operator retention/purge and per-project observability |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
 
@@ -566,7 +566,8 @@ pushed.
   counts are recorded in the checkpoint commit trailer.
 - **Limitations.** Login limiting is process-local; absolute timing indistinguishability
   is not claimed (especially vs. the Node-only scrypt path). Session rows are not
-  automatically purged and there is no cleanup command. No browser UI, registration,
+  automatically purged (slice K adds only the explicit operator `prune` command). No
+  browser UI, registration,
   recovery, OAuth, or speaker delegation exists.
 
 ## Vertical slice J — OAuth 2.1 authorization-server core (candidate; review pending)
@@ -666,10 +667,65 @@ pushed.
   and an end-to-end HTTP flow.
 - **Limitations.** Process-local OAuth registration, per-client, global token, and
   revocation buckets. Concurrent refresh with the same token races and may revoke the
-  family. Codes/refresh rows are not automatically purged. No CORS, JWT/OIDC,
+  family. Codes/refresh rows are not automatically purged; slice K adds the explicit
+  operator `prune`. No CORS, JWT/OIDC,
   implicit/client-credentials/device flows, consent management UI, or admin OAuth
   endpoints. ChatGPT Web, D1/Workers, and real browser verification remain
   external/unverified. Independent review is pending.
+
+## Vertical slice K — operator-driven session/OAuth retention (candidate; review pending)
+
+- **Scope.** One explicit CLI command, `prune`, idempotently deletes only definitely
+  unusable session and OAuth rows after a grace period. There is no timer, scheduler,
+  or automatic deletion. It never deletes messages, receipts, blobs/body objects,
+  audit events, speaker `cb_` credentials, or any token/credential still usable at the
+  run time.
+- **Service.** `src/service/retention.ts` exposes `pruneRetention({db, now}, {graceHours,
+  limit})` with an injected clock, default grace **24 hours**, default per-table
+  `limit` **1000** (bounds 1–10000), and imports `SESSION_IDLE_MS` from `sessions.ts`
+  rather than duplicating it. Eligibility: sessions revoked/absolutely expired/idle
+  past grace; authorization codes consumed or expired past grace; refresh tokens
+  expired/revoked/rotated past grace; `oauth_token_clients` rows whose credential is
+  gone or revoked/expired past grace (never a still-valid credential); OAuth access
+  credentials with an association, revoked/expired past grace, and no remaining
+  refresh row. Associated `credential_project_grants` are removed with the credential.
+- **Transaction and concurrency.** All deletes run in one `BEGIN IMMEDIATE` transaction
+  in FK-safe order (codes → refresh tokens → grants/associations → OAuth credentials →
+  sessions), each bounded per table. The eligible OAuth credential ids are captured
+  under the write lock while the association still exists, then deleted with
+  conditional predicates, so a speaker credential can never be classified as OAuth and
+  a concurrent run cannot widen the set. Any failure rolls back and exits non-zero.
+  A second run deletes nothing extra.
+- **CLI.** `prune --data-dir <dir> [--grace-hours N] [--limit N] [--json]` also accepts
+  `CORKBOARD_DATA_DIR`. Invalid grace/limit reuse the service validation and are
+  rejected **before** the directory is created or the database opened. Exit `0`
+  success, `1` failed/rolled back, `2` usage/config. `--json` prints exactly one
+  summary line `{graceHours, limit, sessions, authorizationCodes, refreshTokens,
+  tokenClients, oauthCredentials}`; without it, short count lines. No row contents,
+  tokens, or emails are printed.
+- **Docs.** `docs/security-operations.md` (policy, grace rationale, never-deleted set,
+  daily schedule), `docs/deployments.md` (command/options/exit codes), 
+  `docs/architecture.md` (retention section and delete order), `docs/oauth.md` (row
+  lifecycle), and the completed TODO sub-item. No HTTP surface was added, so
+  `docs/api.md` is unchanged.
+- **Tests.** New `tests/integration/retention.test.ts` (9 service tests with an injected
+  clock) and `tests/integration/retention-cli.test.ts` (5 real-process CLI tests).
+  Coverage includes active/just-inside/just-over grace boundaries per class, idle
+  expiry, consumed/expired codes, rotated/revoked/expired refresh rows, orphan and
+  live associations, the refresh-row blocker, `cb_` credential protection, per-table
+  limits and no-op rerun, injected rollback, untouched message/receipt/blob/audit
+  tables, input validation before writes, real temp-directory `--json` counts, exit
+  codes, pre-open bounds rejection, and output secrecy.
+- **Tests run.** `npm ci`, `npm run check` (318 tests: 317 pass, 1 pre-existing skip
+  for the live D1 marker), and `npm run build`. Exact counts are recorded in the
+  checkpoint commit trailer.
+- **Limitations.** The command is Node/SQLite-only (it uses the local
+  `BEGIN IMMEDIATE` runner; a D1 adapter would need a batch equivalent). A credential
+  blocked from deletion by a still-live refresh row has its `oauth_token_clients`
+  association removed once revoked/expired past grace, so that inert credential is not
+  re-classified by a later run. There is no automatic scheduling and no audit row is
+  written for prune. No blob/message/audit deletion is added. Independent review is
+  pending.
 
 ## Implemented and verified at this tree
 
@@ -978,9 +1034,9 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Slice-I audit debt (P2, non-blocking): login rate limiting is process-local and keyed
   by email digest (an attacker who knows an address can consume that bucket); failure
   timing is comparable but not identical across PBKDF2 and the Node-only legacy scrypt
-  path; session rows are never purged automatically and no cleanup command exists; there
-  is no UI, registration, email verification, password reset, OAuth, or speaker
-  delegation. The adapter body-buffering and multi-`Set-Cookie` defects found by the
+  path; session rows are never purged automatically (the explicit slice-K `prune`
+  command is operator-run); there is no UI, registration, email verification,
+  password reset, OAuth, or speaker delegation. The adapter body-buffering and multi-`Set-Cookie` defects found by the
   first audit are fixed in `9a4f6c5`; session-route 401s no longer send a Bearer
   challenge while bearer-route 401s still do. Re-audit test gaps: no committed
   adapter-level 65,536/65,537-byte login boundary test, no positive test for

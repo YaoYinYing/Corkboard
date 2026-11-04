@@ -52,9 +52,9 @@ through `CORKBOARD_BOOTSTRAP_PASSWORD` is stored as PBKDF2-HMAC-SHA-256
 the login limit. The Node server also accepts legacy
 `scrypt$` hashes from earlier bootstrap builds; new hashes are never scrypt. Sessions
 expire after 30 idle minutes and 12 hours absolute, and sign-out revokes only the
-presented session. There is no session-cleanup command: expired/revoked rows are inert
-and may be deleted manually during maintenance. Login attempts are limited per hashed
-email (10/minute, burst 5, process-local); per-IP limits remain the reverse proxy's job.
+presented session. Expired/revoked rows are inert; remove them with the operator-run
+`prune` command below. Login attempts are limited per hashed email (10/minute, burst 5,
+process-local); per-IP limits remain the reverse proxy's job.
 
 Environment:
 
@@ -114,6 +114,35 @@ curl -sS -H "Authorization: Bearer $CORKBOARD_METRICS_TOKEN" http://127.0.0.1:87
 Do not paste a real token into shell history or documentation. The placeholder above is
 not a value to use. See [`api.md`](./api.md#get-metrics-operator-only) for the exact JSON
 shape and limitations.
+
+### Retention and pruning
+
+`prune` is an explicit operator command; it is never run by the server on a timer.
+Schedule it externally (for example a daily cron/systemd timer) after backups, and run
+it against the same data directory as the server:
+
+```sh
+node dist/scripts/corkboard.js prune --data-dir /var/lib/corkboard --json
+# or: CORKBOARD_DATA_DIR=/var/lib/corkboard node dist/scripts/corkboard.js prune
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--data-dir <dir>` | `CORKBOARD_DATA_DIR` | Data directory containing `corkboard.sqlite` |
+| `--grace-hours <N>` | `24` | Hours an artifact must have been unusable; non-negative |
+| `--limit <N>` | `1000` | Maximum rows deleted per table in this run; integer 1–10000 |
+| `--json` | off | Print one JSON summary line instead of short count lines |
+
+It deletes only definitely unusable sessions and OAuth rows (sessions, authorization
+codes, refresh tokens, token-client associations, and OAuth access credentials) after
+the grace period. It never deletes messages, receipts, blobs, audit events, speaker
+`cb_` credentials, or any still-usable token. Deletes run in a single transaction, so
+a failure changes nothing. Running it again is a no-op once eligible rows are gone.
+Exit codes: `0` success, `1` the run failed and rolled back, `2` usage/config error
+(invalid values are rejected before the database is opened). The command prints counts
+only; it never prints row contents, tokens, or emails. See
+[`security-operations.md`](./security-operations.md#logging-and-audit) for the policy
+and grace rationale.
 
 The slice-A server makes no outbound requests, so `HTTP_PROXY`/`HTTPS_PROXY` are not
 read. If a proxy is configured in the developer environment, never log its value.

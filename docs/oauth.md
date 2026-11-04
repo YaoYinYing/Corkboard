@@ -360,8 +360,32 @@ recreated, not upgraded in place. Fresh and migration-003 databases are tested.
 
 Access tokens reuse `credentials` and `credential_project_grants`; refresh replaces
 that credential's prefix/verifier/expiry in place. The database stores no raw code,
-refresh token, access token, cookie, CSRF value, or client secret. Expired/rotated
-OAuth rows are inert but are not automatically purged; no cleanup command exists.
+refresh token, access token, cookie, CSRF value, or client secret.
+
+### Row lifecycle and retention
+
+Expired/rotated OAuth rows are inert immediately but are **not** purged automatically.
+The operator runs `prune` explicitly; there is no timer and no server-side deletion.
+After a grace period (default 24 hours, `--grace-hours`) the command removes only rows
+that are definitely unusable:
+
+- authorization codes once consumed or expired past grace (5-minute TTL);
+- refresh tokens once expired, revoked, or rotated past grace (30-day TTL, rotation on
+  every use, family revocation on reuse);
+- `oauth_token_clients` associations whose credential row is gone or whose credential
+  is revoked/expired past grace — never one for a still-valid credential;
+- an OAuth access credential once revoked/expired past grace **and** no refresh row
+  still references it. Its `credential_project_grants` row is removed with it. A
+  regular `cb_` speaker credential never has an `oauth_token_clients` association and
+  is never eligible.
+
+The grace period keeps a just-expired row available to a request already in flight
+and tolerates clock skew. `prune` is transactional and bounded by `--limit` per table,
+so it is safe to repeat and a failure deletes nothing. It never touches messages,
+receipts, blobs, or audit events. If a credential is blocked from deletion by a live
+refresh row, its association is still removed once it is revoked/expired past grace,
+so that inert credential is not reclassified by a later run; see
+[`security-operations.md`](./security-operations.md).
 
 ## Limits and explicit non-goals
 

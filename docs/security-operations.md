@@ -381,6 +381,28 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   scheduler daemon and no automatic rotation or deletion of messages without an expiry.
   Expiry leaves a metadata tombstone; it is not comprehensive erasure and does not
   rewrite backups.
+- Session and OAuth artifact retention is **explicit and operator-run**. `prune`
+  deletes only rows that are definitely unusable and have been so for at least a grace
+  period (default **24 hours**, `--grace-hours`). There is no timer and no automatic
+  deletion. Eligible rows are: sessions revoked, absolutely expired, or idle-expired
+  past grace; consumed or expired authorization codes; expired, revoked, or rotated
+  refresh tokens; `oauth_token_clients` associations whose credential is gone or is
+  revoked/expired past grace; and OAuth access credentials revoked/expired past grace
+  with no remaining refresh-token row. A still-valid credential, refresh row, session,
+  or association is never eligible.
+- The grace period absorbs clock skew, a request already in flight when the boundary
+  passes, and the ordinary delay before an operator run. A 24-hour grace with a **daily**
+  schedule is the recommended policy. `--grace-hours 0` deletes at the boundary
+  immediately and is intended for tests or an explicitly aggressive policy, not the
+  default.
+- `prune` never deletes messages, message receipts, body objects or blobs, audit
+  events, speaker (`cb_`) credentials, or any token/credential that is still usable. It
+  does not write audit rows (nothing is selected from the audit table). Deletes run in
+  one `BEGIN IMMEDIATE` transaction in FK-safe order, bounded by `--limit` (default
+  1000, 1–10000) per table, so a failure rolls everything back and the command can be
+  run repeatedly. A credential blocked by a still-live refresh row is retained; its
+  `oauth_token_clients` association is removed once it is revoked/expired past grace,
+  so the inert credential is not re-classified by a later run (see Known limits).
 
 ## Environment separation
 

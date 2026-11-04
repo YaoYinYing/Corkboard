@@ -14,6 +14,11 @@ import { normalizeEmail, validateLoginPassword } from "../src/domain/validation.
 import { startServer } from "../src/platforms/node/main.ts";
 import { DoctorError, formatDoctorReport, runDoctor } from "../src/service/doctor.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
+import {
+  RETENTION_DEFAULT_GRACE_HOURS,
+  pruneRetention,
+  validateRetentionOptions,
+} from "../src/service/retention.ts";
 import { LocalBlobStore } from "../src/storage/blobs/local.ts";
 import { openSqliteDatabase, type SqlDatabase } from "../src/storage/db.ts";
 
@@ -40,6 +45,7 @@ const OPTIONS = {
   "expires-at": { type: "string" },
   scopes: { type: "string" },
   limit: { type: "string" },
+  "grace-hours": { type: "string" },
   "stuck-minutes": { type: "string" },
   json: { type: "boolean" },
 } as const;
@@ -635,6 +641,75 @@ function parseExpiryLimit(raw: string | undefined): number {
   return value;
 }
 
+// Usage/config failures exit 2; a failed run exits 1. Invalid values are
+// rejected before the data directory is created or the database is opened.
+class PruneCliError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PruneCliError";
+  }
+}
+
+function parseGraceHours(raw: string | undefined): number {
+  if (raw === undefined) return RETENTION_DEFAULT_GRACE_HOURS;
+  if (raw === "" || !/^\d+(\.\d+)?$/.test(raw)) {
+    throw new PruneCliError("--grace-hours must be a non-negative number");
+  }
+  try {
+    return validateRetentionOptions({ graceHours: Number(raw) }).graceHours;
+  } catch (error) {
+    throw new PruneCliError(error instanceof Error ? error.message : "invalid --grace-hours");
+  }
+}
+
+function parseRetentionLimit(raw: string | undefined): number {
+  if (raw === undefined) return validateRetentionOptions().limit;
+  if (!/^\d+$/.test(raw)) {
+    throw new PruneCliError("--limit must be an integer 1-10000");
+  }
+  try {
+    return validateRetentionOptions({ limit: Number(raw) }).limit;
+  } catch (error) {
+    throw new PruneCliError(error instanceof Error ? error.message : "invalid --limit");
+  }
+}
+
+// Explicit, operator-run retention. No timer runs this; schedule it externally.
+// Prints one JSON line with --json, otherwise short counts only. Never prints
+// row contents, tokens, or emails.
+async function pruneCommand(values: Values): Promise<void> {
+  const graceHours = parseGraceHours(values["grace-hours"]);
+  const limit = parseRetentionLimit(values.limit);
+  const rawDir = values["data-dir"];
+  const dir =
+    rawDir === undefined || rawDir === ""
+      ? process.env.CORKBOARD_DATA_DIR
+      : rawDir;
+  if (dir === undefined || dir === "") {
+    throw new PruneCliError("--data-dir or CORKBOARD_DATA_DIR is required");
+  }
+
+  const summary = await withDb(
+    (db) => pruneRetention({ db, now: () => new Date() }, { graceHours, limit }),
+    dir,
+  );
+  if (values.json === true) {
+    console.log(JSON.stringify(summary));
+    return;
+  }
+  for (const line of [
+    `grace-hours: ${summary.graceHours}`,
+    `limit: ${summary.limit}`,
+    `sessions deleted: ${summary.sessions}`,
+    `authorization codes deleted: ${summary.authorizationCodes}`,
+    `refresh tokens deleted: ${summary.refreshTokens}`,
+    `token clients deleted: ${summary.tokenClients}`,
+    `oauth credentials deleted: ${summary.oauthCredentials}`,
+  ]) {
+    console.log(line);
+  }
+}
+
 // Operator-run cleanup: no in-process timer exists, so schedule this command
 // externally. Prints exactly one JSON summary line.
 async function expireBodiesCommand(values: Values): Promise<void> {
@@ -736,6 +811,8 @@ async function main(): Promise<void> {
       return revokeKeyCommand(values);
     case "expire-bodies":
       return expireBodiesCommand(values);
+    case "prune":
+      return pruneCommand(values);
     case "doctor":
       return doctorCommand(values, positionals.length - 1);
     case "serve":
@@ -743,7 +820,7 @@ async function main(): Promise<void> {
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|doctor|serve> [options]; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|serve> [options]; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }
@@ -784,9 +861,16 @@ if (isEntryPoint()) {
     const message = error instanceof Error ? error.message : "command failed";
     // Doctor reports inspection problems as exit 1; anything that prevents a
     // report (bad arguments, unreadable directory, busy/locked database) is 2.
+    // Prune uses 2 only for usage/config errors; a failed run is 1.
+    const command = argvCommand(process.argv.slice(2));
+    const parseCode = (error as { code?: unknown }).code;
+    const parseFailure =
+      typeof parseCode === "string" && parseCode.startsWith("ERR_PARSE_ARGS");
     const exitCode =
       error instanceof DoctorCliError ||
-      argvCommand(process.argv.slice(2)) === "doctor"
+      command === "doctor" ||
+      error instanceof PruneCliError ||
+      (command === "prune" && parseFailure)
         ? 2
         : 1;
     console.error(`corkboard: ${message}`);
