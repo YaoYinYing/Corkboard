@@ -22,6 +22,19 @@ prevented regression; when to remove the advice.
 - **Remove when:** The SDK offers an explicit context allowlist that excludes auth
   headers by construction (still keep the negative test).
 
+## 2026-11-04 — JSON-RPC `1` and `"1"` are different ids
+
+- **Failure:** MCP send idempotency used `String(requestId)`, collapsing numeric `1`
+  and string `"1"` into one key. Two distinct requests in one session then collided:
+  distinct payloads produced `CONFLICT`, identical payloads were misread as a replay.
+- **Reproducer:** One MCP session, raw `corkboard_send_message` calls with `id: 1` and
+  `id: "1"` and different text; the second was rejected as `CONFLICT`.
+- **Fix:** v2 derivation over `JSON.stringify([sessionId, projectId, typeof requestId,
+  requestId])`; tests assert distinct messages/seq for typed ids, replay for the same
+  typed id, and `CONFLICT` for a changed payload.
+- **Prevents:** Type-blind idempotency keys in JSON-RPC adapters.
+- **Remove when:** JSON-RPC ids are canonicalized by the transport before the adapter.
+
 ## 2026-11-04 — JSON-RPC ids repeat across sessions, so MCP keys need the session
 
 - **Failure:** Deriving an MCP send idempotency key from only the JSON-RPC request id and

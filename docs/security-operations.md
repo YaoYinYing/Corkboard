@@ -156,7 +156,8 @@ written) is not prevented; no stronger guarantee is claimed. See
 - Every tool reuses the service authorization path and per-request credential/grant/
   membership/revocation checks. Tool arguments cannot set sender, timestamps,
   `body_digest`, or `idempotency_key`.
-- The send adapter derives the idempotency key from the session id, JSON-RPC request id,
+- The send adapter derives the idempotency key from the session id, JSON-RPC request id
+  and its string/number type,
   and project id. A same-id retry is idempotent; a different payload is `CONFLICT`; a
   client retry with a new JSON-RPC id can duplicate the message and is documented as a
   client responsibility in [`mcp.md`](./mcp.md).

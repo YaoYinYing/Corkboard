@@ -265,7 +265,8 @@ so there is no second authorization path and no cached authorization state.
   `X-Content-Type-Options: nosniff`.
 - Tool arguments cannot set sender, timestamps, `body_digest`, or `idempotency_key`.
   The adapter computes the SHA-256 of the exact UTF-8 `text` and derives the
-  idempotency key from `(session id, JSON-RPC request id, project id)`, documented in
+  idempotency key from `(session id, JSON-RPC request id and its type, project id)`,
+  documented in
   [`mcp.md`](./mcp.md). The service's existing idempotency and authorization rules are
   unchanged.
 - The 64 KiB request cap applies to `POST /mcp`.

@@ -250,9 +250,12 @@ pushed.
   parallel authorization decision.
 - **Send adapter.** The tool computes `sha256:` over the exact UTF-8 `text` and derives
   the idempotency key as
-  `mcp_` + hex SHA-256(`"corkboard-mcp\n" + sessionId + "\n" + projectId + "\n" + String(requestId)`).
-  The same session + JSON-RPC id + payload is an idempotent replay; a different payload
-  is `CONFLICT`. The residual duplicate risk from retrying with a new JSON-RPC id is
+  `mcp_` + hex SHA-256(`"corkboard-mcp/v2\n" + JSON.stringify([sessionId, projectId,
+  typeof requestId, requestId])`). The string/number id type is part of the key, so
+  numeric `1` and string `"1"` are distinct. The same session + JSON-RPC id **and type**
+  + payload is an idempotent replay; a different payload is `CONFLICT`. The v2
+  derivation replaced the v1 `String(requestId)` form; MCP sessions are process-local,
+  so no key migration applies. The residual duplicate risk from retrying with a new JSON-RPC id is
   documented.
 - **Errors.** Tool failures return `{"isError":true}` with
   `{"error":{"code":"<stable code>"}}` only; service messages, stacks, bodies, summaries,

@@ -258,7 +258,8 @@ The trusted MCP adapter computes `body_digest` from `text` and derives an idempo
 **Implemented slice (bearer credential only):** the six tools above are exposed at
 `POST/GET/DELETE /mcp` over MCP Streamable HTTP, authenticated by the existing scoped
 speaker bearer credential and using the same service/authorization layer as REST. The
-idempotency key is derived from the MCP session id, JSON-RPC request id, and project.
+idempotency key is derived from the MCP session id, JSON-RPC request id and its
+string/number type, and project.
 See `docs/mcp.md`. OAuth 2.1/PKCE, ChatGPT Web installation/linking, and
 conversation-level ChatGPT tool invocation remain unimplemented and unverified.
 
