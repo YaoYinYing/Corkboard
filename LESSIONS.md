@@ -24,8 +24,11 @@ prevented regression; when to remove the advice.
   content through comparison time. Validate at both the env parser and the construction
   boundary (empty/whitespace disables; non-empty requires at least 32 characters), and
   SHA-256 both sides so the constant-time fold always compares fixed-length digests.
-  Document the remaining enabled-vs-disabled hashing-time caveat rather than claiming
-  perfect indistinguishability.
+  Trim once and use the trimmed value for both the minimum-length check and the returned
+  token; deciding "disabled" from the trimmed value but measuring the raw string lets
+  edge whitespace satisfy the floor and become part of the secret. Document the
+  remaining enabled-vs-disabled hashing-time caveat rather than claiming perfect
+  indistinguishability (a later audit flagged the raw-string measurement as open P2 debt).
 - **Prevents:** Unbounded metric cardinality, content/ID leakage, endpoint discovery,
   weak/directly constructed operator tokens, token-length timing inference, and startup
   that creates data before rejecting invalid metrics configuration.

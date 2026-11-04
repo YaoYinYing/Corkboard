@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–G implemented and pushed; slice H implemented at this tree, review pending |
-| Last pushed checkpoint | `3d3dc25` (rate limiting, audited tree `52bf6b7`) on `origin/main`; CI run 41869946548 |
-| Branch | `slice-h-metrics` (committed locally; not pushed) |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security/contract review pending on this tree |
+| Phase | 0 complete; vertical slices A–H implemented and pushed |
+| Last pushed checkpoint | `5d0ae9f` (metrics hardening, audited tree `f45a3b4`) on `origin/main`; CI run 41878712983 |
+| Branch | `main`, clean; the `slice-h-metrics` candidate was fast-forwarded |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4` |
 | Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, attachments, queue-to-commit and per-project observability |
 
 ## Checkpoint history
@@ -27,6 +27,7 @@ as the work it describes.
 | `4216af6` | `30e9267` | Issue #4 fix: typed JSON-RPC ids in MCP idempotency | security PASS; contract PASS |
 | `1fa8876` | `66bc243` | Vertical slice F: read-only operator diagnostics (`doctor`) | security PASS; contract PASS |
 | `3d3dc25` | `52bf6b7` | Vertical slice G: per-credential REST/MCP rate limiting | security PASS; contract PASS |
+| `5d0ae9f` | `f45a3b4` | Vertical slice H: metrics token hardening, fixed-length comparison, adapter recording isolation | security PASS; contract PASS |
 
 ## GitHub Issue coordination
 
@@ -34,7 +35,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `3d3dc25`; remote HEAD verified; CI run 41869946548 |
+| Last pushed checkpoint | `5d0ae9f`; remote HEAD verified; CI run 41878712983 |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -762,6 +763,16 @@ Do not infer any of these from local MCP behavior or from another plan.
   authentication/verification work and unauthenticated requests are not rate limited;
   the Node adapter buffers an in-cap body before auth/limit; pre-auth 404/405 routes are
   not counted. Limits are per-process and reset on restart.
+- Slice-H audit debt (P2, non-blocking): `normalizeMetricsToken` decides
+  disabled from the trimmed value but measures the raw string, so a ≥32-character
+  value with edge whitespace is accepted with that whitespace as part of the secret
+  (operator-only; a proxy that trims header edge whitespace would make it unusable);
+  the adapter's non-413 pre-core failure records `UNAVAILABLE` but writes a bare `503`
+  without the standard error envelope or security headers, while the API doc describes
+  counters as carrying envelope-extracted codes; the `docs/deployments.md` environment
+  row says "unset/empty disables" and omits whitespace-only; no test injects a throwing
+  `MetricsRegistry.recordRequest` to prove the original response is preserved on the
+  core and adapter recording paths. Metrics remain process-local and reset on restart.
 - No attachments. Per-credential rate limiting is implemented but process-local; it is
   not distributed/global, is not shared across processes or Workers isolates, and
   per-IP limiting remains delegated to the reverse proxy. MCP session state is in-memory/process-local
