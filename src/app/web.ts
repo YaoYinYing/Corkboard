@@ -79,6 +79,7 @@ const EN = {
   filterSearchLabel: "Search summaries",
   filterSearchHint: "Matches summary text only; message bodies are never searched.",
   filterUnreadLabel: "Unread only",
+  filterReadOnlyLabel: "Read only",
   filterLimitLabel: "Messages per page",
   applyFilters: "Apply filters",
   resetFilters: "Clear filters",
@@ -139,6 +140,7 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   filterSearchLabel: "搜索摘要",
   filterSearchHint: "仅匹配摘要文本，不搜索消息正文。",
   filterUnreadLabel: "仅未读",
+  filterReadOnlyLabel: "仅已读",
   filterLimitLabel: "每页消息数",
   applyFilters: "应用筛选",
   resetFilters: "清除筛选",
@@ -210,7 +212,7 @@ nav[aria-label] a[aria-current="true"] { font-weight: 700; text-decoration: unde
 main { padding-block: 1rem; }
 .project-list, .timeline { list-style: none; padding: 0; display: grid; gap: 1rem; }
 .project-list article, .message { border: 1px solid GrayText; border-radius: 0.5rem; padding: 1rem; min-width: 0; }
-.project-list li, .message h3, .message dd, .project-list h2 { overflow-wrap: anywhere; }
+.project-list li, .message h3, .message dd, .project-list h2, h1 { overflow-wrap: anywhere; }
 .message h3 { margin-top: 0.25rem; }
 .seq { font-variant-numeric: tabular-nums; color: GrayText; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0.5rem 0; }
@@ -403,7 +405,7 @@ function hasActiveFilters(filters: TimelineFilters): boolean {
     filters.type !== undefined ||
     filters.sender !== undefined ||
     (filters.q !== undefined && filters.q !== "") ||
-    filters.unread === true
+    filters.unread !== undefined
   );
 }
 
@@ -685,6 +687,7 @@ function renderFilterState(locale: Locale, filters: TimelineFilters): string {
     );
   }
   if (filters.unread === true) parts.push(escapeHtml(t(locale, "filterUnreadLabel")));
+  if (filters.unread === false) parts.push(escapeHtml(t(locale, "filterReadOnlyLabel")));
   const body =
     parts.length === 0
       ? escapeHtml(t(locale, "filterNone"))

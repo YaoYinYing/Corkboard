@@ -529,10 +529,12 @@ test("timeline filters by type, sender, summary substring, and unread with refle
   const unread = await getPage(app, "/projects/proj_a?unread=true", cookie);
   assert.deepEqual(messageSeqs(unread.html), [second.seq, third.seq]);
   assert.equal(unread.html.includes("Alpha release note"), false);
-  // The REST meaning of unread=false is "has a receipt for this viewer", so
-  // only the message marked read is returned.
+  // The REST meaning of unread=false is "has a receipt for this viewer". It is
+  // an active filter, not an absent one.
   const readToo = await getPage(app, "/projects/proj_a?unread=false", cookie);
   assert.deepEqual(messageSeqs(readToo.html), [first.seq]);
+  assert.ok(readToo.html.includes("Read only"));
+  assert.ok(readToo.html.includes("Clear filters"));
 
   const combined = await getPage(
     app,
@@ -553,6 +555,35 @@ test("timeline filters by type, sender, summary substring, and unread with refle
   assert.ok(tombstone.html.includes("Alpha release note"));
   assert.ok(tombstone.html.includes("This message body has expired."));
   assert.equal(tombstone.html.includes(`/messages/${first.messageId}/body`), false);
+});
+
+test("unread=false is an active read-only filter with a filtered empty state", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  const message = await sendTyped(
+    fx,
+    credential.token,
+    "proj_a",
+    "r1",
+    "Only unread message",
+    "body",
+    "note",
+  );
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+
+  const none = await getPage(app, "/projects/proj_a?unread=false", cookie);
+  assert.equal(none.status, 200);
+  assert.deepEqual(messageSeqs(none.html), []);
+  assert.ok(none.html.includes("Read only"));
+  assert.ok(none.html.includes("Active filters"));
+  assert.ok(none.html.includes("Clear filters"));
+  assert.ok(none.html.includes("No messages match these filters."));
+  assert.equal(none.html.includes("No messages yet."), false);
+
+  await markRead(fx.deps, await fx.authenticate(credential.token), "proj_a", message.messageId);
+  const matched = await getPage(app, "/projects/proj_a?unread=false", cookie);
+  assert.deepEqual(messageSeqs(matched.html), [message.seq]);
+  assert.ok(matched.html.includes("Read only"));
 });
 
 test("summary search ignores body text, escapes reflected input, and rejects malformed filters", async (t) => {
@@ -648,6 +679,16 @@ test("cursor paging is bounded forward and backward with no duplicate or skipped
   const oldest = await getPage(app, "/projects/proj_a?limit=2&before_seq=3", cookie);
   assert.deepEqual(messageSeqs(oldest.html), [1, 2]);
 
+  // An empty page renders only the empty state plus jump-to-latest; it never
+  // renders older/newer links.
+  const pastEnd = await getPage(app, "/projects/proj_a?limit=2&after_seq=5", cookie);
+  assert.equal(pastEnd.status, 200);
+  assert.deepEqual(messageSeqs(pastEnd.html), []);
+  assert.ok(pastEnd.html.includes("No messages yet."));
+  assert.ok(pastEnd.html.includes("Jump to latest"));
+  assert.equal(pastEnd.html.includes('rel="prev"'), false);
+  assert.equal(pastEnd.html.includes('rel="next"'), false);
+
   // Walk backward from the latest page using its own cursors, which must not
   // repeat or skip rows.
   const backFromLatest = await getPage(app, "/projects/proj_a?limit=2&before_seq=4", cookie);
@@ -722,6 +763,7 @@ test("filters preserve the locale and the page stays CSS-only and responsive", a
   const css = await cssResponse.text();
   assert.ok(css.includes("@media (max-width: 40rem)"));
   assert.ok(css.includes("@media (min-width: 48rem)"));
+  assert.match(css, /h1 \{ overflow-wrap: anywhere; \}/);
   assert.equal(css.includes("@import"), false);
   assert.equal(css.includes("url("), false);
 });

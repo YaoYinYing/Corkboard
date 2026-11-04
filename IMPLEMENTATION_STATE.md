@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–L implemented and pushed; slice M implemented as an unpushed candidate (`a4a6ef3`) |
+| Phase | 0 complete; vertical slices A–L implemented and pushed; slice M implemented as an unpushed candidate (`a4a6ef3`), with audit P2 fixes pending commit |
 | Last pushed checkpoint | `45e5637` (read-only dashboard, audited code tree `5ea2439`) on `origin/main`; CI pending |
-| Branch | Worktree branch `slice-m-dashboard-filters` from `0d3f34b`; candidate `a4a6ef3` (tree `c733ab9`) is unpushed; `main` remains clean at `0d3f34b` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice M: candidate under implementation on branch `slice-m-dashboard-filters`; independent review and security audit PENDING |
+| Branch | Worktree branch `slice-m-dashboard-filters` from `0d3f34b`; candidate `a4a6ef3` (tree `c733ab9`, audited final tree `ea34f5d`) is unpushed; P2 fixes are a new commit on top; `main` remains clean at `0d3f34b` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixes are a new commit with independent review PENDING |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
@@ -859,16 +859,19 @@ pushed.
   no body search, no new SQL path, no new mutation, no change to CSP/headers, and
   query values are not logged. Filtered GETs are asserted not to change message,
   receipt, body, or audit counts.
-- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (343 tests: 342 pass, 1
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (344 tests: 343 pass, 1
   pre-existing skip for the live D1 marker); `npm run build` exit 0. New tests
   cover every filter and combination, ASCII case-insensitivity, empty results,
   invalid values and limit bounds, forward/backward cursor chains with no
   duplicate or skipped rows, exact-limit `hasMore`, tombstones under filters,
   summary-only search with a body-only term, reflected-XSS escaping, active
-  state/reset rendering, locale preservation and zh strings, unknown-locale
+  state/reset rendering, `unread=false` as an active read-only filter with a
+  filtered empty state, locale preservation and zh strings, unknown-locale
   fallback, uniform 404 with filters and malformed filters, no receipt/table
   mutation on filtered GETs, no inline style/script, viewport meta and
-  responsive stylesheet assertions, and the real `startServer()` HTTP flow.
+  responsive stylesheet assertions, the empty-page jump-only pager behavior,
+  `h1` overflow wrapping, `hasMore` absent from REST and MCP list payloads, and
+  the real `startServer()` HTTP flow.
 - **Browser evidence.** A temporary local headless Chrome/CDP run outside the
   repository observed: `/login` in English with CSRF and labels; successful form
   sign-in to `/`; the project list; the timeline with three summaries and the
@@ -881,6 +884,13 @@ pushed.
   `innerWidth` (no horizontal scroll), body padding was 16px, and the page had
   zero `<script>`, zero `<style>`, and zero inline style attributes. This is
   local Chrome evidence, not an exact-revision independent review.
+- **Audit P2 fixes (first independent audit on final tree `ea34f5d`: security
+  PASS, contract PASS).** `unread=false` is now an active filter with a distinct
+  "Read only"/"仅已读" state, clear link, and filtered empty state; the pager
+  documentation distinguishes non-empty link behavior from the empty-page
+  jump-only behavior; `h1` joins the `overflow-wrap: anywhere` selectors so long
+  unbroken project titles cannot overflow; and REST/MCP tests assert the
+  internal `hasMore` probe never appears in serialized list payloads.
 - **Limitations.** Search is summary-only; there is no body search, full-text
   index, ranking, date filter, time scrubber, or cross-project search. The
   sender filter requires an exact speaker ID and offers no member picker.

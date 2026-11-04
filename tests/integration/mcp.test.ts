@@ -309,6 +309,9 @@ test("one speaker can list, send, list, get metadata/body, mark read, and whoami
   assert.equal(listed["messages"][0]["seq"], 1);
   assert.equal(listed["next_cursor"], 1);
   assert.ok(!("text" in listed["messages"][0]));
+  // The HTML pager's internal probe must never reach the MCP tool result.
+  assert.equal("hasMore" in listed, false);
+  assert.deepEqual(Object.keys(listed).sort(), ["messages", "next_cursor"]);
 
   const metadata = value(
     await call(client, "corkboard_get_message", {

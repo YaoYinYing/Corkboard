@@ -62,20 +62,27 @@ the service interprets as the latest page.
 `listMessages` internally fetches one row beyond `limit` and reports an internal
 `hasMore` boolean. The page uses it to omit a link when no older/newer matching
 row exists; `hasMore` is never serialized by REST or MCP, whose responses are
-unchanged. A page reached with `before_seq` always offers "newer" unless it is
-already the jump-to-latest page; an `after_seq` page offers "older" when the
-cursor is above zero. The latter is an inference, not a probe: with an active
-metadata filter that matched no earlier row, that "older" link can lead to one
-empty page. It is bounded to a single page and keeps the filter state. All
-navigation is bounded by the validated `limit`; there is no unbounded loop,
-recursive fetch, or client polling.
+unchanged. On a **non-empty** page, a page reached with `before_seq` always offers
+"newer" unless it is already the jump-to-latest page, and an `after_seq` page
+offers "older" when the cursor is above zero. The latter is an inference, not a
+probe: with an active metadata filter that matched no earlier row, that "older"
+link can lead to one empty page. It is bounded to a single page and keeps the
+filter state. An **empty** result renders only the empty-state message, plus a
+"Jump to latest" link when a cursor is present and the page is not already the
+jump-to-latest page; it renders no older or newer link. All navigation is bounded
+by the validated `limit`; there is no unbounded loop, recursive fetch, or client
+polling.
 
 ### Active filter state
 
 The page renders the active `type`, `sender`, `q`, and `unread` values in an
-escaped "Active filters" line and pre-fills the labeled filter controls. A
-"Clear filters" link removes the filters and both cursors while preserving
-`lang` and `limit`. Filter state values are always escaped in text and
+escaped "Active filters" line and pre-fills the labeled filter controls.
+`unread=true` is shown as "Unread only" and `unread=false` as "Read only"; both
+are active filters, so an empty result uses the filtered empty state and the
+clear link appears. The unread checkbox reflects only the "unread only" state;
+submitting the form without it replaces a `Read only` selection, and the clear
+link removes it. "Clear filters" removes the filters and both cursors while
+preserving `lang` and `limit`. Filter state values are always escaped in text and
 attribute positions. The filter form submits with `GET` and resets the cursors,
 so applying a filter starts at the oldest matching page.
 

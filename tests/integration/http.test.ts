@@ -378,6 +378,9 @@ test("send, list, get, body and read roundtrip", async (t) => {
   const listBody = await jsonBody(list);
   assert.equal(listBody.next_cursor, 1);
   assert.equal(listBody.messages.length, 1);
+  // The HTML pager's internal probe must never reach the REST contract.
+  assert.equal("hasMore" in listBody, false);
+  assert.deepEqual(Object.keys(listBody).sort(), ["messages", "next_cursor"]);
   const listed = listBody.messages[0];
   assert.deepEqual(listed.sender, { id: "spk_alice", display_name: "spk_alice" });
   assert.equal(listed.message_id, messageId);

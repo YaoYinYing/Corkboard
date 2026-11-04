@@ -520,3 +520,19 @@ prevented regression; when to remove the advice.
 - **Prevents:** Dead-end pagination links and a misleading definition of "end".
 - **Remove when:** the service exposes a cursor that carries its own end state
   and the pager no longer relies on a probe row.
+
+## 2026-11-04 — `unread=false` is a filter, not the absence of one
+
+- **Failure:** The page treated only `unread === true` as an active filter.
+  `?unread=false` was correctly applied by `listMessages` (messages with a
+  receipt), but the active-state line, clear link, and empty state ignored it,
+  so a read-only result looked unfiltered and an empty one claimed "No messages
+  yet."
+- **Reproducer:** Open a project with no read messages and `?unread=false`; the
+  page showed the unfiltered empty state and no clear link.
+- **Fix:** `hasActiveFilters` and the state renderer treat every defined
+  `unread` value as active, with separate "Unread only" and "Read only" labels.
+  Tests cover both a zero-match and a matching read-only result.
+- **Prevents:** A filter that changes the data but not the UI state.
+- **Remove when:** the unread control becomes a three-way selector whose state
+  is derived from one source instead of a true-only checkbox.
