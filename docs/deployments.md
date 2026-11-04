@@ -13,10 +13,20 @@ reverse proxy (Caddy, nginx, or the hosting platform).
 npm ci
 npm run build
 node dist/scripts/corkboard.js init --data-dir /var/lib/corkboard
-# creates /var/lib/corkboard (0700) and secrets.env (0600); prints only the file path
-set -a; . /var/lib/corkboard/secrets.env; set +a
+# writes secrets outside the data directory:
+#   $XDG_CONFIG_HOME/corkboard/secrets.env, else ~/.config/corkboard/secrets.env
+# dir 0700, file 0600; prints only the secrets-file path.
+# Override with: init --data-dir ... --secrets-file /etc/corkboard/secrets.env
+SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/corkboard/secrets.env"
+# or the exact path printed by init / passed to --secrets-file
+set -a; . "$SECRETS"; set +a
 node dist/scripts/corkboard.js serve
 ```
+
+`init` is non-destructive. It refuses, writing nothing, when `corkboard.sqlite` exists
+in the data directory or the secrets file already exists. There is no `--force` mode.
+A `--secrets-file` that resolves inside the data directory is rejected. Keep the
+secrets file outside the database/blob directory and back it up separately.
 
 The server binds `127.0.0.1` by default. Set `HOST=0.0.0.0` only behind a trusted
 reverse proxy.
@@ -42,15 +52,37 @@ node dist/scripts/corkboard.js bootstrap-owner --email owner@example.com
 node dist/scripts/corkboard.js create-project --account <account_id> --title "Ops"
 node dist/scripts/corkboard.js create-speaker --account <account_id> --name "Codex"
 node dist/scripts/corkboard.js add-member --project <project_id> --speaker <speaker_id>
+# issue a key for one project (repeat --project to grant several at once):
 node dist/scripts/corkboard.js issue-key --speaker <speaker_id> --project <project_id>
+node dist/scripts/corkboard.js issue-key --speaker <speaker_id> \
+  --project <project_a> --project <project_b>
 # optional: issue a narrower key. `project.edit` is an owner-membership capability,
 # so grant an owner membership first (`add-member --owner`), then:
 node dist/scripts/corkboard.js issue-key --speaker <speaker_id> --project <project_id> \
   --scopes project.edit
 # prints the token once; store it in the agent's own environment
+# manage grants after issuance (an active membership is required to grant):
+node dist/scripts/corkboard.js grant-key-project --credential <credential_id> --project <project_id>
+node dist/scripts/corkboard.js revoke-key-project --credential <credential_id> --project <project_id>
 node dist/scripts/corkboard.js revoke-key --credential <credential_id>
 node dist/scripts/corkboard.js remove-member --project <project_id> --speaker <speaker_id>
 ```
+
+`issue-key` requires at least one `--project`; the credential receives one grant per
+project. `add-member` grants credentials nothing: a key is usable only in projects it
+was explicitly granted, even when the speaker is a member of other projects.
+`remove-member` deletes that speaker's grants for the project, so re-adding the
+membership does not revive an old credential; `add-member` reactivates a removed
+membership but never restores grants, so grant it again explicitly. If granting a
+key fails mid-issuance, the new credential and its grants are removed rather than left
+partially provisioned. Existing pre-release credentials have no grants and lose access
+until granted explicitly.
+
+**Key rotation is not implemented.** Bootstrap (`init`) and rotation are separate:
+`init` refuses to touch an existing installation and no command rotates keys. To move
+an existing secrets file, stop the service, move the unchanged `0600` file, point the
+service manager at it, then start and verify token authentication plus body decryption.
+See `security-operations.md`.
 
 Body expiry cleanup:
 
@@ -85,6 +117,8 @@ passes the same contract tests and a live two-client exchange.
 
 ## Repository safety
 
-Never commit `ORIGINAL_DESIGN.md` (it contains a credential-bearing proxy URL) or
-`secrets.env`. CI runs a secret scan over staged files and full history. The public
-archive copy under `docs/` is labeled and has the credential userinfo removed.
+Never commit `ORIGINAL_DESIGN.md` (it contains a credential-bearing proxy URL) or a
+secrets file. Secrets default outside the data directory; if you override the location,
+keep it out of the repository. CI runs a secret scan over staged files and full history.
+The public archive copy under `docs/` is labeled and has the credential userinfo
+removed.

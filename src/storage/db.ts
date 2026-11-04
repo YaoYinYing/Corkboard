@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -18,35 +19,81 @@ export interface SqlDatabase {
   run(sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }>;
 }
 
-const MIGRATION_VERSION = 1;
+const MIGRATION_FILE = /^(\d+)_.*\.sql$/;
 // Built output lives at dist/src/storage/db.js, so the module-relative path
 // needs dist/migrations. Fall back to the repo root for source/test runs.
-const MODULE_MIGRATION_SQL = fileURLToPath(
-  new URL("../../migrations/001_init.sql", import.meta.url),
+const MODULE_MIGRATIONS_DIR = fileURLToPath(
+  new URL("../../migrations/", import.meta.url),
 );
-const CWD_MIGRATION_SQL = join(process.cwd(), "migrations", "001_init.sql");
+const CWD_MIGRATIONS_DIR = join(process.cwd(), "migrations");
 
-function readMigrationSql(): string {
-  const path = existsSync(MODULE_MIGRATION_SQL)
-    ? MODULE_MIGRATION_SQL
-    : CWD_MIGRATION_SQL;
-  return readFileSync(path, "utf8");
+function migrationsDirectory(): string {
+  return existsSync(MODULE_MIGRATIONS_DIR)
+    ? MODULE_MIGRATIONS_DIR
+    : CWD_MIGRATIONS_DIR;
+}
+
+interface Migration {
+  version: number;
+  path: string;
+}
+
+// Ordered by the leading number; the filename is informational. Duplicate
+// versions are a deployment error rather than a silent skip.
+function listMigrations(dir: string): Migration[] {
+  const migrations: Migration[] = [];
+  const versions = new Set<number>();
+  for (const name of readdirSync(dir)) {
+    const match = MIGRATION_FILE.exec(name);
+    if (match === null) continue;
+    const version = Number(match[1]);
+    if (!Number.isSafeInteger(version) || version <= 0 || versions.has(version)) {
+      throw new Error(`invalid or duplicate migration version: ${name}`);
+    }
+    versions.add(version);
+    migrations.push({ version, path: join(dir, name) });
+  }
+  return migrations.sort((a, b) => a.version - b.version);
 }
 
 function applyMigrations(db: DatabaseSync): void {
   db.exec(
     "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
   );
-  const applied = db
-    .prepare("SELECT version FROM schema_migrations WHERE version = ?1")
-    .get(MIGRATION_VERSION);
-  if (applied !== undefined) {
-    return;
-  }
-  db.exec(readMigrationSql());
-  db.prepare(
+  const isApplied = db.prepare(
+    "SELECT version FROM schema_migrations WHERE version = ?1",
+  );
+  const record = db.prepare(
     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-  ).run(MIGRATION_VERSION, new Date().toISOString());
+  );
+  for (const migration of listMigrations(migrationsDirectory())) {
+    if (isApplied.get(migration.version) !== undefined) continue;
+    // Each migration and its version row commit atomically. BEGIN IMMEDIATE
+    // serializes concurrent upgraders; the in-transaction re-check makes a
+    // loser skip cleanly instead of hitting a non-idempotent ALTER. A crash
+    // rolls the migration SQL back, so the database stays reopenable. This
+    // transaction is the local SQLite runner's job; migration SQL stays
+    // D1-compatible.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (isApplied.get(migration.version) !== undefined) {
+        db.exec("COMMIT");
+        continue;
+      }
+      db.exec(readFileSync(migration.path, "utf8"));
+      record.run(migration.version, new Date().toISOString());
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // A failed statement may already have ended the transaction.
+      }
+      // Another connection may have committed this version while we waited.
+      if (isApplied.get(migration.version) !== undefined) continue;
+      throw error;
+    }
+  }
 }
 
 // The database directory is a private data directory: create it 0700 so the

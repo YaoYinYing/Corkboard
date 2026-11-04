@@ -245,10 +245,12 @@ async function handleMe(deps: ServiceDeps, principal: Principal): Promise<Respon
         `SELECT p.id
            FROM projects p
            JOIN project_memberships m ON m.project_id = p.id
+           JOIN credential_project_grants g
+             ON g.project_id = p.id AND g.credential_id = ?
           WHERE m.speaker_id = ? AND m.removed_at IS NULL AND p.status = 'active'
             AND instr(m.capabilities, '"project.read"') > 0
           ORDER BY p.created_at ASC, p.id ASC`,
-        [principal.speakerId],
+        [principal.credentialId, principal.speakerId],
       )
     : [];
   return json(200, {
@@ -279,8 +281,9 @@ async function handleProjectList(
     "m.removed_at IS NULL",
     "p.status = 'active'",
     `instr(m.capabilities, '"project.read"') > 0`,
+    "g.credential_id = ?",
   ];
-  const params: Array<string | number> = [principal.speakerId];
+  const params: Array<string | number> = [principal.speakerId, principal.credentialId];
   if (cursor !== null) {
     where.push("(p.created_at > ? OR (p.created_at = ? AND p.id > ?))");
     params.push(cursor.createdAt, cursor.createdAt, cursor.id);
@@ -291,6 +294,7 @@ async function handleProjectList(
     `SELECT p.id, p.title, p.summary, p.status, p.created_at, p.updated_at
        FROM projects p
        JOIN project_memberships m ON m.project_id = p.id
+       JOIN credential_project_grants g ON g.project_id = p.id
       WHERE ${where.join(" AND ")}
       ORDER BY p.created_at ASC, p.id ASC
       LIMIT ?`,

@@ -194,15 +194,16 @@ Corkboard/
 | `speakers` | `id`, `owner_account_id`, `display_name`, `description`, `status`, timestamps | Speaker names are non-unique display labels; UUID/ULID is authority |
 | `project_memberships` | `(project_id, speaker_id)` unique, scoped role/capabilities, `joined_at`, `removed_at` | Membership admission requires project-owner authorization |
 | `credentials` | `id`, `speaker_id`, `public_prefix`, `secret_verifier`, `scope_json`, `expires_at`, `revoked_at`, `last_used_at` | Raw secret never stored; key hashes use keyed digest/pepper; secrets displayed once |
+| `credential_project_grants` | `(credential_id, project_id)` unique, `granted_at` | Deny-by-default credential least privilege: a grant is not a membership and a membership is not a grant; removing membership deletes that project's grants so re-adding cannot revive old credentials |
 | `messages` | `id` opaque; `(project_id, seq)` unique, `seq` NULL until atomic finalization; `sender_speaker_id`, `summary`, `type`, `language`, `reply_to_id`, client/server timestamps, `body_state`, `body_object_id`, expiry, idempotency record | Immutable author and sequence; FK `project_id` retained; only committed messages are visible; publication order equals sequence order |
 | `message_receipts` | `(message_id, speaker_id)` unique, `read_at`, optional `ack_at` | Receipt identity authenticated, timestamps stamped by server; ACL-gated |
 | `body_objects` | `id`, `project_id`, `storage_key`, `cipher_alg`, `key_version`, `nonce`, `compression`, `plaintext_length`, `cipher_length`, `ciphertext_digest`, state | Storage path random and non-public; AAD authenticates only pre-decryption metadata (service/project/message/object/format/version/compression). Only the ciphertext digest is stored; the plaintext digest is encrypted inside the payload |
 | `idempotency_keys` | `(speaker_id, project_id, key)` unique, payload digest, message ID, status, expiry | Same key+same payload → same result; conflict for different payload; retry-safe across crashes |
-| `audit_events` | `id`, actor account/speaker, project, operation, outcome, time, limited request origin, request ID | Sanitized metadata only; bounded retention, no plaintext bodies, tokens or raw IP by default |
+| `audit_events` | `id`, actor account/speaker, project, operation, outcome, time, limited request origin, request ID, optional sanitized `detail` JSON | Sanitized metadata only; bounded retention, no plaintext bodies, tokens or raw IP by default |
 | `oauth_*` | clients, auth codes, refresh tokens, consents, grants, revocations | Grant storage encrypted/hashed; per-user/per-project limits; standards-compatible metadata |
 | `service_settings` | non-secret deploy preferences, registrations on/off, default retention, feature flags | **No root secrets or encryption keys** in DB |
 
-**Indexes:** `messages(project_id, seq DESC)`, `(project_id, sender_speaker_id, seq DESC)`, `(project_id, type, seq DESC)`, `(project_id, received_at)`, `message_receipts(speaker_id, message_id)`, `project_memberships(speaker_id, project_id)`, credentials prefix. Use a metadata-only FTS index after the basic indexed case-insensitive search is tested (D1/SQLite differences must be measured). Bounded index and query-plan checks are acceptance criteria.
+**Indexes:** `messages(project_id, seq DESC)`, `(project_id, sender_speaker_id, seq DESC)`, `(project_id, type, seq DESC)`, `(project_id, received_at)`, `message_receipts(speaker_id, message_id)`, `project_memberships(speaker_id, project_id)`, `credential_project_grants(project_id)`, credentials prefix. Use a metadata-only FTS index after the basic indexed case-insensitive search is tested (D1/SQLite differences must be measured). Bounded index and query-plan checks are acceptance criteria.
 
 **Message identity:** Project ID is immutable, and `(project_id, seq)` is stable and monotonically increasing. Expose `message_id` as an opaque stable ID plus `seq` to order/replay. `seq` is allocated **atomically at finalization** with `projects.next_seq`; provisional rows carry `seq = NULL` and are invisible. No client-selected sequence. Duplicates and reuse are forbidden, and publication order must equal sequence order so a cursor cannot skip a published lower sequence. Referential checks include `project_id` so a reference cannot cross project boundaries.
 
@@ -333,7 +334,7 @@ recorded there.
 - [ ] Define actors (human account, platform admin, project owner/member, speaker, bearer credential, OAuth grant) and explicit permissions matrix.
 - [ ] Implement bootstrap owner creation and default invite-only registration. Verify passwords (if native login), email uniqueness, recovery token handling, CSRF, secure cookies, rate limits and anti-enumeration behavior.
 - [ ] Implement 256-bit speaker key creation, hash/pepper verifier, once-only display, TTL, key rotation/revocation and emergency project-disable path.
-- [ ] Enforce authorization at service layer and again at blob access with no metadata leaks on forbidden IDs. Model project membership as server-provisioned and revocable.
+- [x] Enforce authorization at service layer and again at blob access with no metadata leaks on forbidden IDs. Model project membership as server-provisioned and revocable. (Credential-to-project grants are explicit and deny-by-default per Issue #2; a membership alone grants no credential.)
 - [ ] Implement audit events for login, token issuance/revocation, permission grant, membership removal, project deletion and manual cleanup; exclude bodies and credentials.
 - [ ] Implement hard impersonation boundary via isolated agent credential broker / OS permissions (document threat limitations and prove a subagent lacking the secret cannot send as parent).
 - [ ] Run adversarial probes for object-level access control, JWT claims, idempotency ownership, time-of-check races, spoofed sender, hostile headers and injection attempts.
@@ -461,7 +462,7 @@ This is a narrowly adapted version of REvoCompute's existing campaign rules, not
 
 - [ ] Set up a clean repo and private/redacted original archive handling, then write/verify the docs and threat model.
 - [ ] Create the minimal account/project/speaker/message schema and test D1↔SQLite contract semantics.
-- [ ] Implement credential-bound sender and scoped authorization **before** exposing send/list endpoints.
+- [x] Implement credential-bound sender and scoped authorization **before** exposing send/list endpoints. (Issues #2/#3: explicit grants, deny-by-default, non-destructive bootstrap.)
 - [ ] Deliver local encrypted send→replay→mark_read flow with idempotency and crash-recovery tests.
 - [ ] Add the same flow for Workers/D1/R2, then a real two-agent MCP smoke test.
 - [ ] Record exact-head independent review for each vertical feature and checkpoint commit; keep `IMPLEMENTATION_STATE.md` and `LESSIONS.md` current.
