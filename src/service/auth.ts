@@ -30,6 +30,13 @@ export interface Principal {
   speakerId: string;
   accountId: string;
   scopes: ReadonlySet<Scope>;
+  /**
+   * Set only by `resolveSessionViewer`/`sessionAccountPrincipal` for the
+   * read-only human dashboard. It is never derived from request input and never
+   * set by `authenticateBearer`. The flag, not the synthetic credential id,
+   * selects the session authorization branch.
+   */
+  sessionViewer?: true;
 }
 
 export interface ProjectAccess {
@@ -144,6 +151,48 @@ export async function authenticateBearer(
   };
 }
 
+// A session viewer is an account viewing as one of its owned speakers. Its
+// authority is the active membership capability set. It has no credential,
+// grant, or credential-scope intersection: the human authenticated an account,
+// not a speaker credential. Any membership that cannot grant the requested
+// scope is NOT_FOUND so a project the account cannot read is indistinguishable
+// from a missing project.
+async function authorizeSessionProject(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  scope: Scope,
+): Promise<ProjectAccess> {
+  // The session surface is read-only. Even if a future caller passed another
+  // scope, the session viewer can never authorize a write.
+  if (scope !== "project.read" && scope !== "message.read") {
+    throw new AppError("NOT_FOUND");
+  }
+  const project = await deps.db.first<{ status: string }>(
+    "SELECT status FROM projects WHERE id = ?",
+    [projectId],
+  );
+  if (project === undefined || project.status !== "active") {
+    throw new AppError("NOT_FOUND");
+  }
+
+  const membership = await deps.db.first<{ capabilities: string }>(
+    `SELECT m.capabilities
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
+        AND s.owner_account_id = ? AND s.status = 'active' AND a.status = 'active'`,
+    [projectId, principal.speakerId, principal.accountId],
+  );
+  if (membership === undefined) throw new AppError("NOT_FOUND");
+
+  const capabilities = parseScopeJson(membership.capabilities);
+  if (!capabilities.has(scope)) throw new AppError("NOT_FOUND");
+  authorizeProjectAccess({ isMember: true, membershipRemovedAt: null, rights: capabilities, scope });
+  return { rights: capabilities, capabilities };
+}
+
 // Decision order: unknown/inactive project, missing membership, or an inactive
 // principal is NOT_FOUND (no existence leak); an active member whose credential
 // has no explicit grant for this project, or lacks the scope, is FORBIDDEN.
@@ -155,6 +204,10 @@ export async function authorizeProject(
   projectId: string,
   scope: Scope,
 ): Promise<ProjectAccess> {
+  if (principal.sessionViewer === true) {
+    return authorizeSessionProject(deps, principal, projectId, scope);
+  }
+
   const project = await deps.db.first<{ status: string }>(
     "SELECT status FROM projects WHERE id = ?",
     [projectId],
@@ -226,4 +279,60 @@ export async function authorizeProject(
 
   authorizeProjectAccess({ isMember: true, membershipRemovedAt: null, rights, scope });
   return { rights, capabilities };
+}
+
+// Builds the listing principal for a session. It has no speakerId because the
+// dashboard spans every owned speaker; project enumeration ignores it.
+export function sessionAccountPrincipal(session: {
+  sessionId: string;
+  accountId: string;
+}): Principal {
+  return {
+    credentialId: `session:${session.sessionId}`,
+    speakerId: "",
+    accountId: session.accountId,
+    scopes: new Set<Scope>(),
+    sessionViewer: true,
+  };
+}
+
+// Derives the deterministic viewer for one project: the first active,
+// non-removed membership (ordered by speaker creation) among speakers owned by
+// the account whose capability set includes the requested read scope. The
+// union across owned speakers is "at least one owned speaker grants it"; a
+// project with no such membership is NOT_FOUND, never FORBIDDEN.
+export async function resolveSessionViewer(
+  deps: ServiceDeps,
+  session: { sessionId: string; accountId: string },
+  projectId: string,
+  scope: Scope,
+): Promise<Principal> {
+  if (scope !== "project.read" && scope !== "message.read") {
+    throw new AppError("NOT_FOUND");
+  }
+  const rows = await deps.db.all<{ speaker_id: string; capabilities: string }>(
+    `SELECT m.speaker_id, m.capabilities
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+       JOIN projects p ON p.id = m.project_id
+      WHERE m.project_id = ? AND s.owner_account_id = ?
+        AND m.removed_at IS NULL AND s.status = 'active'
+        AND a.status = 'active' AND p.status = 'active'
+      ORDER BY s.created_at ASC, s.id ASC`,
+    [projectId, session.accountId],
+  );
+  for (const row of rows) {
+    const capabilities = parseScopeJson(row.capabilities);
+    if (capabilities.has(scope)) {
+      return {
+        credentialId: `session:${session.sessionId}`,
+        speakerId: row.speaker_id,
+        accountId: session.accountId,
+        scopes: capabilities,
+        sessionViewer: true,
+      };
+    }
+  }
+  throw new AppError("NOT_FOUND");
 }

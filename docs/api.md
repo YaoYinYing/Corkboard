@@ -1,11 +1,13 @@
 # HTTP API
 
 **Status: implemented for the Node.js + SQLite vertical slices A–D, the
-bearer-authenticated MCP slice, human account sessions (slice I), and the OAuth 2.1
-authorization-server core (slice J).** Cloudflare Workers/D1, the ChatGPT Web plugin
-experience, and the "Planned, not implemented" section below are not implemented. See
-`IMPLEMENTATION_STATE.md` for the current evidence and [`oauth.md`](./oauth.md) for
-the OAuth flows.
+bearer-authenticated MCP slice, human account sessions (slice I), the OAuth 2.1
+authorization-server core (slice J), and the read-only human web dashboard (slice L,
+English and Simplified Chinese).** Cloudflare Workers/D1, the ChatGPT Web plugin
+experience, dashboard write actions, and the "Planned, not implemented" section below
+are not implemented. See `IMPLEMENTATION_STATE.md` for the current evidence,
+[`oauth.md`](./oauth.md) for the OAuth flows, and [`web-ui.md`](./web-ui.md) for the
+dashboard.
 
 Base path: `/api/v1`. JSON in, JSON out, UTF-8. All timestamps are server-generated
 UTC ISO-8601 with milliseconds unless stated otherwise.
@@ -28,11 +30,12 @@ A bearer token authenticates a **speaker**. The server derives `speaker_id` from
 token; clients cannot submit an authoritative sender.
 
 A human session authenticates an **account**, never a speaker and never a credential.
-It is accepted only by the three `/api/v1/session` routes and the OAuth sign-in/consent
-pages (which may create a session). It cannot call `/api/v1/me`, project, message, or
-`/mcp` routes, and a session token is not a valid bearer token. Conversely, bearer
-routes never accept a session cookie. An OAuth access token is a speaker credential,
-not a session.
+It is accepted only by the three `/api/v1/session` routes, the OAuth sign-in/consent
+pages (which may create a session), and the read-only HTML dashboard pages (which
+derive an owned-speaker viewer; see below). It cannot call `/api/v1/me`, project,
+message, or `/mcp` routes, and a session token is not a valid bearer token. Conversely,
+bearer routes never accept a session cookie. An OAuth access token is a speaker
+credential, not a session.
 
 Scopes: `project.read`, `message.read`, `message.send`, `receipt.write`,
 `project.edit`, `member.read`, `member.manage`.
@@ -177,6 +180,26 @@ Like the API limiter, it is **process-local**, resets on restart, and is additio
 denial only; per-IP volumetric limits belong at the reverse proxy. An attacker who knows
 an email can consume that address's login attempts; the window is small and the bucket
 refills continuously.
+
+## Human web dashboard (read-only)
+
+Server-rendered HTML beside the JSON API. It is not part of `/api/v1`, is
+**read-only**, and is documented in full in [`web-ui.md`](./web-ui.md).
+
+| Route | Method | Notes |
+| --- | --- | --- |
+| `/login` | `GET`, `POST` | Form sign-in. `POST` requires `application/x-www-form-urlencoded` and a matching `login_csrf` hidden field plus `corkboard_web_login` cookie. `return_to` must be a same-origin path. |
+| `/` | `GET` | Projects readable by the account. |
+| `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`. |
+| `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
+| `/static/app.css` | `GET` | Fixed same-origin stylesheet. |
+
+Authorization derives a viewer from active, non-removed memberships of speakers
+owned by the session account, intersects them with `project.read` or `message.read`,
+and then calls the same service functions as the REST API. A project the account
+cannot read is a uniform `404`. Every page is `no-store` with a strict CSP and no
+inline script or style. `?lang=zh` selects Simplified Chinese; unknown locales fall
+back to English. No write, member, credential, key, expiry, or admin action exists.
 
 ## Endpoints
 
@@ -613,8 +636,12 @@ membership, and credential commands in slice A; project edit is not implemented)
 deferred: the ChatGPT Web plugin installation/linking experience,
 attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
 metadata), account registration/invite provisioning, email verification, password
-reset, and a browser UI. Human sign-in/session read/sign-out is implemented as described
-above. The bearer-authenticated `/mcp` surface is implemented (see above and `mcp.md`);
+reset, and any dashboard write UI. Human sign-in/session read/sign-out is implemented as
+described above, and a read-only dashboard (login, project list, timeline, body reveal,
+English/Simplified Chinese) is implemented per [`web-ui.md`](./web-ui.md); project
+create/edit, speaker/credential management, membership editing, and every state-changing
+dashboard action remain deferred. The bearer-authenticated `/mcp` surface is implemented
+(see above and `mcp.md`);
 the OAuth 2.1 authorization-server core is implemented (see above and `oauth.md`), but
 the ChatGPT Web integration is deferred and unverified. Expiry is implemented as the
 endpoint above plus the operator-run `expire-bodies`

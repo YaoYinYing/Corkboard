@@ -40,6 +40,11 @@ export function metricsConfigFromEnv(
 }
 
 export type RouteLabel =
+  | "/"
+  | "/login"
+  | "/static/app.css"
+  | "/projects/:projectId"
+  | "/projects/:projectId/messages/:messageId/body"
   | "/healthz"
   | "/mcp"
   | "/metrics"
@@ -68,7 +73,10 @@ export type RouteLabel =
 export function routeLabelFor(pathname: string): RouteLabel {
   const segments = pathname.split("/").filter((segment) => segment !== "");
 
+  if (segments.length === 0) return "/";
+
   if (segments.length === 1) {
+    if (segments[0] === "login") return "/login";
     if (segments[0] === "healthz") return "/healthz";
     if (segments[0] === "mcp") return "/mcp";
     if (segments[0] === "metrics") return "/metrics";
@@ -78,6 +86,8 @@ export function routeLabelFor(pathname: string): RouteLabel {
   // Public OAuth routes use fixed labels; no client IDs, scopes, or query
   // values are retained.
   if (segments.length === 2) {
+    if (segments[0] === "static" && segments[1] === "app.css") return "/static/app.css";
+    if (segments[0] === "projects") return "/projects/:projectId";
     if (segments[0] === ".well-known") {
       if (segments[1] === "oauth-protected-resource") {
         return "/.well-known/oauth-protected-resource";
@@ -107,6 +117,15 @@ export function routeLabelFor(pathname: string): RouteLabel {
           return "unknown";
       }
     }
+  }
+
+  if (
+    segments.length === 5 &&
+    segments[0] === "projects" &&
+    segments[2] === "messages" &&
+    segments[4] === "body"
+  ) {
+    return "/projects/:projectId/messages/:messageId/body";
   }
 
   if (segments[0] !== "api" || segments[1] !== "v1") return "unknown";

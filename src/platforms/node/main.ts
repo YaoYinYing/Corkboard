@@ -64,6 +64,8 @@ function needsBody(method: string, pathname: string): boolean {
   if (method !== "POST") return false;
   const segments = pathname.split("/").filter((segment) => segment !== "");
   if (segments.length === 1 && segments[0] === "mcp") return true;
+  // Dashboard sign-in is a form POST; without this the body is never buffered.
+  if (segments.length === 1 && segments[0] === "login") return true;
   if (segments.length === 2 && segments[0] === "oauth") {
     return (
       segments[1] === "register" ||

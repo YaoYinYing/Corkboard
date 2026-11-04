@@ -94,6 +94,12 @@ export interface ReadReceiptResult {
   readAt: string;
 }
 
+export interface ReadReceipt {
+  speakerId: string;
+  displayName: string | null;
+  readAt: string;
+}
+
 function randomToken(bytes = 16): string {
   const raw = crypto.getRandomValues(new Uint8Array(bytes));
   let binary = "";
@@ -814,6 +820,56 @@ export async function getMessageBody(
     compression: opened.header.compression,
     digest: `sha256:${await sha256Hex(opened.plaintext)}`,
   };
+}
+
+// Read receipts for a bounded page of messages, under the same `message.read`
+// authorization as message metadata. The caller supplies ids it just read; the
+// project filter is applied again here. Receipts never reveal a message from
+// another project.
+export async function listReadReceipts(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  messageIds: readonly string[],
+): Promise<Map<string, ReadReceipt[]>> {
+  await authorizeProject(deps, principal, projectId, "message.read");
+  const ids = [...new Set(messageIds)];
+  const receipts = new Map<string, ReadReceipt[]>();
+  if (ids.length === 0) return receipts;
+  if (ids.length > MAX_LIMIT) {
+    throw new AppError("VALIDATION_ERROR", "too many messages");
+  }
+  for (const id of ids) {
+    if (typeof id !== "string" || id === "") {
+      throw new AppError("VALIDATION_ERROR", "message id must be a string");
+    }
+  }
+
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = await deps.db.all<{
+    message_id: string;
+    speaker_id: string;
+    display_name: string | null;
+    read_at: string;
+  }>(
+    `SELECT r.message_id, r.speaker_id, s.display_name, r.read_at
+       FROM message_receipts r
+       JOIN messages m ON m.id = r.message_id
+       LEFT JOIN speakers s ON s.id = r.speaker_id
+      WHERE m.project_id = ? AND r.message_id IN (${placeholders})
+      ORDER BY r.message_id ASC, r.read_at ASC, r.speaker_id ASC`,
+    [projectId, ...ids],
+  );
+  for (const row of rows) {
+    const entry = receipts.get(row.message_id) ?? [];
+    entry.push({
+      speakerId: row.speaker_id,
+      displayName: row.display_name,
+      readAt: row.read_at,
+    });
+    receipts.set(row.message_id, entry);
+  }
+  return receipts;
 }
 
 export async function markRead(

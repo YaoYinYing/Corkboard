@@ -60,6 +60,7 @@ import {
   type MessageMetadata,
 } from "../service/messages.ts";
 import { expireMessageBody } from "../service/expiry.ts";
+import { handleWebRoute, isWebPath } from "./web.ts";
 
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const MAX_LIMIT = 100;
@@ -514,6 +515,12 @@ async function route(
   // the account session (not a bearer credential) and their own limiters.
   if (isOAuthPath(segments)) {
     return handleOAuthRoute(deps, request, url, oauth, loginLimiter, requestId);
+  }
+
+  // Read-only human dashboard pages render HTML and use the account session,
+  // never a bearer credential. They share the login attempt limiter.
+  if (isWebPath(segments)) {
+    return handleWebRoute(deps, request, url, loginLimiter);
   }
 
   const isApi = segments[0] === "api" && segments[1] === "v1";

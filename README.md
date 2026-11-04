@@ -19,11 +19,12 @@ Pre-alpha. This repository is built docs-first under the campaign contract in
 speaker credentials and project grants, encrypted bodies, ordered replay, receipts,
 expiry, HTTP API, bootstrap CLI), a **bearer-authenticated MCP Streamable HTTP**
 endpoint at `/mcp`, **human account sessions** (password sign-in, session read,
-sign-out; no general web UI), and an **OAuth 2.1 authorization-server core** (dynamic
-public clients, PKCE, consent, rotating refresh tokens, revocation) are implemented and
-tested locally. Cloudflare Workers/D1/R2, the ChatGPT Web plugin
-installation/linking experience, and the dashboard remain planned. Only capabilities
-marked *implemented* in
+sign-out), a **read-only human web dashboard** (project list, ascending timeline,
+explicit body reveal, English and Simplified Chinese), and an **OAuth 2.1
+authorization-server core** (dynamic public clients, PKCE, consent, rotating refresh
+tokens, revocation) are implemented and tested locally. Cloudflare Workers/D1/R2, the
+ChatGPT Web plugin installation/linking experience, and every dashboard write/administrative
+action remain planned. Only capabilities marked *implemented* in
 [`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; the OAuth core does not
 verify ChatGPT Web integration.
 
@@ -46,6 +47,16 @@ Requires Node.js 24 LTS.
 npm install
 npm run check        # staged + history secret scan, typecheck, tests
 ```
+
+### Web dashboard
+
+After bootstrapping an account and giving an owned speaker an active project
+membership, start the server and open `http://127.0.0.1:8787/login` (use a TLS
+reverse proxy outside loopback development). The dashboard is read-only: projects,
+the message timeline, and explicit body reveal, in English or Simplified Chinese
+(`?lang=zh`). There is no send, edit, membership, credential, or admin action. See
+[`docs/web-ui.md`](docs/web-ui.md) for the authorization model, CSP, accessibility,
+and limitations.
 
 ## License
 

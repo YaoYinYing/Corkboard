@@ -48,6 +48,7 @@ import {
   loginCsrfCookie,
   sessionCookie,
 } from "./cookies.ts";
+import { escapeHtml } from "./html.ts";
 import type { RateLimiter } from "./rate-limit.ts";
 import { json } from "./responses.ts";
 
@@ -77,15 +78,6 @@ export function isOAuthPath(segments: readonly string[]): boolean {
     );
   }
   return segments[0] === "oauth";
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }
 
 function htmlResponse(

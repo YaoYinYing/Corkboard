@@ -28,3 +28,31 @@ export function loginCsrfCookie(value: string): string {
 export function clearedLoginCsrfCookie(): string {
   return `corkboard_oauth_login=; Path=/oauth; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Expires=${COOKIE_EXPIRY_EPOCH}`;
 }
+
+// Double-submit value for the dashboard sign-in form. The cookie is Path-scoped
+// to the login route, HttpOnly (the server renders the hidden field), and
+// SameSite=Lax so a cross-site form post does not carry it.
+export const WEB_LOGIN_CSRF_COOKIE = "corkboard_web_login";
+
+export function webLoginCsrfCookie(value: string): string {
+  return `${WEB_LOGIN_CSRF_COOKIE}=${value}; Path=/login; HttpOnly; Secure; SameSite=Lax; Max-Age=600`;
+}
+
+export function clearedWebLoginCsrfCookie(): string {
+  return `${WEB_LOGIN_CSRF_COOKIE}=; Path=/login; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Expires=${COOKIE_EXPIRY_EPOCH}`;
+}
+
+// Minimal cookie parsing shared by the HTML routes. Our values are base64url,
+// so no percent-decoding is applied; a malformed or duplicate cookie simply
+// fails the caller's shape check.
+export function cookieValue(header: string | null, name: string): string | undefined {
+  if (header === null) return undefined;
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) continue;
+    if (part.slice(0, separator).trim() === name) {
+      return part.slice(separator + 1).trim();
+    }
+  }
+  return undefined;
+}

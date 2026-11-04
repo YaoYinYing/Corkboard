@@ -116,6 +116,59 @@ credential and grants no project, message, MCP, or administrative authority.
   Workers isolates enforce their own buckets, and a restart clears them. Per-IP and
   volumetric controls remain the reverse proxy's responsibility.
 
+## Read-only human web dashboard (slice L)
+
+The dashboard adds an HTML rendering surface, not a new authorization system. It
+composes the slice-I session with the existing service authorization and has no
+write actions.
+
+- **Stored XSS through titles, summaries, or display names.** Project titles and
+  summaries, speaker display names, message summaries, reply references, and read
+  receipt names are all untrusted stored strings. Every value is HTML-escaped in
+  text and attribute positions before rendering; there is no unescaped
+  interpolation. Tests place `<script>`, quotes, and entities in each field and
+  assert the escaped form appears and no executable markup does.
+- **Stored XSS through message bodies.** Bodies are decrypted only on an explicit
+  body request and rendered as escaped text inside `<pre>`. Message content is
+  never interpreted as HTML, Markdown, or script, and never appears in the
+  timeline.
+- **Cross-site scripting policy.** Pages ship no script and no inline style. The
+  CSP is `default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+  so even an escaping defect has no script execution path, and only the fixed
+  same-origin stylesheet can load. `X-Content-Type-Options: nosniff` prevents
+  content sniffing.
+- **CSRF on sign-in.** `POST /login` is form-encoded and requires a hidden
+  `login_csrf` value matching an independent `HttpOnly; Secure; SameSite=Lax`
+  cookie, compared as SHA-256 digests in constant time. A cross-site form cannot
+  read the cookie and does not send it under `SameSite=Lax`. The route also rejects
+  other content types. The only other cookie-authenticated state change remains
+  `DELETE /api/v1/session` with its `X-CSRF-Token`.
+- **Session fixation.** Sign-in always generates a new random session token and
+  ignores any pre-existing session cookie value; the dashboard never accepts a
+  session id from input.
+- **Open redirect.** `return_to` must be a same-origin path. Absolute and
+  scheme-relative URLs, backslashes, control characters, and long values are
+  rejected; the emitted `Location` is re-derived from the URL parser, not echoed
+  from the request.
+- **Clickjacking.** `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop the
+  dashboard from being framed.
+- **Enumeration and cross-account reads.** The viewer is derived only from active,
+  non-removed memberships of speakers owned by the session account. A project
+  without a qualifying membership is a uniform `404`, whether it is missing,
+  foreign, removed, inactive, or capability-insufficient; body and receipt routes
+  use the same rule. The session never authenticates a REST data route or `/mcp`.
+- **Body reveal and integrity.** The body route calls the existing verified decrypt
+  path, re-authorizes after decryption, and returns a generic error page on
+  failure. It never returns ciphertext, partial plaintext, or an integrity error
+  detail.
+- **Caching and proxies.** Every HTML response is `Cache-Control: no-store` with
+  `Referrer-Policy: no-referrer`. A shared proxy must not cache authenticated
+  pages; the reverse proxy is still responsible for TLS and any per-IP control.
+- **Logging.** Dashboard pages do not log bodies, summaries, tokens, cookies, CSRF
+  values, email addresses, or full IPs. The request logger sees only the path,
+  status, duration, and other metadata; dynamic project/message identifiers are not
+  written into metrics labels.
+
 ## OAuth 2.1 delegated speaker grants (slice J)
 
 OAuth issues a speaker-scoped bearer credential for one project; it is not a second

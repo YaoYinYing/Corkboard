@@ -152,12 +152,17 @@ written) is not prevented; no stronger guarantee is claimed. See
 - **Login CSRF.** `POST /api/v1/session` requires `Content-Type: application/json`
   (parameters allowed) and rejects other media types before parsing. A simple
   cross-site form or `text/plain` post cannot satisfy this, and no CORS is enabled, so a
-  browser cannot send `application/json` cross-origin without a preflight. There is no
-  Origin allowlist; the session cookie's `SameSite=Strict` covers subsequent requests.
-- **What a session can do.** Read the signed-in account (`GET /api/v1/session`) and sign
-  out (`DELETE`). It cannot read projects or messages, send, mark read, expire, or call
-  MCP, and it is not accepted as a bearer token. Speaker operations still require a
-  separately issued scoped credential.
+  browser cannot send `application/json` cross-origin without a preflight. The HTML
+  `POST /login` route instead requires a `login_csrf` hidden field matching the
+  `HttpOnly; Secure; SameSite=Lax` `corkboard_web_login` cookie, compared as SHA-256
+  digests. There is no Origin allowlist; the session cookie's `SameSite=Strict` covers
+  subsequent requests.
+- **What a session can do.** Read the signed-in account (`GET /api/v1/session`), sign
+  out (`DELETE`), and open the read-only HTML dashboard, where it is resolved to an
+  owned speaker's active membership for `project.read`/`message.read`. It cannot call
+  the `/api/v1` data routes, send, mark read, expire, or call MCP, and it is not
+  accepted as a bearer token. Speaker write operations still require a separately
+  issued scoped credential.
 - **Lifetime and revocation.** A session expires after **12 hours absolute** and after
   **30 minutes idle** (refreshed lazily by accepted `GET /api/v1/session` requests;
   `DELETE` validates and revokes without refreshing). Sign-out sets
@@ -185,6 +190,37 @@ OAuth 2.1/PKCE is implemented as an authorization-server core in slice J (see
 [`oauth.md`](./oauth.md)); ChatGPT Web account linking, registration, email
 verification, and password reset are not implemented. Do not describe a session as OAuth
 or as authority to act as a speaker.
+
+## Read-only web dashboard
+
+- **TLS and cookies.** The dashboard uses the same `Secure`, `HttpOnly`, `__Host-`
+  session cookie and `corkboard_csrf` cookie. Serve it only through the TLS reverse
+  proxy; do not terminate TLS and expose the origin over plain HTTP.
+- **Caching.** Every HTML page is `Cache-Control: no-store`, `Referrer-Policy:
+  no-referrer`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
+  sends the strict CSP `default-src 'none'; style-src 'self'; form-action 'self';
+  base-uri 'none'; frame-ancestors 'none'`. Do not add a shared cache or strip these
+  headers at the proxy. The only static asset is the constant same-origin
+  `/static/app.css`; there are no third-party resources.
+- **Content rendering.** All stored metadata and decrypted bodies are escaped
+  server-side. Bodies appear only on explicit body requests inside `<pre>`. Never
+  add a Markdown renderer, HTML preview, inline event handler, or third-party
+  script to these pages without a new threat review.
+- **Sign-in CSRF and redirects.** `POST /login` is form-encoded, requires the
+  double-submit `login_csrf` value, and accepts only a same-origin path in
+  `return_to` (absolute/scheme-relative URLs, backslashes, control characters, and
+  over-long values are rejected). The login form shares the per-email-digest rate
+  limiter and returns an HTML `429` with `Retry-After`.
+- **Logging.** Dashboard requests never log bodies, summaries, tokens, cookies,
+  CSRF values, email addresses, or full IPs. Project/message identifiers in the path
+  are not written into metrics labels; see `docs/web-ui.md`.
+- **Trust domain.** The dashboard derives a viewer only from active, non-removed
+  memberships of speakers owned by the account and calls the existing read service
+  functions. A project without a qualifying membership is a uniform `404`. The
+  `sessionViewer` flag is set in code only, never from request input.
+- **Limits.** There are no write actions, so there is no dashboard state-changing
+  CSRF surface. The dashboard does not add registration, recovery, or
+  administrative capability.
 
 ## OAuth 2.1 authorization server
 
