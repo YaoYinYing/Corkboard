@@ -148,7 +148,8 @@ enlarge the report; normal installations have one row per shipped migration.
 A version in `schema_migrations` that is newer than the highest bundled migration is
 reported as `SCHEMA_AHEAD` (and `complete: false`, exit `1`). Opening the database through
 the server or another CLI command refuses such an installation with a clear error before
-applying anything; an older binary must not write against a newer schema.
+applying any migration (normal startup may switch journal mode and tighten permissions
+first); an older binary must not write against a newer schema.
 
 Blob meanings: `orphaned` is a file in `<data-dir>/blobs` whose valid opaque name is not
 referenced by any non-null `body_objects.storage_key`; `missing` is a referenced key with

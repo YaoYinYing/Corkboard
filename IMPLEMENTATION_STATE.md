@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–E implemented and pushed; slice F (read-only doctor) candidate |
-| Last pushed checkpoint | `57d769b` (audited tree `31a542a`) on `origin/main`; CI run 41844525189 |
-| Branch | `slice-f-doctor` (worktree candidate) |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`. Slice F: independent security and contract audits pending on the exact candidate tree |
-| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, structured observability (doctor diagnostics now implemented) |
+| Phase | 0 complete; vertical slices A–F implemented and pushed |
+| Last pushed checkpoint | `1fa8876` (doctor, audited tree `66bc243`; combined-tree gate 221 tests/220 pass) and `df5d200` (MCP id fix) on `origin/main` |
+| Branch | `main` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243` |
+| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, structured observability |
 
 ## Checkpoint history
 
@@ -24,6 +24,8 @@ as the work it describes.
 | `0052909` | `8ffff4a` | Vertical slice C: credential-project grants, safe bootstrap, transactional migrations | security PASS; contract PASS |
 | `17caa65` | `bcc6a73` | Vertical slice D: revocation re-checks, multi-process evidence, fail-closed filesystem | security PASS; contract PASS |
 | `57d769b` | `31a542a` | Vertical slice E: bearer-authenticated MCP Streamable HTTP tools | security PASS; contract PASS |
+| `4216af6` | `30e9267` | Issue #4 fix: typed JSON-RPC ids in MCP idempotency | security PASS; contract PASS |
+| `1fa8876` | `66bc243` | Vertical slice F: read-only operator diagnostics (`doctor`) | security PASS; contract PASS |
 | `slice-f-doctor` candidate | recorded in the campaign report | Vertical slice F: read-only operator diagnostics (`doctor`) | independent security/contract audits pending |
 
 ## GitHub Issue coordination
@@ -32,7 +34,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `57d769b`; remote HEAD verified; CI run 41844525189 |
+| Last pushed checkpoint | `1fa8876` (doctor) after `df5d200` (MCP id fix); remote HEAD/CI verified after push |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -307,7 +309,9 @@ pushed.
 - **Schema newer than the server.** `applyMigrations` reads every applied version before
   the migration loop and throws `SchemaTooNewError` when any applied version exceeds the
   highest bundled version, so the server/CLI refuses an installation from a newer build
-  without applying anything. Doctor reports the same condition as `SCHEMA_AHEAD` with
+  before applying any migration. Normal startup may still switch journal mode and
+  tighten file permissions before the refusal; no schema migration or row is applied.
+  Doctor reports the same condition as `SCHEMA_AHEAD` with
   `unexpected` versions and `complete: false` (exit `1`); non-positive/non-integer rows
   are defensively treated as unexpected.
 - **Report.** `src/service/doctor.ts` reports: applied/expected/missing/unexpected schema
@@ -624,7 +628,13 @@ Do not infer any of these from local MCP behavior or from another plan.
   exits 2 rather than producing a report, while a non-ok result reports with unmeasured
   fields null. A live read may rewrite `-shm`, and sidecar detection has a narrow
   check/open TOCTOU. The normal opener now refuses a database migrated by a newer
-  server; doctor only reports `SCHEMA_AHEAD`.
+  server; doctor only reports `SCHEMA_AHEAD`. Audit P2 debt: `SCHEMA_AHEAD` also covers
+  out-of-set/hostile version rows rather than only versions above the bundled maximum;
+  each unexpected version value is printed at full length (tampered DB can enlarge
+  output); unsafe/non-integer version rows are refused or reported inconsistently; a
+  symlinked ancestor of the data directory is not canonicalized (final component only);
+  doctor's key-shape check is stricter than the server's lenient base64 decoder; the
+  newer-schema refusal may switch journal mode/tighten permissions before refusing.
 - Production filesystem verification covers directories and files present at startup;
   WAL/SHM sidecars are checked when present and are created `0600` by the adapter. It
   does not detect a mode change made by another privileged process after startup.
