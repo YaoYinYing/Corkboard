@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–F implemented and pushed; slice G (rate limiting) candidate |
-| Last pushed checkpoint | `1fa8876` (doctor, audited tree `66bc243`; combined-tree gate 221 tests/220 pass) and `df5d200` (MCP id fix) on `origin/main` |
+| Phase | 0 complete; vertical slices A–G implemented and pushed |
+| Last pushed checkpoint | `3d3dc25` (rate limiting, audited tree `52bf6b7`) on `origin/main`; CI run 41869946548 |
 | Branch | `main` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243` |
-| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, structured observability |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7` |
+| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, attachments, structured observability |
 
 ## Checkpoint history
 
@@ -26,8 +26,7 @@ as the work it describes.
 | `57d769b` | `31a542a` | Vertical slice E: bearer-authenticated MCP Streamable HTTP tools | security PASS; contract PASS |
 | `4216af6` | `30e9267` | Issue #4 fix: typed JSON-RPC ids in MCP idempotency | security PASS; contract PASS |
 | `1fa8876` | `66bc243` | Vertical slice F: read-only operator diagnostics (`doctor`) | security PASS; contract PASS |
-| `slice-f-doctor` candidate | recorded in the campaign report | Vertical slice F: read-only operator diagnostics (`doctor`) | independent security/contract audits pending |
-| `slice-g-ratelimit` candidate | recorded in the checkpoint commit | Vertical slice G: per-credential REST/MCP rate limiting | independent security/contract audits pending |
+| `3d3dc25` | `52bf6b7` | Vertical slice G: per-credential REST/MCP rate limiting | security PASS; contract PASS |
 
 ## GitHub Issue coordination
 
@@ -35,7 +34,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `1fa8876` (doctor) after `df5d200` (MCP id fix); remote HEAD/CI verified after push |
+| Last pushed checkpoint | `3d3dc25`; remote HEAD verified; CI run 41869946548 |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -409,7 +408,7 @@ pushed.
   smoke (`init` → service send with near expiry → `expire-bodies` → body fetch fails,
   metadata survives).
 
-## Vertical slice G — per-credential rate limiting (candidate)
+## Vertical slice G — per-credential rate limiting (implemented at this tree)
 
 - **Core limiter.** `src/app/rate-limit.ts` is a Web-standard token bucket with an
   injected clock (`now`, `maxKeys`, `idleMs` options). `RateLimitConfig` holds
@@ -706,6 +705,11 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
 - No human web session or OAuth yet.
+- Slice-G audit debt: idle/LRU eviction resets a bucket to full burst, which can exceed
+  the configured sustained rate when `burst > 2 * perMinute` (non-default config);
+  authentication/verification work and unauthenticated requests are not rate limited;
+  the Node adapter buffers an in-cap body before auth/limit; pre-auth 404/405 routes are
+  not counted. Limits are per-process and reset on restart.
 - No attachments. Per-credential rate limiting is implemented but process-local; it is
   not distributed/global, is not shared across processes or Workers isolates, and
   per-IP limiting remains delegated to the reverse proxy. MCP session state is in-memory/process-local
