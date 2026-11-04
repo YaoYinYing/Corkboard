@@ -228,11 +228,13 @@ or as authority to act as a speaker.
 - **Cleanup.** Expired/rotated OAuth rows are rejected on use but are not purged
   automatically. The operator-run `prune` command removes consumed/expired codes,
   expired/revoked/rotated refresh rows, orphan associations, and OAuth credentials
-  after a default 24-hour grace (see **Retention and pruning**). An expired or revoked
-  access credential with a live refresh row remains refreshable and revocable until
-  that refresh row ages out past grace; the credential, association, and grants are
-  then deleted together. Deleting a refresh row invalidates that chain; deleting a
-  credential row makes its access token unauthenticated.
+  after a default 24-hour grace (see **Retention and pruning**). An expired-but-not-
+  revoked access credential with a live refresh row can still be refreshed and remains
+  revocable until that refresh row ages out past grace; a revoked credential cannot be
+  refreshed (the attempt returns `invalid_grant` and revokes the family) but its rows
+  are retained until `prune`. The credential, association, and grants are then deleted
+  together. Deleting a refresh row invalidates that chain; deleting a credential row
+  makes its access token unauthenticated.
 
 ## MCP transport
 

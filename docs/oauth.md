@@ -365,9 +365,10 @@ refresh token, access token, cookie, CSRF value, or client secret.
 ### Row lifecycle and retention
 
 Expired/rotated OAuth rows are rejected on use but are **not** purged automatically.
-An expired or revoked access credential that still has a live refresh row remains
-refreshable (and revocable through that row's ownership association) until the refresh
-row ages out past grace. The operator runs `prune` explicitly; there is no timer and no
+An expired-but-not-revoked access credential that still has a live refresh row can be
+refreshed (and remains revocable through the ownership association) until the refresh
+row ages out past grace. A **revoked** access credential cannot refresh: an attempt
+returns `invalid_grant` and revokes the family, but its rows are retained until `prune`. The operator runs `prune` explicitly; there is no timer and no
 server-side deletion.
 After a grace period (default 24 hours, `--grace-hours`) the command removes only rows
 that are definitely unusable:
@@ -384,7 +385,8 @@ that are definitely unusable:
   is never eligible.
 
 The grace period keeps a just-expired row available to a request already in flight
-and tolerates clock skew. `prune` is transactional and bounded by `--limit` per table,
+and tolerates clock skew. `prune` is transactional and bounded by `--limit` per
+session/OAuth artifact table (an OAuth credential's grants are removed with it),
 so it is safe to repeat and a failure deletes nothing. It never touches messages,
 receipts, blobs, or audit events. If a credential is blocked from deletion by a live
 refresh row, it keeps its `oauth_token_clients` association and grants so refresh and

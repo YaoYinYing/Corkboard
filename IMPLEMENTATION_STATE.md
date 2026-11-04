@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–J implemented and pushed; slice K (operator retention) candidate, review pending |
-| Last pushed checkpoint | `aac6f2e` (OAuth 2.1 core; audited code tree `a439df4`, docs-only tail) on `origin/main`; CI pending |
-| Branch | `slice-k-retention`, clean; slice-K capability commit `691eca2` (tree `6f403f7`), security audit-fix commit `31ac9fb` (tree `e6fbd45`), reviews pending |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success |
+| Phase | 0 complete; vertical slices A–K implemented and pushed |
+| Last pushed checkpoint | `f0e43d3` (operator retention/prune, audited tree `1a5d207`) on `origin/main`; CI pending |
+| Branch | `main`, clean; the `slice-k-retention` five-commit candidate was fast-forwarded |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
@@ -30,8 +30,9 @@ as the work it describes.
 | `5d0ae9f` | `f45a3b4` | Vertical slice H: metrics token hardening, fixed-length comparison, adapter recording isolation | security PASS; contract PASS |
 | `9a4f6c5` | `cc8df35` | Vertical slice I: human account sessions (PBKDF2 login, cookie + CSRF, revocation) | security PASS; contract PASS |
 | `aac6f2e` | `4867ed0` | Vertical slice J: OAuth 2.1 authorization server (discovery, DCR, PKCE, consent, rotation, revocation) | security PASS; contract PASS on code tree `a439df4`; docs-only tail |
-| `691eca2` | `6f403f7` | Vertical slice K: operator-run bounded session/OAuth retention (`prune`) | security PENDING; contract PENDING |
-| `31ac9fb` | `e6fbd45` | Slice K security audit fixes: retain OAuth ownership with a live refresh row, bound grace to the Date range, add regression/exact-boundary tests | security PENDING; contract PENDING |
+| `691eca2` | `6f403f7` | Vertical slice K: operator-run bounded session/OAuth retention (`prune`) | superseded by later K commits |
+| `31ac9fb` | `e6fbd45` | Slice K security audit fixes: retain OAuth ownership with a live refresh row, bound grace to the Date range, add regression/exact-boundary tests | superseded by final K commit |
+| `f0e43d3` | `1a5d207` | Slice K final: retention plus docs/validation/test corrections | security PASS; contract PASS (delta on `1a5d207`) |
 
 ## GitHub Issue coordination
 
@@ -39,7 +40,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `aac6f2e`; remote HEAD verified; CI run pending |
+| Last pushed checkpoint | `f0e43d3`; remote HEAD verified; CI run pending |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -457,7 +458,7 @@ pushed.
   runs, so a rate-limited request's bytes reach the adapter but are never parsed by the
   application.
 
-## Vertical slice H — structured request metrics (implemented at this tree; review pending)
+## Vertical slice H — structured request metrics (implemented and pushed)
 
 - **Registry.** `src/app/metrics.ts` is a Web-standard, dependency-free, in-memory
   registry. It records total requests, fixed route labels, HTTP status counts, stable
@@ -509,7 +510,7 @@ pushed.
   HTTP request duration only. Disabling the endpoint stops neither counting nor memory
   use (the registry is bounded by the fixed label/status/error sets).
 
-## Vertical slice I — human account sessions (candidate; review pending)
+## Vertical slice I — human account sessions (implemented and pushed)
 
 - **Scope.** An owner account with a password can sign in, read its session, use the
   session on the session routes, and sign out. Registration, email verification,
@@ -572,7 +573,7 @@ pushed.
   browser UI, registration,
   recovery, OAuth, or speaker delegation exists.
 
-## Vertical slice J — OAuth 2.1 authorization-server core (candidate; review pending)
+## Vertical slice J — OAuth 2.1 authorization-server core (implemented and pushed)
 
 - **Scope.** A signed-in human account can authorize a dynamically registered public
   client to act as one selected speaker in one selected project with only
@@ -673,9 +674,9 @@ pushed.
   operator `prune`. No CORS, JWT/OIDC,
   implicit/client-credentials/device flows, consent management UI, or admin OAuth
   endpoints. ChatGPT Web, D1/Workers, and real browser verification remain
-  external/unverified. Independent review is pending.
+  external/unverified. Independent review passed on code tree `a439df4`.
 
-## Vertical slice K — operator-driven session/OAuth retention (candidate; review pending)
+## Vertical slice K — operator-driven session/OAuth retention (implemented and pushed)
 
 - **Scope.** One explicit CLI command, `prune`, idempotently deletes only definitely
   unusable session and OAuth rows after a grace period. There is no timer, scheduler,
@@ -694,7 +695,8 @@ pushed.
   refresh row. Associated `credential_project_grants` are removed with the credential.
 - **Transaction and concurrency.** All deletes run in one `BEGIN IMMEDIATE` transaction
   in FK-safe order (codes → refresh tokens → grants/associations → OAuth credentials →
-  sessions), each bounded per table. The eligible OAuth credential ids are captured
+  sessions), each artifact table bounded by `limit`; grants are removed with their
+  credential and are not counted separately. The eligible OAuth credential ids are captured
   under the write lock while the association still exists, then deleted with
   conditional predicates, so a speaker credential can never be classified as OAuth and
   a concurrent run cannot widen the set. Any failure rolls back and exits non-zero.
@@ -739,7 +741,9 @@ pushed.
   association and grants, so refresh and RFC 7009 revocation remain effective; the
   credential, association, and grants are deleted together once the refresh row ages
   out past grace. There is no automatic scheduling and no audit row is written for
-  prune. No blob/message/audit deletion is added. Independent review is pending.
+  prune. No blob/message/audit deletion is added. Independent review passed on security
+  and contract for trees `9c5991e` and `1a5d207`; the remaining audit P2s were
+  documentation/state wording corrected in this checkpoint.
 
 ## Implemented and verified at this tree
 
@@ -984,10 +988,10 @@ Do not infer any of these from local MCP behavior or from another plan.
   conversation-level ChatGPT tool invocation remain unimplemented and unverified. A
   session cannot act as a speaker credential; an OAuth access token is a speaker
   credential, not a session.
-- Slice-J audit debt (candidate, non-blocking): OAuth registration, per-client,
+- Slice-J audit debt (non-blocking): OAuth registration, per-client,
   global token-exchange, and revocation limits are process-local and reset on restart;
-  `oauth_clients`, expired/consumed authorization codes, rotated/expired refresh rows,
-  and `oauth_token_clients` rows grow without bound because no purge task exists;
+  `oauth_clients` rows still grow without bound (`prune` covers expired/consumed codes,
+  rotated/expired refresh rows, and `oauth_token_clients`, not registered clients);
   concurrent refresh with the same token can revoke a family; the consent form has no
   nonce, so a same-session replay can mint multiple codes with identical rights
   (codes remain single-use and PKCE-bound); the revoke bucket is global and checked
@@ -998,6 +1002,14 @@ Do not infer any of these from local MCP behavior or from another plan.
   `/api/v1/session` JSON/content-type rule itself is unchanged); OAuth
   consent/code/token/revocation events are not written to `audit_events` in this
   slice; D1/Workers and real ChatGPT/browser behavior are unverified.
+- Slice-K audit debt (non-blocking): `BEGIN IMMEDIATE` has no D1 batch equivalent, so
+  `prune` is Node/SQLite-only; there is no scheduler and no audit row by design;
+  `oauth_clients` rows are not pruned; the user-facing out-of-range grace error still
+  says "representable date range" although the accepted bound is
+  `MAX_DATE_MS - SESSION_IDLE_MS`; the exact accepted boundary is probe-verified but not
+  committed as a test; a database pruned by the unreleased pre-fix branch (never on
+  `origin/main`) could hold an association-less OAuth credential that this prune cannot
+  classify and would need a one-time repair.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
   unauthenticated uploads still add memory pressure. A reverse-proxy body limit remains
