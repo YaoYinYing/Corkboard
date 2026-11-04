@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A, B, and C pushed; slice D implemented at this candidate |
-| Last pushed checkpoint | `0052909` (audited tree `8ffff4a`) on `origin/main`; CI run 41825517323 |
-| Branch | `slice-d-revocation` (candidate; not pushed) |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: security PASS + contract PASS on tree `8ffff4a`. Slice D: audits pending on this exact tree |
-| Next milestone | Independent slice-D audits; then D1/R2 parity and Phase 5 |
+| Phase | 0 complete; vertical slices A, B, C, and D implemented and pushed |
+| Last pushed checkpoint | `17caa65` (audited tree `bcc6a73`) on `origin/main`; CI run 41833362751 |
+| Branch | `main` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: security PASS + contract PASS on tree `8ffff4a`. Slice D: security PASS + contract PASS on tree `bcc6a73` |
+| Next milestone | D1/R2 parity, doctor/observability, and Phase 5 (MCP/OAuth/ChatGPT Web plugin) |
 
 ## Checkpoint history
 
@@ -22,6 +22,7 @@ as the work it describes.
 | `b5c421d` | `048065f` | Vertical slice A: encrypted messaging, ordered replay, REST API, CLI | security PASS; contract PASS |
 | `7b5a63b` | `2bfaa9b` | Vertical slice B: body expiry tombstones, audited expiry endpoint, cleanup worker | security PASS; contract PASS |
 | `0052909` | `8ffff4a` | Vertical slice C: credential-project grants, safe bootstrap, transactional migrations | security PASS; contract PASS |
+| `17caa65` | `bcc6a73` | Vertical slice D: revocation re-checks, multi-process evidence, fail-closed filesystem | security PASS; contract PASS |
 
 ## GitHub Issue coordination
 
@@ -29,8 +30,8 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `0052909`; remote HEAD verified; CI run 41825517323 |
-| Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8), next run 2026-11-04 04:55 local; **not durable across process exit**, auto-expires after 7 days |
+| Last pushed checkpoint | `17caa65`; remote HEAD verified; CI run 41833362751 |
+| Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
 Do not treat later phases as verified until their checkpoints exist.
@@ -455,13 +456,20 @@ Do not infer any of these from local MCP behavior or from another plan.
   between them can lose the audit row (authorization still denies by default).
 - Revocation re-checks narrow but do not eliminate TOCTOU. A revocation that commits
   after the final re-check but before the atomic SQL statement (send finalization,
-  receipt INSERT, expiry UPDATE) or before the plaintext response is written is not
+  receipt INSERT, expiry UPDATE), after the re-check but before the already-expired
+  audit-repair/blob-delete path, or before the plaintext response is written is not
   prevented. No atomic-revocation guarantee is claimed. `getMessageBody` can also still
   return a body that expires immediately after its state check, as recorded under
   slice B.
 - Production filesystem verification covers directories and files present at startup;
   WAL/SHM sidecars are checked when present and are created `0600` by the adapter. It
   does not detect a mode change made by another privileged process after startup.
+- Slice-D audit P2 debt: canonical checks cover final path components only (an
+  ancestor-directory symlink is not rejected); the check-to-open TOCTOU remains; the
+  symlinked `-shm` case lacks a committed test; `init` on a symlinked `--data-dir`
+  follows and chmods the target (secrets are not written there, and `serve` rejects it);
+  metadata-only reads remain request-start-only by design; a bounded `..` filesystem
+  test variant is still missing.
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large

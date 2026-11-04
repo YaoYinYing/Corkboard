@@ -24,7 +24,8 @@ prevented regression; when to remove the advice.
   revocation landing after the final re-check and before the atomic SQL statement; no
   atomic-revocation guarantee is claimed.
 - **Test note:** the interleavings are deterministic by wrapping `BlobStore.put/get` in
-  `tests/integration/messages.test.ts`.
+  `tests/integration/messages.test.ts` and `SqlDatabase.first` in
+  `tests/integration/expiry.test.ts`.
 - **Remove when:** Later versions use an authorization epoch checked inside the same
   atomic statement (not expected for SQLite/D1).
 

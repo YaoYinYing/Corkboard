@@ -92,7 +92,7 @@ survive a changed pepper.
 
 Credential revocation, grant deletion, membership removal, and message expiry are read
 from storage on every authorization decision; there is no authorization cache. Every
-path authorizes at request start, and the three paths with a durable effect or a
+path authorizes at request start, and the four paths with a durable effect or a
 plaintext return re-evaluate immediately before that effect:
 
 - **Send.** `message.send` is re-authorized before the finalization `UPDATE` that

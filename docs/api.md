@@ -77,8 +77,8 @@ active, yields `NOT_FOUND`. A credential that is already revoked before authenti
 yields `UNAUTHENTICATED`.
 
 This is not an atomic-revocation guarantee: a revocation that commits after the final
-re-check but before the atomic SQL statement (or before the response is written) is not
-prevented, and no stronger guarantee is claimed.
+re-check but before the atomic SQL statement, the already-expired audit-repair/blob
+deletion, or the response write is not prevented, and no stronger guarantee is claimed.
 
 The bootstrap CLI `issue-key` accepts one or more `--project <id>` occurrences and
 `--scopes <comma-separated>`; without `--scopes` the default remains `project.read`,

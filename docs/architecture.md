@@ -214,8 +214,8 @@ active) yields `NOT_FOUND`.
 
 This narrows the stale-authorization window; it is **not** an atomic-revocation
 guarantee. A revocation that commits after the final re-check but before the atomic SQL
-statement (or before the plaintext response write) is not prevented, and no such
-stronger guarantee is claimed. There is no authorization cache: credential, grant,
+statement, the already-expired audit-repair/blob deletion, or the plaintext response
+write is not prevented, and no such stronger guarantee is claimed. There is no authorization cache: credential, grant,
 membership, speaker, account, and project state are read from storage on each decision.
 
 ## Deletion and expiry
