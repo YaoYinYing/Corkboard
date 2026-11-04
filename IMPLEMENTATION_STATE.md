@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–K implemented and pushed; slice L candidate unpushed |
-| Last pushed checkpoint | `7df76f7` (slice K final docs/state tail; audited code tree `1a5d207`) on `origin/main`; CI pending |
-| Branch | `slice-l-dashboard`, audit-fix candidate `bf79cd0` (tree `f7c516a`) on top of `43d1937`, independent review PENDING; `origin/main` and the branch base are `7df76f7` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice L: candidate `43d1937` on tree `d6fae0b`; security PASS with three P2s and contract PASS with six P2s on tree `905d2cb` (head `b9187ed`); audit-fix candidate `bf79cd0` on tree `f7c516a`, independent review PENDING |
-| Next milestone | Independent review of the slice-L dashboard; ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
+| Phase | 0 complete; vertical slices A–L implemented and pushed |
+| Last pushed checkpoint | `45e5637` (read-only dashboard, audited code tree `5ea2439`) on `origin/main`; CI pending |
+| Branch | `main`, clean; the `slice-l-dashboard` four-commit candidate was fast-forwarded |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
 
@@ -33,7 +33,8 @@ as the work it describes.
 | `691eca2` | `6f403f7` | Vertical slice K: operator-run bounded session/OAuth retention (`prune`) | superseded by later K commits |
 | `31ac9fb` | `e6fbd45` | Slice K security audit fixes: retain OAuth ownership with a live refresh row, bound grace to the Date range, add regression/exact-boundary tests | superseded by final K commit |
 | `f0e43d3` | `1a5d207` | Slice K final: retention plus docs/validation/test corrections | security PASS; contract PASS (delta on `1a5d207`) |
-| `43d1937` | `d6fae0b` | Vertical slice L: read-only human web dashboard (en/zh, session-derived viewer, server-rendered, explicit body reveal) | independent review PENDING |
+| `43d1937` | `d6fae0b` | Vertical slice L: read-only human web dashboard (en/zh, session-derived viewer, server-rendered, explicit body reveal) | superseded by final L commit |
+| `45e5637` | `5ea2439` | Slice L final: read-only session viewer rights, bounded login redirect, parsed capability listing, docs/test corrections | security PASS; contract PASS (delta on `5ea2439`) |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | independent review PENDING |
 
 ## GitHub Issue coordination
@@ -42,7 +43,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `7df76f7`; remote HEAD verified; CI run pending |
+| Last pushed checkpoint | `45e5637`; remote HEAD verified; CI run pending |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
@@ -781,10 +782,11 @@ pushed.
   expired-form retry page. No message content or token is logged.
 - **i18n and accessibility.** en/zh catalogs cover every string; `lang` is `en` or
   `zh-Hans` with `dir="ltr"`; dates use `Intl.DateTimeFormat` in UTC; the visible
-  switch preserves the path. Landmarks, heading hierarchy, skip link, labeled
-  controls, description lists, text (not color-only) state, and visible focus are
-  present and asserted in committed DOM tests. No automated axe audit has been run
-  and no WCAG conformance level is claimed.
+  switch preserves the path. Skip link, header, labeled nav, `main` focus target, and
+  language `aria-current` are asserted in committed DOM tests. Heading hierarchy,
+  description lists, text (not color-only) state, and visible focus are implemented in
+  markup/CSS but verified by inspection, not committed tests. No automated axe audit
+  has been run and no WCAG conformance level is claimed.
 - **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (339 tests: 338 pass, 1
   pre-existing skip for the live D1 marker); `npm run build` exit 0. New tests cover
   eligible/removed/foreign authorization, uniform 404, revoked/expired/suspended
@@ -1087,6 +1089,16 @@ Do not infer any of these from local MCP behavior or from another plan.
   committed as a test; a database pruned by the unreleased pre-fix branch (never on
   `origin/main`) could hold an association-less OAuth credential that this prune cannot
   classify and would need a one-time repair.
+- Slice-L audit debt (non-blocking): the dashboard is read-only, Node/SQLite-only, and
+  has no pager beyond a 100-project cap, filters/search/replay/attachments, or
+  automated axe/WCAG audit; browser evidence is local headless Chrome, not an
+  independent cross-browser run. `listSessionProjects` fetches all of an account's
+  memberships and paginates in JavaScript (bounded today because membership writes are
+  operator-only); restore a SQL bound before adding membership management. The login
+  double-submit cookie is path-scoped rather than `__Host-`, so the CSRF guarantee
+  assumes a single registrable domain; `Origin: null` and the scheme are treated as
+  "no assertion" and rely on `Sec-Fetch-Site` plus the double-submit value; the host
+  comparison assumes the reverse proxy preserves `Host`.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
   unauthenticated uploads still add memory pressure. A reverse-proxy body limit remains
@@ -1101,9 +1113,9 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Project listing uses `instr` over app-written capability JSON for pagination.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
-- Human account sessions are implemented without a general browser UI (slice I). The
-  OAuth core (slice J) adds only the minimal sign-in/consent pages; ChatGPT Web is not
-  implemented.
+- Human account sessions are implemented. Slice L adds a read-only browser dashboard
+  (project list, timeline, explicit body reveal, en/zh) on the same session auth. The
+  OAuth core (slice J) adds sign-in/consent pages; ChatGPT Web is not implemented.
 - Slice-G audit debt: idle/LRU eviction resets a bucket to full burst, which can exceed
   the configured sustained rate when `burst > 2 * perMinute` (non-default config);
   authentication/verification work and unauthenticated requests are not rate limited;

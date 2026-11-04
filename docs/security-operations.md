@@ -166,8 +166,9 @@ written) is not prevented; no stronger guarantee is claimed. See
   accepted as a bearer token. Speaker write operations still require a separately
   issued scoped credential.
 - **Lifetime and revocation.** A session expires after **12 hours absolute** and after
-  **30 minutes idle** (refreshed lazily by accepted `GET /api/v1/session` requests;
-  `DELETE` validates and revokes without refreshing). Sign-out sets
+  **30 minutes idle** (refreshed lazily by accepted session-using requests:
+  `GET /api/v1/session` and authenticated dashboard page GETs; `DELETE` validates and
+  revokes without refreshing). Sign-out sets
   `revoked_at` for that row only and clears the cookies; other sessions stay valid.
   Revoking an account/session directly in SQL takes effect on the next request because
   no authorization cache exists.
@@ -561,7 +562,8 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
 - Human sessions are implemented as server-side rows with 12-hour absolute / 30-minute
   idle expiry and per-session revocation. The OAuth 2.1 authorization-server core is
   implemented (dynamic public clients, PKCE, rotating refresh tokens, revocation), but
-  the ChatGPT Web plugin experience is not implemented or verified. There is no browser
-  UI beyond the OAuth sign-in/consent pages, registration, email verification, or
-  password reset. Login rate limiting and outcome uniformity are bounded but not
+  the ChatGPT Web plugin experience is not implemented or verified. There is no
+  write/admin browser UI; slice L provides a read-only dashboard (project list,
+  timeline, explicit body reveal) on the same session auth. Registration, email
+  verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not
   perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.

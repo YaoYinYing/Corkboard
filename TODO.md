@@ -342,7 +342,7 @@ recorded there.
 ### Phase 3 — Identity, authorization and account security (**P0**)
 
 - [ ] Define actors (human account, platform admin, project owner/member, speaker, bearer credential, OAuth grant) and explicit permissions matrix.
-- [x] Implement bootstrap owner creation and human password sign-in: PBKDF2 password verification, normalized unique email lookup, server-managed sessions, CSRF for cookie state changes, `HttpOnly`/`Secure`/`SameSite=Strict` cookies, per-email login rate limits, and uniform anti-enumeration failures. Sessions cannot act as speaker credentials. (Slice I; no web UI.)
+- [x] Implement bootstrap owner creation and human password sign-in: PBKDF2 password verification, normalized unique email lookup, server-managed sessions, CSRF for cookie state changes, `HttpOnly`/`Secure`/`SameSite=Strict` cookies, per-email login rate limits, and uniform anti-enumeration failures. Sessions cannot act as speaker credentials. (Slice I; read-only dashboard added in slice L.)
 - [ ] Implement default invite-only registration, email verification, and recovery-token handling.
 - [ ] Implement 256-bit speaker key creation, hash/pepper verifier, once-only display, TTL, key rotation/revocation and emergency project-disable path.
 - [x] Enforce authorization at service layer and again at blob access with no metadata leaks on forbidden IDs. Model project membership as server-provisioned and revocable. (Credential-to-project grants are explicit and deny-by-default per Issue #2; a membership alone grants no credential.)

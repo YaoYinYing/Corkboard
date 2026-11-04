@@ -325,8 +325,8 @@ with the existing service functions.
   memberships in the target project whose speaker is owned by the session account,
   where project, speaker, and account are active, and whose capability set includes
   the required read. It returns the normal `Principal` shape with
-  `sessionViewer: true`, a synthetic `session:` credential id, and the membership
-  capabilities as `scopes`. `sessionAccountPrincipal` is the same shape without a
+  `sessionViewer: true`, a synthetic `session:` credential id, and only the requested
+  read scope as `scopes`. `sessionAccountPrincipal` is the same shape without a
   selected speaker for the cross-project listing.
 - **Authorization reuse.** `authorizeProject` has an explicit session-viewer branch
   that re-checks project, membership, speaker ownership, and account state, then
