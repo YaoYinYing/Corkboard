@@ -10,7 +10,7 @@ as the work it describes.
 | --- | --- |
 | Phase | 0 complete; vertical slices A–J implemented and pushed; slice K (operator retention) candidate, review pending |
 | Last pushed checkpoint | `aac6f2e` (OAuth 2.1 core; audited code tree `a439df4`, docs-only tail) on `origin/main`; CI pending |
-| Branch | `main`, clean; the `slice-j-oauth` three-commit candidate was fast-forwarded |
+| Branch | `slice-k-retention`, clean; slice-K capability commit `691eca2` (tree `6f403f7`; commit trailer candidate `d9805b9`), independent review pending |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
@@ -30,6 +30,7 @@ as the work it describes.
 | `5d0ae9f` | `f45a3b4` | Vertical slice H: metrics token hardening, fixed-length comparison, adapter recording isolation | security PASS; contract PASS |
 | `9a4f6c5` | `cc8df35` | Vertical slice I: human account sessions (PBKDF2 login, cookie + CSRF, revocation) | security PASS; contract PASS |
 | `aac6f2e` | `4867ed0` | Vertical slice J: OAuth 2.1 authorization server (discovery, DCR, PKCE, consent, rotation, revocation) | security PASS; contract PASS on code tree `a439df4`; docs-only tail |
+| `691eca2` | `6f403f7` | Vertical slice K: operator-run bounded session/OAuth retention (`prune`) | security PENDING; contract PENDING |
 
 ## GitHub Issue coordination
 

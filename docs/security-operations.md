@@ -490,6 +490,11 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
 ## Known limits
 
 - The operator can read all message bodies.
+- Retention (`prune`) is explicit, operator-run, and Node/SQLite-only; it writes no
+  audit row and never deletes blobs, messages, receipts, or audit events. A
+  revoked/expired OAuth access credential that still has a live refresh row is retained
+  but loses its `oauth_token_clients` association, so a later run cannot reclassify it;
+  the row stays inert. There is no automatic scheduling.
 - Hard deletion of metadata/backups is not implemented; expiry is a tombstone, not
   comprehensive erasure.
 - Rate limiting is per-process and per-credential; there is no distributed/global
