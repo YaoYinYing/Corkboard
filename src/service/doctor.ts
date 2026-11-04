@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { isValidBlobKey } from "../storage/blobs.ts";
 import {
   expectedMigrationVersions,
+  expectedSchemaTables,
   openSqliteDatabaseReadOnly,
   type ReadOnlySqlDatabase,
 } from "../storage/db.ts";
@@ -52,7 +53,7 @@ export interface DoctorReport {
   } | null;
   blobs: {
     files: number;
-    referenced: number;
+    referenced: number | null;
     orphaned: number | null;
     missing: number | null;
     expired_pending_deletion: number | null;
@@ -60,8 +61,8 @@ export interface DoctorReport {
   };
   provisional: {
     stuck_minutes: number;
-    count: number;
-    samples: Array<{ id: string; age_seconds: number }>;
+    count: number | null;
+    samples: Array<{ id: string; age_seconds: number }> | null;
   };
   issues: DoctorIssue[];
 }
@@ -82,16 +83,6 @@ export class DoctorError extends Error {
 
 const KEY_BYTES = 32;
 const SAMPLE_LIMIT = 10;
-// Identity plus the two tables the cross-checks depend on. A database that
-// claims every migration but lacks them is still incomplete.
-const REQUIRED_TABLES = [
-  "schema_migrations",
-  "messages",
-  "message_receipts",
-  "credentials",
-  "credential_project_grants",
-  "body_objects",
-] as const;
 
 function lstatOrUndefined(path: string): ReturnType<typeof lstatSync> | undefined {
   try {
@@ -135,6 +126,9 @@ function mapDatabaseError(error: unknown): DoctorError {
   if (/inconsistent write-ahead log sidecars/.test(message)) {
     return new DoctorError("database has inconsistent write-ahead log sidecars");
   }
+  if (/sidecar is not a regular file/.test(message)) {
+    return new DoctorError("database sidecar is not a regular file");
+  }
   return new DoctorError("cannot read the database read-only");
 }
 
@@ -146,6 +140,7 @@ async function count(db: ReadOnlySqlDatabase, table: string): Promise<number> {
 async function inspectDatabase(
   db: ReadOnlySqlDatabase,
   expected: number[],
+  expectedTables: readonly string[],
 ): Promise<{
   schema: DoctorReport["schema_versions"];
   schemaIssueCount: number;
@@ -159,7 +154,7 @@ async function inspectDatabase(
     "SELECT name FROM sqlite_master WHERE type = 'table'",
   );
   const present = new Set(tables.map((row) => row.name));
-  const missingTables = REQUIRED_TABLES.filter((table) => !present.has(table));
+  const missingTables = expectedTables.filter((table) => !present.has(table));
 
   const applied: number[] = [];
   if (present.has("schema_migrations")) {
@@ -254,6 +249,7 @@ function inspectBlobs(
   let files = 0;
   let nonFiles = 0;
   const diskKeys = new Set<string>();
+  const referencedCount = referenced === null ? null : referenced.length;
 
   if (blobEntry === undefined) {
     // No blob directory yet: nothing on disk to reconcile.
@@ -297,7 +293,7 @@ function inspectBlobs(
   return {
     blobs: {
       files,
-      referenced: referenced?.length ?? 0,
+      referenced: referencedCount,
       orphaned,
       missing,
       expired_pending_deletion: expiredPendingDeletion,
@@ -347,6 +343,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const env = options.env ?? process.env;
   const now = options.now?.() ?? new Date();
   const expected = expectedMigrationVersions();
+  const expectedTables = expectedSchemaTables();
   const key = keyPresence(env);
 
   let db: ReadOnlySqlDatabase | undefined;
@@ -361,8 +358,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     null;
   let provisional: DoctorReport["provisional"] = {
     stuck_minutes: options.stuckMinutes,
-    count: 0,
-    samples: [],
+    count: null,
+    samples: null,
   };
   let schemaIssueCount = expected.length;
 
@@ -383,7 +380,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       throw mapDatabaseError(error);
     }
     try {
-      const inspected = await inspectDatabase(db, expected);
+      const inspected = await inspectDatabase(db, expected, expectedTables);
       schema = inspected.schema;
       schemaIssueCount = inspected.schemaIssueCount;
       database = inspected.database;
@@ -391,7 +388,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       if (inspected.schema.complete) {
         provisional = await inspectProvisional(db, options.stuckMinutes, now);
       } else {
-        provisional = { stuck_minutes: options.stuckMinutes, count: 0, samples: [] };
+        provisional = { stuck_minutes: options.stuckMinutes, count: null, samples: null };
       }
     } catch (error) {
       throw mapDatabaseError(error);
@@ -429,7 +426,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       count: blobInspection.blobs.expired_pending_deletion ?? 0,
     });
   }
-  if (provisional.count > 0) {
+  if (provisional.count !== null && provisional.count > 0) {
     issues.push({ code: "STUCK_PENDING", count: provisional.count });
   }
   if (keyMissing > 0) issues.push({ code: "KEY_MISSING", count: keyMissing });
@@ -477,15 +474,16 @@ export function formatDoctorReport(report: DoctorReport): string[] {
 
   const b = report.blobs;
   lines.push(
-    `blobs: files ${b.files}; referenced ${b.referenced}; ` +
+    `blobs: files ${b.files}; referenced ${b.referenced ?? "n/a"}; ` +
       `orphaned ${b.orphaned ?? "n/a"}; missing ${b.missing ?? "n/a"}; ` +
       `expired_pending_deletion ${b.expired_pending_deletion ?? "n/a"}; blob_dir_non_files ${b.blob_dir_non_files}`,
   );
+  const samples = report.provisional.samples;
   lines.push(
-    `provisional: ${report.provisional.count} pending older than ${report.provisional.stuck_minutes} minutes` +
-      (report.provisional.samples.length === 0
+    `provisional: ${report.provisional.count ?? "n/a"} pending older than ${report.provisional.stuck_minutes} minutes` +
+      (samples === null || samples.length === 0
         ? ""
-        : `; sample ${report.provisional.samples
+        : `; sample ${samples
             .map((sample) => `${sample.id} (${sample.age_seconds}s)`)
             .join(", ")}`),
   );

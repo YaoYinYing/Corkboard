@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { generateSpeakerToken, hashSecret } from "../../src/auth/credentials.ts";
@@ -256,6 +257,102 @@ async function seedSentAndRead(dataDir: string): Promise<void> {
   }
 }
 
+function sha256File(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+// Add a multi-page probe table so page-level corruption is deterministic while
+// doctor's real count queries still read intact pages.
+async function seedProbeDatabase(dataDir: string): Promise<string> {
+  await seedSentAndRead(dataDir);
+  const dbPath = join(dataDir, "corkboard.sqlite");
+  const db = await openSqliteDatabase(dbPath);
+  try {
+    await db.exec("CREATE TABLE doctor_probe (id INTEGER PRIMARY KEY, payload TEXT)");
+    for (let index = 0; index < 200; index += 1) {
+      await db.run("INSERT INTO doctor_probe (payload) VALUES (?)", [
+        `probe-${index}-`.padEnd(180, "x"),
+      ]);
+    }
+    await db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  } finally {
+    db.close();
+  }
+  rmSync(`${dbPath}-wal`, { force: true });
+  rmSync(`${dbPath}-shm`, { force: true });
+  return dbPath;
+}
+
+type CorruptOutcome = "ok" | "non-ok" | "throws" | "unreadable";
+
+// Flip one byte and classify a fresh copy. The sqlite_master read must still
+// work for the "throws" case to specifically exercise `PRAGMA integrity_check`.
+function trialCorruption(
+  original: Buffer,
+  offset: number,
+  scratchDir: string,
+): CorruptOutcome {
+  const candidate = Buffer.from(original);
+  candidate[offset] = (candidate[offset] ?? 0) ^ 0xff;
+  const path = join(scratchDir, "candidate.sqlite");
+  writeFileSync(path, candidate);
+  rmSync(`${path}-wal`, { force: true });
+  rmSync(`${path}-shm`, { force: true });
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    try {
+      db.prepare("SELECT name FROM sqlite_master WHERE type = ?").all("table");
+    } catch {
+      return "unreadable";
+    }
+    try {
+      const rows = db.prepare("PRAGMA integrity_check").all() as Array<{
+        integrity_check: string;
+      }>;
+      if (rows.length === 1 && rows[0]?.integrity_check === "ok") return "ok";
+      // A reportable corruption must leave doctor's own count queries readable.
+      db.prepare("SELECT COUNT(*) AS n FROM messages").get();
+      return "non-ok";
+    } catch {
+      return "throws";
+    }
+  } finally {
+    db.close();
+  }
+}
+
+// Bounded deterministic search over the first 16 pages. The fixed schema/seed
+// makes the same offsets reproduce; the bound keeps a bad seed from hanging.
+function findCorruptions(
+  dbPath: string,
+  scratchDir: string,
+): { report: Buffer; throws: Buffer } {
+  const original = readFileSync(dbPath);
+  let pageSize = original.readUInt16BE(16);
+  if (pageSize === 1) pageSize = 65_536;
+  if (pageSize < 512) pageSize = 4096;
+  const start = pageSize;
+  const end = Math.min(original.length, start + 16 * pageSize);
+  let report: Buffer | undefined;
+  let throws: Buffer | undefined;
+  for (let offset = start; offset < end; offset += 1) {
+    const outcome = trialCorruption(original, offset, scratchDir);
+    if (outcome === "non-ok" && report === undefined) {
+      const candidate = Buffer.from(original);
+      candidate[offset] = (candidate[offset] ?? 0) ^ 0xff;
+      report = candidate;
+    } else if (outcome === "throws" && throws === undefined) {
+      const candidate = Buffer.from(original);
+      candidate[offset] = (candidate[offset] ?? 0) ^ 0xff;
+      throws = candidate;
+    }
+    if (report !== undefined && throws !== undefined) break;
+  }
+  assert.ok(report, "found a deterministic non-ok integrity corruption");
+  assert.ok(throws, "found a deterministic integrity_check throw");
+  return { report, throws };
+}
+
 interface DoctorJson {
   schema_versions: { applied: number[]; expected: number[]; missing: number[]; complete: boolean };
   key_presence: {
@@ -280,13 +377,17 @@ interface DoctorJson {
   } | null;
   blobs: {
     files: number;
-    referenced: number;
+    referenced: number | null;
     orphaned: number | null;
     missing: number | null;
     expired_pending_deletion: number | null;
     blob_dir_non_files: number;
   };
-  provisional: { stuck_minutes: number; count: number; samples: Array<{ id: string; age_seconds: number }> };
+  provisional: {
+    stuck_minutes: number;
+    count: number | null;
+    samples: Array<{ id: string; age_seconds: number }> | null;
+  };
   issues: Array<{ code: string; count: number }>;
 }
 
@@ -376,6 +477,7 @@ test("doctor reports orphan, missing, expired-pending and stuck rows with bounde
     assert.equal(report.blobs.missing, 1);
     assert.equal(report.blobs.expired_pending_deletion, 1);
     assert.equal(report.provisional.count, 12);
+    assert.ok(report.provisional.samples !== null);
     assert.equal(report.provisional.samples.length, 10, "samples are bounded");
     for (const sample of report.provisional.samples) {
       assert.match(sample.id, /^msg_stuck_/);
@@ -432,6 +534,9 @@ test("doctor does not create a data directory or initialize an absent database",
   const missingReport = parseJson(missing);
   assert.equal(missingReport.database, null);
   assert.ok(missingReport.issues.some((issue) => issue.code === "SCHEMA_INCOMPLETE"));
+  assert.equal(missingReport.blobs.referenced, null, "not measured, not zero");
+  assert.equal(missingReport.provisional.count, null, "not measured, not zero");
+  assert.equal(missingReport.provisional.samples, null);
 
   // Key material is reported only as presence/shape booleans.
   const invalidPepper = ["not", "a", "real", "key"].join("-");
@@ -533,9 +638,8 @@ test("the built CLI runs doctor against a real data directory", (t) => {
   const dataDir = join(root, "data");
   return (async () => {
     await seedSentAndRead(dataDir);
-    if (!existsSync(builtCli)) {
-      execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "pipe" });
-    }
+    // Build unconditionally so this cannot pass against stale dist output.
+    execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "pipe" });
     const result = runCli(
       builtCli,
       ["doctor", "--data-dir", dataDir, "--json"],
@@ -548,16 +652,207 @@ test("the built CLI runs doctor against a real data directory", (t) => {
   })();
 });
 
-test(
-  "doctor reports a failed integrity check",
-  {
-    skip:
-      "Corrupting a SQLite page deterministically is not portable across SQLite " +
-      "builds; a corrupt file can also make the pragma throw, which is covered as " +
-      "an unreadable database (exit 2) rather than a report.",
-  },
-  () => {
-    // No-op placeholder; the issue path is exercised by the DATABASE_INTEGRITY_FAILED
-    // assembly in src/service/doctor.ts.
-  },
-);
+test("doctor reports a non-ok integrity check and exits 2 when it throws", (t) => {
+  const root = tempDir(t);
+  const env = withoutCorkboardEnv(keyEnv());
+  return (async () => {
+    const baseDir = join(root, "base");
+    const dbPath = await seedProbeDatabase(baseDir);
+    const scratch = join(root, "scratch");
+    mkdirSync(scratch, { recursive: true, mode: 0o700 });
+    const corruptions = findCorruptions(dbPath, scratch);
+
+    // Non-ok pragma result: a report with DATABASE_INTEGRITY_FAILED, exit 1.
+    const reportDir = join(root, "report-data");
+    mkdirSync(reportDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(reportDir, "corkboard.sqlite"), corruptions.report);
+    const reportResult = runCli(
+      sourceCli,
+      ["doctor", "--data-dir", reportDir, "--json"],
+      env,
+    );
+    assert.equal(reportResult.status, 1, reportResult.stderr);
+    const report = parseJson(reportResult);
+    assert.notEqual(report.database?.integrity, "ok");
+    const issue = report.issues.find(
+      (item) => item.code === "DATABASE_INTEGRITY_FAILED",
+    );
+    assert.ok(issue, "DATABASE_INTEGRITY_FAILED is reported");
+    assert.ok((issue?.count ?? 0) >= 1);
+    assert.equal(reportResult.stdout.includes(SUMMARY), false);
+    assert.equal(reportResult.stdout.includes(BODY), false);
+    assert.equal(existsSync(join(reportDir, "corkboard.sqlite-wal")), false);
+    assert.equal(existsSync(join(reportDir, "corkboard.sqlite-shm")), false);
+
+    // A pragma that throws cannot produce a report: exit 2, stable message.
+    const throwDir = join(root, "throw-data");
+    mkdirSync(throwDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(throwDir, "corkboard.sqlite"), corruptions.throws);
+    const throwResult = runCli(
+      sourceCli,
+      ["doctor", "--data-dir", throwDir, "--json"],
+      env,
+    );
+    assert.equal(throwResult.status, 2);
+    assert.match(throwResult.stderr, /cannot read the database read-only/);
+    assert.equal(/^\s+at /m.test(throwResult.stderr), false, "no stack trace");
+  })();
+});
+
+test("doctor treats every migration table as required", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  return (async () => {
+    await seedSentAndRead(dataDir);
+    const dbPath = join(dataDir, "corkboard.sqlite");
+    const db = await openSqliteDatabase(dbPath);
+    try {
+      await db.exec("DROP TABLE audit_events");
+      await db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      db.close();
+    }
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+
+    const result = runCli(
+      sourceCli,
+      ["doctor", "--data-dir", dataDir, "--json"],
+      withoutCorkboardEnv(keyEnv()),
+    );
+    assert.equal(result.status, 1, result.stderr);
+    const report = parseJson(result);
+    assert.deepEqual(report.schema_versions.missing, [], "all migration versions applied");
+    assert.equal(report.schema_versions.complete, false, "a core table is missing");
+    assert.equal(report.database?.integrity, "ok");
+    assert.equal(report.database?.counts, null);
+    assert.ok(
+      report.issues.some((issue) => issue.code === "SCHEMA_INCOMPLETE"),
+      "SCHEMA_INCOMPLETE covers a missing core table",
+    );
+  })();
+});
+
+test("doctor rejects symlinked WAL sidecars without following them", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const walTarget = join(root, "wal-target");
+  const shmTarget = join(root, "shm-target");
+  writeFileSync(walTarget, "wal-target-bytes");
+  writeFileSync(shmTarget, "shm-target-bytes");
+  return (async () => {
+    await seedSentAndRead(dataDir);
+    const dbPath = join(dataDir, "corkboard.sqlite");
+    symlinkSync(walTarget, `${dbPath}-wal`);
+    symlinkSync(shmTarget, `${dbPath}-shm`);
+
+    const result = runCli(
+      sourceCli,
+      ["doctor", "--data-dir", dataDir],
+      withoutCorkboardEnv(keyEnv()),
+    );
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /sidecar is not a regular file/);
+    assert.equal(/^\s+at /m.test(result.stderr), false, "no stack trace");
+    assert.equal(readFileSync(walTarget, "utf8"), "wal-target-bytes");
+    assert.equal(readFileSync(shmTarget, "utf8"), "shm-target-bytes");
+  })();
+});
+
+test("doctor reads a live uncheckpointed WAL without changing DB/WAL/blob bytes", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  return (async () => {
+    await seedSentAndRead(dataDir);
+    const dbPath = join(dataDir, "corkboard.sqlite");
+    const writer = await openSqliteDatabase(dbPath);
+    try {
+      const liveKey = "L".repeat(20);
+      const timestamp = new Date().toISOString();
+      await writer.run(
+        "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?, ?, ?, 'ready', ?)",
+        ["obj_live", "proj_1", liveKey, timestamp],
+      );
+      await writer.run(
+        `INSERT INTO messages
+           (id, project_id, seq, sender_speaker_id, summary, type, language,
+            received_at, committed_at, body_state, body_object_id)
+         VALUES (?, ?, 2, ?, ?, 'request', 'en', ?, ?, 'ready', ?)`,
+        ["msg_live", "proj_1", "spk_1", SUMMARY, timestamp, timestamp, "obj_live"],
+      );
+      const liveBlob = join(dataDir, "blobs", liveKey);
+      writeFileSync(liveBlob, BODY);
+
+      assert.equal(existsSync(`${dbPath}-wal`), true);
+      assert.equal(existsSync(`${dbPath}-shm`), true);
+      const before = {
+        db: sha256File(dbPath),
+        wal: sha256File(`${dbPath}-wal`),
+        blob: sha256File(liveBlob),
+      };
+
+      const result = runCli(
+        sourceCli,
+        ["doctor", "--data-dir", dataDir, "--json"],
+        withoutCorkboardEnv(keyEnv()),
+      );
+      assert.equal(result.status, 0, result.stderr);
+      const report = parseJson(result);
+      assert.equal(report.database?.counts?.messages, 2, "uncheckpointed WAL row is visible");
+      assert.equal(report.database?.counts?.ready, 2);
+      assert.deepEqual(report.issues, []);
+
+      assert.equal(sha256File(dbPath), before.db, "database bytes unchanged");
+      assert.equal(sha256File(`${dbPath}-wal`), before.wal, "WAL bytes unchanged");
+      assert.equal(sha256File(liveBlob), before.blob, "blob bytes unchanged");
+      assert.equal(result.stdout.includes(SUMMARY), false);
+    } finally {
+      writer.close();
+    }
+  })();
+});
+
+test("doctor does not apply migration 002 to a v1 database", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const env = withoutCorkboardEnv(keyEnv());
+  return (async () => {
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    const dbPath = join(dataDir, "corkboard.sqlite");
+    const legacy = new DatabaseSync(dbPath);
+    try {
+      legacy.exec(readFileSync(join(repoRoot, "migrations", "001_init.sql"), "utf8"));
+      legacy
+        .prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)")
+        .run(new Date().toISOString());
+    } finally {
+      legacy.close();
+    }
+
+    const result = runCli(sourceCli, ["doctor", "--data-dir", dataDir, "--json"], env);
+    assert.equal(result.status, 1, result.stderr);
+    const report = parseJson(result);
+    assert.deepEqual(report.schema_versions.applied, [1]);
+    assert.deepEqual(report.schema_versions.missing, [2]);
+    assert.equal(report.schema_versions.complete, false);
+    assert.ok(report.issues.some((issue) => issue.code === "SCHEMA_INCOMPLETE"));
+
+    const after = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const versions = after
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .all() as Array<{ version: number }>;
+      assert.deepEqual(versions.map((row) => row.version), [1], "migration 002 was not applied");
+      const tables = after
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'credential_project_grants'",
+        )
+        .all();
+      assert.equal(tables.length, 0);
+    } finally {
+      after.close();
+    }
+    assert.equal(existsSync(`${dbPath}-wal`), false);
+    assert.equal(existsSync(`${dbPath}-shm`), false);
+  })();
+});

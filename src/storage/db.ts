@@ -164,6 +164,22 @@ export function expectedMigrationVersions(): number[] {
   return listMigrations(migrationsDirectory()).map((migration) => migration.version);
 }
 
+// Every table the bundled migrations create. Diagnostics use this instead of a
+// hand-maintained subset so a database missing any core table is incomplete.
+export function expectedSchemaTables(): string[] {
+  const tables = new Set<string>();
+  const createTable =
+    /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/gi;
+  for (const migration of listMigrations(migrationsDirectory())) {
+    const sql = readFileSync(migration.path, "utf8");
+    for (const match of sql.matchAll(createTable)) {
+      const name = match[1];
+      if (name !== undefined) tables.add(name);
+    }
+  }
+  return [...tables].sort();
+}
+
 // Minimal read-only surface: no exec/run, so diagnostics cannot write.
 export interface ReadOnlySqlDatabase {
   all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]>;
@@ -171,12 +187,11 @@ export interface ReadOnlySqlDatabase {
   close(): void;
 }
 
-function pathEntryExists(path: string): boolean {
+function regularFileEntry(path: string): { isFile: boolean } | undefined {
   try {
-    lstatSync(path);
-    return true;
+    return { isFile: lstatSync(path).isFile() };
   } catch (error) {
-    if ((error as { code?: unknown }).code === "ENOENT") return false;
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
     throw error;
   }
 }
@@ -204,8 +219,18 @@ export async function openSqliteDatabaseReadOnly(
 ): Promise<ReadOnlySqlDatabase> {
   let target = path;
   if (isWalModeDatabase(path)) {
-    const hasWal = pathEntryExists(`${path}-wal`);
-    const hasShm = pathEntryExists(`${path}-shm`);
+    const wal = regularFileEntry(`${path}-wal`);
+    const shm = regularFileEntry(`${path}-shm`);
+    // Match production startup: a symlinked (or otherwise non-regular) sidecar
+    // is a redirect and is never followed.
+    if (
+      (wal !== undefined && !wal.isFile) ||
+      (shm !== undefined && !shm.isFile)
+    ) {
+      throw new Error("database sidecar is not a regular file");
+    }
+    const hasWal = wal !== undefined;
+    const hasShm = shm !== undefined;
     if (!hasWal && !hasShm) {
       target = `${pathToFileURL(path).href}?immutable=1`;
     } else if (!hasWal || !hasShm) {

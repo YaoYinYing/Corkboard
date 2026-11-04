@@ -294,36 +294,46 @@ pushed.
   `expectedMigrationVersions`. The read-only opener never creates the data directory,
   chmods, switches journal mode, or applies migrations. A clean WAL database without
   sidecars is opened `immutable` so no `-wal`/`-shm` files are created; with both
-  sidecars present it reads the live WAL. A lone sidecar is rejected as an inconsistent
-  crash state rather than repaired.
+  sidecars present it reads the live WAL. A lone sidecar, or a symlinked/non-regular
+  sidecar, is rejected as a crash/redirect state rather than repaired or followed. A live
+  read may rewrite the existing `-shm` coordination bytes; database and blob content are
+  unchanged.
 - **Report.** `src/service/doctor.ts` reports: applied/expected/missing schema versions
-  and completeness; `CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER` presence plus
-  32-byte base64 shape (booleans only) and key version `v1`; `PRAGMA integrity_check`;
-  message/ready/pending/expired/failed, receipt, credential and grant counts; blob file,
-  referenced, orphaned, missing, expired-pending-deletion and non-file counts; the
-  configurable stuck-pending count with at most ten ID/age samples; and stable issue
-  codes (`SCHEMA_INCOMPLETE`, `DATABASE_INTEGRITY_FAILED`, `BLOB_MISSING`,
-  `BLOB_ORPHANED`, `EXPIRED_BLOB_PENDING`, `STUCK_PENDING`, `KEY_MISSING`).
+  and completeness against every table created by the bundled migrations
+  (`expectedSchemaTables`); `CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER`
+  presence plus 32-byte base64 shape (booleans only) and key version `v1`;
+  `PRAGMA integrity_check`; message/ready/pending/expired/failed, receipt, credential and
+  grant counts; blob file, referenced, orphaned, missing, expired-pending-deletion and
+  non-file counts; the configurable stuck-pending count with at most ten ID/age samples;
+  and stable issue codes (`SCHEMA_INCOMPLETE`, `DATABASE_INTEGRITY_FAILED`,
+  `BLOB_MISSING`, `BLOB_ORPHANED`, `EXPIRED_BLOB_PENDING`, `STUCK_PENDING`,
+  `KEY_MISSING`). Unmeasurable values are `null`, not zero.
 - **Safety.** An absent data directory or database reports `database: null` and
-  `SCHEMA_INCOMPLETE` without initialization. Symlinks and non-file blob entries are
-  never followed (counted as `blob_dir_non_files`); invalid-named regular files are
-  ignored. No query selects summaries or bodies, and no key/token/secret value is
-  selected or printed. Exit `0` clean, `1` issues, `2` inspection impossible (invalid
-  arguments, unreadable data directory, busy/locked database, inconsistent WAL
-  sidecars) with a stable message and no stack trace.
+  `SCHEMA_INCOMPLETE` without initialization and exits `1`; only an existing but
+  unreadable/non-directory path exits `2`. Symlinks and non-file blob entries are never
+  followed (counted as `blob_dir_non_files`); invalid-named regular files are ignored.
+  No query selects summaries or bodies, and no key/token/secret value is selected or
+  printed. Exit `0` clean, `1` issues, `2` inspection impossible (invalid arguments,
+  unreadable/non-directory data path, busy/locked database, inconsistent/symlinked WAL
+  sidecars) with a stable message and no stack trace. Output is bounded, but
+  reconciliation reads all referenced storage keys internally and `integrity_check`
+  scans the database.
 - **Tests.** New `tests/integration/doctor.test.ts` covers a clean sent/read instance,
   orphan/missing/expired-pending/stuck counts with bounded samples, symlink
-  non-following and invalid names, absent directory/database non-initialization, invalid
-  arguments and no-stack exit 2, byte-for-byte read-only behavior, and a run against the
-  real built CLI. A deterministic integrity-failure test is skipped with an explicit
-  reason.
-- **Tests/commands.** 209 total, 207 pass, 2 skipped (live D1 marker and the explicitly
-  skipped deterministic-integrity-corruption case). `npm run check` and `npm run build`
-  pass. A built-CLI smoke against a seeded directory reported the expected
-  orphan/missing/expired/stuck counts, exit 1, no content/key output, and created no
-  data-directory files.
+  non-following and invalid names, absent directory/database non-initialization with
+  null "not measured" values, invalid arguments and no-stack exit 2, byte-for-byte
+  read-only behavior, deterministic non-ok and throwing integrity corruption, a missing
+  core table, symlinked WAL sidecars, a live uncheckpointed WAL with unchanged
+  DB/WAL/blob hashes, a v1-only database proving migration 002 is not applied, and an
+  unconditional rebuild before the built-CLI run.
+- **Tests/commands.** 213 total, 212 pass, 1 skipped (live D1 marker). `npm run check`
+  and `npm run build` pass. A built-CLI smoke against a seeded directory reported the
+  expected orphan/missing/expired/stuck counts, exit 1, no content/key output, and
+  created no data-directory files.
 - **Limitations.** No destructive repair/fix mode, no backup-integrity verification, and
-  no D1/Workers equivalent. `PRAGMA integrity_check` is SQLite-specific.
+  no D1/Workers equivalent. `PRAGMA integrity_check` is SQLite-specific, a live read may
+  rewrite `-shm` coordination bytes, and an integrity check that cannot run exits `2`
+  instead of reporting.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
 

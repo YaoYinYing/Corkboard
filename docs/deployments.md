@@ -123,15 +123,22 @@ directory, applies migrations, or writes database/blob content. Opening an absen
 database reports `database: null` and `SCHEMA_INCOMPLETE`; it does not initialize an
 installation. A clean database with no WAL sidecars is read `immutable` so no files are
 created; while the service is running, the existing WAL sidecars are used for a live
-read (the existing `-shm` coordination file may be used, but no database/blob content is
-modified). `--json` prints exactly one object; without it the same fields are printed as
-short lines.
+read. SQLite may rewrite the existing `-shm` coordination file; database and blob content
+are not modified, and authoritative orphan/missing reconciliation should be run against a
+quiesced instance or retried. `--json` prints exactly one object; without it the same
+fields are printed as short lines.
+
+`doctor` reads `CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER` from the process
+environment only (it does not read `secrets.env`). Source the same secrets file used for
+`serve` so key-presence diagnostics reflect the service configuration.
 
 It reports applied and expected migration versions, whether `CORKBOARD_ROOT_KEY` and
 `CORKBOARD_CREDENTIAL_PEPPER` are present and 32-byte base64 (booleans only, never the
 values) with key version `v1`, `PRAGMA integrity_check`, message/receipt/credential/grant
 counts, blob reconciliation, and pending rows older than `--stuck-minutes` (default 60,
-bounded to ten sample IDs and ages).
+with at most ten sample IDs and ages). Output is bounded; blob reconciliation reads all
+referenced storage keys internally and `integrity_check` scans the database. Values that
+cannot be measured (for example when the schema is incomplete) are `null`, not zero.
 
 Blob meanings: `orphaned` is a file in `<data-dir>/blobs` whose valid opaque name is not
 referenced by any non-null `body_objects.storage_key`; `missing` is a referenced key with
@@ -142,11 +149,13 @@ ignored.
 
 Exit codes: `0` clean, `1` at least one issue was reported (`SCHEMA_INCOMPLETE`,
 `DATABASE_INTEGRITY_FAILED`, `BLOB_MISSING`, `BLOB_ORPHANED`, `EXPIRED_BLOB_PENDING`,
-`STUCK_PENDING`, `KEY_MISSING`), `2` the inspection could not run (invalid arguments,
-missing/unreadable data directory, busy or locked database, inconsistent WAL sidecars).
-A report is never mixed with an exit-2 error. Run it on a schedule (for example hourly
-or daily) and alert on non-zero; `doctor` is read-only, so concurrent runs and runs
-against a live service are safe. There is **no repair/fix mode**: resolve
+`STUCK_PENDING`, `KEY_MISSING`), `2` the inspection could not run. Exit 2 covers invalid
+arguments, a data directory that exists but is not a readable directory, a busy/locked
+database, inconsistent WAL sidecars, and a sidecar that is not a regular file. A
+**missing** data directory or database is not an error: it reports `database: null` and
+`SCHEMA_INCOMPLETE` and exits `1`. A report is never mixed with an exit-2 error. Run it
+on a schedule (for example hourly or daily) and alert on non-zero; `doctor` is read-only,
+so concurrent runs and runs against a live service are safe. There is **no repair/fix mode**: resolve
 `BLOB_ORPHANED`/`BLOB_MISSING`, `SCHEMA_INCOMPLETE`, or stuck rows through the documented
 backup/expiry/provisioning procedures, not by deleting files in place. Backup-integrity
 verification is not part of this command yet.

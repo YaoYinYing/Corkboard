@@ -213,10 +213,14 @@ read-only connection: it does not create the data directory, chmod files, switch
 mode, apply migrations, or modify rows. If the database file is absent it reports
 `database: null` plus `SCHEMA_INCOMPLETE` and does not initialize an installation. A
 clean WAL database with no sidecars is opened `immutable` so no `-wal`/`-shm` files are
-created; with both sidecars present it reads the live WAL without creating files (the
-existing `-shm` coordination file may be used, but database and blob content are not
-modified). A lone sidecar (crash-recovery state) and a busy/locked database exit `2`
-with a stable message instead of a stack trace.
+created; with both sidecars present it reads the live WAL without creating files.
+SQLite may rewrite the existing `-shm` coordination file during a live read, so database
+and blob content are unchanged but `-shm` bytes may differ; authoritative orphan/missing
+reconciliation should be run against a quiesced instance or retried. A lone sidecar
+(crash-recovery state), a symlinked or otherwise non-regular sidecar, and a busy/locked
+database exit `2` with a stable message instead of a stack trace. A **missing** data
+directory or database is not exit 2: it reports `database: null` and `SCHEMA_INCOMPLETE`
+and exits `1`.
 
 Output contains no message summaries, bodies, tokens, credential verifiers, key material,
 or secret file contents. Key presence is reported only as booleans: whether
@@ -229,8 +233,11 @@ Blob reconciliation never follows symlinks. `blob_dir_non_files` counts non-file
 `orphaned` means a valid opaque blob-file name is not referenced by any non-null
 `body_objects.storage_key`; `missing` means a referenced key has no regular file on disk;
 `expired_pending_deletion` means an expired message's body object is not yet
-`state = 'deleted'` (including `NULL`). These are reported as counts only. Queries and
-provisional samples are bounded (ten IDs and ages), and no content is selected.
+`state = 'deleted'` (including `NULL`). These are reported as counts only. Output is
+bounded (at most ten provisional IDs and ages), but reconciliation reads every referenced
+storage key internally and `integrity_check` scans the database. Values that cannot be
+measured because the schema or database is unavailable are `null`, not zero; no content
+is selected.
 
 Exit codes: `0` clean, `1` issues found (the stable codes are listed in
 [`deployments.md`](./deployments.md)), `2` the inspection could not run. There is no
