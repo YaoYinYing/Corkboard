@@ -1,8 +1,8 @@
 # Deployments
 
 Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slices
-A–D and the bearer-authenticated MCP slice), and the commands below are runnable after
-`npm run build`. Cloudflare Workers/D1/R2, OAuth 2.1/PKCE, and ChatGPT Web integration
+A–E, including the bearer-authenticated MCP slice, plus read-only `doctor`
+diagnostics), and the commands below are runnable after `npm run build`. Cloudflare Workers/D1/R2, OAuth 2.1/PKCE, and ChatGPT Web integration
 are planned and are not implemented or tested.
 
 ## Self-hosted Node.js 24 LTS
@@ -111,6 +111,45 @@ exits non-zero when `failures > 0`, so it is safe to retry. **There is no timer 
 schedule this command externally (cron, systemd timer, or the platform scheduler), for
 example every 15 minutes. Running it concurrently is safe; transitions are conditional
 and repeated work is idempotent.
+
+Read-only diagnostics:
+
+```sh
+node dist/scripts/corkboard.js doctor --data-dir /var/lib/corkboard [--stuck-minutes 60] [--json]
+```
+
+`doctor` accepts `--data-dir` or `CORKBOARD_DATA_DIR`. It never creates the data
+directory, applies migrations, or writes database/blob content. Opening an absent
+database reports `database: null` and `SCHEMA_INCOMPLETE`; it does not initialize an
+installation. A clean database with no WAL sidecars is read `immutable` so no files are
+created; while the service is running, the existing WAL sidecars are used for a live
+read (the existing `-shm` coordination file may be used, but no database/blob content is
+modified). `--json` prints exactly one object; without it the same fields are printed as
+short lines.
+
+It reports applied and expected migration versions, whether `CORKBOARD_ROOT_KEY` and
+`CORKBOARD_CREDENTIAL_PEPPER` are present and 32-byte base64 (booleans only, never the
+values) with key version `v1`, `PRAGMA integrity_check`, message/receipt/credential/grant
+counts, blob reconciliation, and pending rows older than `--stuck-minutes` (default 60,
+bounded to ten sample IDs and ages).
+
+Blob meanings: `orphaned` is a file in `<data-dir>/blobs` whose valid opaque name is not
+referenced by any non-null `body_objects.storage_key`; `missing` is a referenced key with
+no regular file on disk; `expired_pending_deletion` is an expired message whose body
+object is not yet `state = 'deleted'` (including `NULL`). Non-file and symlink entries are
+counted as `blob_dir_non_files` and never followed; regular files with invalid names are
+ignored.
+
+Exit codes: `0` clean, `1` at least one issue was reported (`SCHEMA_INCOMPLETE`,
+`DATABASE_INTEGRITY_FAILED`, `BLOB_MISSING`, `BLOB_ORPHANED`, `EXPIRED_BLOB_PENDING`,
+`STUCK_PENDING`, `KEY_MISSING`), `2` the inspection could not run (invalid arguments,
+missing/unreadable data directory, busy or locked database, inconsistent WAL sidecars).
+A report is never mixed with an exit-2 error. Run it on a schedule (for example hourly
+or daily) and alert on non-zero; `doctor` is read-only, so concurrent runs and runs
+against a live service are safe. There is **no repair/fix mode**: resolve
+`BLOB_ORPHANED`/`BLOB_MISSING`, `SCHEMA_INCOMPLETE`, or stuck rows through the documented
+backup/expiry/provisioning procedures, not by deleting files in place. Backup-integrity
+verification is not part of this command yet.
 
 Reverse proxy must preserve the `Authorization` header, strip untrusted forwarding
 headers, set body-size limits, and provide TLS. The application must not be exposed

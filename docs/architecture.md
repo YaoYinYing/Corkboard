@@ -243,6 +243,21 @@ for a non-expired message, and no in-process scheduler exists: operators schedul
 command externally. Sequence numbers are never reused. A separate audited hard-delete
 path for privacy requests is not implemented and is documented as a limit.
 
+## Operator diagnostics
+
+`doctor` is a read-only CLI over the same SQLite file and blob directory. It uses a
+dedicated read-only opener (`openSqliteDatabaseReadOnly`) that does not create
+directories, chmod files, change journal mode, or apply migrations, so it can inspect an
+absent or partial installation without initializing it. It compares `schema_migrations`
+with the migration files bundled in the build, runs `PRAGMA integrity_check`, counts
+message/receipt/credential/grant rows, reconciles blob files against non-null
+`body_objects.storage_key`, and samples pending rows older than the configured threshold.
+Blob entries are matched as opaque keys; symlinks and other non-file entries are never
+followed. Output is counts and bounded metadata only — never bodies, summaries, tokens,
+or key material. A clean database with no WAL sidecars is opened `immutable` so the
+diagnostic cannot create `-wal`/`-shm` files; with both sidecars present it reads the live
+WAL. There is no repair mode and no D1/Workers implementation yet.
+
 ## MCP transport
 
 `POST/GET/DELETE /mcp` uses the official `@modelcontextprotocol/sdk` Web-standard

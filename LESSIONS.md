@@ -6,6 +6,23 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — A “read-only” SQLite open can still create WAL sidecars
+
+- **Failure:** `new DatabaseSync(path, { readOnly: true })` on a WAL-mode database whose
+  `-shm`/`-wal` files are absent creates those sidecars. A diagnostic promised not to
+  write to the data directory; creating files is a write.
+- **Reproducer:** Create a WAL database, checkpoint and close it, delete `-wal`/`-shm`,
+  open it read-only, and observe both files reappear (the DB bytes are unchanged).
+- **Fix:** Read the 20-byte header; for WAL with no sidecars, open
+  `file:<percent-encoded path>?immutable=1` (plus `readOnly`), which creates nothing and
+  still rejects writes. If both sidecars exist, a read-only open reads the live WAL
+  without creating files. A lone sidecar is a crash state and is rejected (exit 2)
+  rather than repaired.
+- **Prevents:** Diagnostics that silently mutate the installation they inspect, and
+  stale reads from always using `immutable` while a live WAL holds committed data.
+- **Remove when:** `node:sqlite` exposes a snapshot/backup read that neither writes nor
+  ignores the WAL.
+
 ## 2026-11-04 — Passing the original Request to an SDK leaks credential headers
 
 - **Failure:** The MCP adapter authenticated the bearer token, then handed the same

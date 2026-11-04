@@ -206,6 +206,38 @@ written) is not prevented; no stronger guarantee is claimed. See
   before returning any content; a mismatch creates no receipt. No cross-tenant
   deduplication.
 
+### Read-only diagnostics
+
+`doctor` is an operator diagnostic, not a repair tool. It opens the database with a
+read-only connection: it does not create the data directory, chmod files, switch journal
+mode, apply migrations, or modify rows. If the database file is absent it reports
+`database: null` plus `SCHEMA_INCOMPLETE` and does not initialize an installation. A
+clean WAL database with no sidecars is opened `immutable` so no `-wal`/`-shm` files are
+created; with both sidecars present it reads the live WAL without creating files (the
+existing `-shm` coordination file may be used, but database and blob content are not
+modified). A lone sidecar (crash-recovery state) and a busy/locked database exit `2`
+with a stable message instead of a stack trace.
+
+Output contains no message summaries, bodies, tokens, credential verifiers, key material,
+or secret file contents. Key presence is reported only as booleans: whether
+`CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER` are set, whether each has the
+32-byte base64 shape, and the configured key version `v1`. The full values are never
+printed or logged.
+
+Blob reconciliation never follows symlinks. `blob_dir_non_files` counts non-file entries
+(directories, symlinks, special files) and invalid-named regular files are ignored.
+`orphaned` means a valid opaque blob-file name is not referenced by any non-null
+`body_objects.storage_key`; `missing` means a referenced key has no regular file on disk;
+`expired_pending_deletion` means an expired message's body object is not yet
+`state = 'deleted'` (including `NULL`). These are reported as counts only. Queries and
+provisional samples are bounded (ten IDs and ages), and no content is selected.
+
+Exit codes: `0` clean, `1` issues found (the stable codes are listed in
+[`deployments.md`](./deployments.md)), `2` the inspection could not run. There is no
+destructive repair/fix mode in this slice; do not "fix" an orphan by deleting files
+without first confirming the database and backup state. `doctor` is SQLite/Node-specific
+(`PRAGMA integrity_check`); the D1/Workers deployment has no equivalent yet.
+
 ## Logging and audit
 
 - Log request ID, route, status, duration, and actor IDs. Log a stable error code only

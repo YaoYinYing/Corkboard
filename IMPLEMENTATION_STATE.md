@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–E implemented and pushed |
+| Phase | 0 complete; vertical slices A–E implemented and pushed; slice F (read-only doctor) candidate |
 | Last pushed checkpoint | `57d769b` (audited tree `31a542a`) on `origin/main`; CI run 41844525189 |
-| Branch | `main` |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a` |
-| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, doctor/observability |
+| Branch | `slice-f-doctor` (worktree candidate) |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`. Slice F: independent security and contract audits pending on the exact candidate tree |
+| Next milestone | OAuth 2.1/PKCE and ChatGPT Web integration (unimplemented), D1/R2 parity, structured observability (doctor diagnostics now implemented) |
 
 ## Checkpoint history
 
@@ -24,6 +24,7 @@ as the work it describes.
 | `0052909` | `8ffff4a` | Vertical slice C: credential-project grants, safe bootstrap, transactional migrations | security PASS; contract PASS |
 | `17caa65` | `bcc6a73` | Vertical slice D: revocation re-checks, multi-process evidence, fail-closed filesystem | security PASS; contract PASS |
 | `57d769b` | `31a542a` | Vertical slice E: bearer-authenticated MCP Streamable HTTP tools | security PASS; contract PASS |
+| `slice-f-doctor` candidate | recorded in the campaign report | Vertical slice F: read-only operator diagnostics (`doctor`) | independent security/contract audits pending |
 
 ## GitHub Issue coordination
 
@@ -282,6 +283,47 @@ pushed.
   identity read as `/api/v1/me`.
 - Tests: 201 total, 200 pass, 1 skipped (live D1 marker). `npm run check`, `npm run
   build`, and a built-server MCP smoke pass. Not yet independently audited or pushed.
+
+## Vertical slice F — read-only operator diagnostics (candidate)
+
+- **Command.** `doctor [--data-dir <dir>] [--stuck-minutes N] [--json]` in
+  `scripts/corkboard.ts` (built as `dist/scripts/corkboard.js`), also honoring
+  `CORKBOARD_DATA_DIR`. `--json` prints exactly one object; otherwise the same fields are
+  printed as short lines. No arguments are accepted positionally.
+- **Read-only open.** `src/storage/db.ts` exports `openSqliteDatabaseReadOnly` and
+  `expectedMigrationVersions`. The read-only opener never creates the data directory,
+  chmods, switches journal mode, or applies migrations. A clean WAL database without
+  sidecars is opened `immutable` so no `-wal`/`-shm` files are created; with both
+  sidecars present it reads the live WAL. A lone sidecar is rejected as an inconsistent
+  crash state rather than repaired.
+- **Report.** `src/service/doctor.ts` reports: applied/expected/missing schema versions
+  and completeness; `CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER` presence plus
+  32-byte base64 shape (booleans only) and key version `v1`; `PRAGMA integrity_check`;
+  message/ready/pending/expired/failed, receipt, credential and grant counts; blob file,
+  referenced, orphaned, missing, expired-pending-deletion and non-file counts; the
+  configurable stuck-pending count with at most ten ID/age samples; and stable issue
+  codes (`SCHEMA_INCOMPLETE`, `DATABASE_INTEGRITY_FAILED`, `BLOB_MISSING`,
+  `BLOB_ORPHANED`, `EXPIRED_BLOB_PENDING`, `STUCK_PENDING`, `KEY_MISSING`).
+- **Safety.** An absent data directory or database reports `database: null` and
+  `SCHEMA_INCOMPLETE` without initialization. Symlinks and non-file blob entries are
+  never followed (counted as `blob_dir_non_files`); invalid-named regular files are
+  ignored. No query selects summaries or bodies, and no key/token/secret value is
+  selected or printed. Exit `0` clean, `1` issues, `2` inspection impossible (invalid
+  arguments, unreadable data directory, busy/locked database, inconsistent WAL
+  sidecars) with a stable message and no stack trace.
+- **Tests.** New `tests/integration/doctor.test.ts` covers a clean sent/read instance,
+  orphan/missing/expired-pending/stuck counts with bounded samples, symlink
+  non-following and invalid names, absent directory/database non-initialization, invalid
+  arguments and no-stack exit 2, byte-for-byte read-only behavior, and a run against the
+  real built CLI. A deterministic integrity-failure test is skipped with an explicit
+  reason.
+- **Tests/commands.** 209 total, 207 pass, 2 skipped (live D1 marker and the explicitly
+  skipped deterministic-integrity-corruption case). `npm run check` and `npm run build`
+  pass. A built-CLI smoke against a seeded directory reported the expected
+  orphan/missing/expired/stuck counts, exit 1, no content/key output, and created no
+  data-directory files.
+- **Limitations.** No destructive repair/fix mode, no backup-integrity verification, and
+  no D1/Workers equivalent. `PRAGMA integrity_check` is SQLite-specific.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
 
@@ -544,6 +586,11 @@ Do not infer any of these from local MCP behavior or from another plan.
   prevented. No atomic-revocation guarantee is claimed. `getMessageBody` can also still
   return a body that expires immediately after its state check, as recorded under
   slice B.
+- Slice-F limitations: `doctor` is report-only with no repair/fix mode; it does not
+  verify backup integrity and has no D1/Workers implementation (`PRAGMA
+  integrity_check` is SQLite-specific). It fetches referenced storage keys internally
+  to reconcile blobs but prints only counts and bounded samples. An integrity check
+  that cannot run (corrupt/unreadable file) exits 2 rather than producing a report.
 - Production filesystem verification covers directories and files present at startup;
   WAL/SHM sidecars are checked when present and are created `0600` by the adapter. It
   does not detect a mode change made by another privileged process after startup.

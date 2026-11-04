@@ -353,7 +353,7 @@ recorded there.
 - [ ] Implement documented HTTP endpoints, strict schemas, stable codes, request IDs, body limits, pagination, rate limits and security headers.
 - [ ] Run a self-hosted Node.js server with SQLite WAL + encrypted local files, health/readiness and secure HTTPS reverse-proxy example (without embedding real credentials).
 - [ ] Run Cloudflare Worker with D1 + private R2, binding/secrets and migrations; real Cloudflare preview/staging deployment, not only local mock.
-- [ ] Add repair/doctor commands: orphan blob report, stuck provisional post, expired bodies pending delete, schema version, key ID/config presence, backup integrity.
+- [x] Add read-only `doctor` diagnostics: orphan and missing blob report, stuck provisional post, expired bodies pending delete, schema versions, key presence/version, counts and stable issue codes, with bounded samples. (Destructive repair/fix mode and backup-integrity verification remain unimplemented.)
 - [ ] Implement minimal structured observability: request IDs, error classes, histogram of queue-to-commit delays, per-project counts with authorized views; no content logging.
 - [ ] Test two isolated clients running in **different deployment environments**; controlled failure injection for D1/R2 and SQLite/filesystem, fail closed and recover.
 - [ ] Provide reproducible Docker Compose/local installation and Worker deploy docs with explicit data directory/secret handling and admin bootstrap instructions.

@@ -1,13 +1,17 @@
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
 export type SqlValue = string | number | null;
@@ -152,6 +156,86 @@ function enableWriteAheadLogging(db: DatabaseSync): void {
     // busy_timeout is already set, so one retry absorbs a concurrent open.
     db.exec("PRAGMA journal_mode = WAL");
   }
+}
+
+// The migration set shipped with this build. Diagnostics compare it with the
+// versions recorded in an installation without applying anything.
+export function expectedMigrationVersions(): number[] {
+  return listMigrations(migrationsDirectory()).map((migration) => migration.version);
+}
+
+// Minimal read-only surface: no exec/run, so diagnostics cannot write.
+export interface ReadOnlySqlDatabase {
+  all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]>;
+  first<T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined>;
+  close(): void;
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function isWalModeDatabase(path: string): boolean {
+  const fd = openSync(path, "r");
+  try {
+    const header = Buffer.alloc(20);
+    const read = readSync(fd, header, 0, header.length, 0);
+    // Bytes 18-19 are the write/read version; 2 means WAL.
+    return read === 20 && header[18] === 2 && header[19] === 2;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Read-only open for operator diagnostics. It deliberately does not create the
+// directory, change permissions, switch journal mode, or apply migrations. With
+// no WAL sidecars the main file is a self-contained snapshot, so an immutable
+// open avoids creating `-shm`/`-wal`; with both sidecars present a read-only
+// connection reads the live WAL without creating files. A lone sidecar is a
+// crash-recovery state that cannot be inspected without writing.
+export async function openSqliteDatabaseReadOnly(
+  path: string,
+): Promise<ReadOnlySqlDatabase> {
+  let target = path;
+  if (isWalModeDatabase(path)) {
+    const hasWal = pathEntryExists(`${path}-wal`);
+    const hasShm = pathEntryExists(`${path}-shm`);
+    if (!hasWal && !hasShm) {
+      target = `${pathToFileURL(path).href}?immutable=1`;
+    } else if (!hasWal || !hasShm) {
+      throw new Error("database has inconsistent write-ahead log sidecars");
+    }
+  }
+  const db = new DatabaseSync(target, { readOnly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("PRAGMA query_only = ON");
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  return {
+    async all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> {
+      const rows = db.prepare(sql).all(...(params ?? []));
+      return rows.map((row) => ({ ...row })) as unknown as T[];
+    },
+    async first<T>(
+      sql: string,
+      params?: readonly SqlValue[],
+    ): Promise<T | undefined> {
+      const row = db.prepare(sql).get(...(params ?? []));
+      return row === undefined ? undefined : ({ ...row } as unknown as T);
+    },
+    close(): void {
+      db.close();
+    },
+  };
 }
 
 export async function openSqliteDatabase(

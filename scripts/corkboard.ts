@@ -11,6 +11,7 @@ import { parseArgs } from "node:util";
 import { generateSpeakerToken, hashSecret } from "../src/auth/credentials.ts";
 import { SCOPES, type Scope } from "../src/domain/authz.ts";
 import { startServer } from "../src/platforms/node/main.ts";
+import { DoctorError, formatDoctorReport, runDoctor } from "../src/service/doctor.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
 import { LocalBlobStore } from "../src/storage/blobs/local.ts";
 import { openSqliteDatabase, type SqlDatabase } from "../src/storage/db.ts";
@@ -38,6 +39,8 @@ const OPTIONS = {
   "expires-at": { type: "string" },
   scopes: { type: "string" },
   limit: { type: "string" },
+  "stuck-minutes": { type: "string" },
+  json: { type: "boolean" },
 } as const;
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS }>>["values"];
@@ -651,6 +654,61 @@ async function expireBodiesCommand(values: Values): Promise<void> {
   if (summary.failures > 0) process.exitCode = 1;
 }
 
+// Doctor argument and data-access failures exit 2; a completed report with
+// issues exits 1. Keeping this distinct lets callers/scripts tell "could not
+// inspect" from "inspected and found problems".
+class DoctorCliError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DoctorCliError";
+  }
+}
+
+const MAX_STUCK_MINUTES = 5_256_000; // ten years; keeps the threshold a valid date
+
+function parseStuckMinutes(raw: string | undefined): number {
+  if (raw === undefined) return 60;
+  if (!/^\d+$/.test(raw)) {
+    throw new DoctorCliError(
+      `--stuck-minutes must be an integer between 0 and ${MAX_STUCK_MINUTES}`,
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > MAX_STUCK_MINUTES) {
+    throw new DoctorCliError(
+      `--stuck-minutes must be an integer between 0 and ${MAX_STUCK_MINUTES}`,
+    );
+  }
+  return value;
+}
+
+// Read-only diagnostics: no repair/fix mode, no migrations, no writes.
+async function doctorCommand(values: Values, extraPositionals: number): Promise<void> {
+  if (extraPositionals > 0) {
+    throw new DoctorCliError("doctor accepts no positional arguments");
+  }
+  const rawDir = values["data-dir"];
+  const dataDir =
+    rawDir === undefined || rawDir === "" ? process.env.CORKBOARD_DATA_DIR : rawDir;
+  if (dataDir === undefined || dataDir === "") {
+    throw new DoctorCliError("--data-dir or CORKBOARD_DATA_DIR is required");
+  }
+  const stuckMinutes = parseStuckMinutes(values["stuck-minutes"]);
+  let report;
+  try {
+    report = await runDoctor({ dataDir, stuckMinutes });
+  } catch (error) {
+    if (error instanceof DoctorError) throw new DoctorCliError(error.message);
+    throw new DoctorCliError("doctor failed");
+  }
+  if (values.json === true) {
+    console.log(JSON.stringify(report));
+  } else {
+    for (const line of formatDoctorReport(report)) console.log(line);
+  }
+  if (report.issues.length > 0) process.exitCode = 1;
+}
+
 async function main(): Promise<void> {
   const { positionals, values } = parseArgs({
     args: process.argv.slice(2),
@@ -682,14 +740,37 @@ async function main(): Promise<void> {
       return revokeKeyCommand(values);
     case "expire-bodies":
       return expireBodiesCommand(values);
+    case "doctor":
+      return doctorCommand(values, positionals.length - 1);
     case "serve":
       await startServer();
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|serve> [options]; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|doctor|serve> [options]; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
+}
+
+// Best-effort command detection for the error handler, including when strict
+// parsing rejects the arguments before the switch runs.
+function argvCommand(args: readonly string[]): string | undefined {
+  const stringOptions = new Set(
+    Object.entries(OPTIONS)
+      .filter(([, option]) => option.type === "string")
+      .map(([name]) => `--${name}`),
+  );
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") return args[index + 1];
+    if (stringOptions.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--")) continue;
+    if (!arg.startsWith("-")) return arg;
+  }
+  return undefined;
 }
 
 function isEntryPoint(): boolean {
@@ -704,7 +785,15 @@ function isEntryPoint(): boolean {
 
 if (isEntryPoint()) {
   main().catch((error: unknown) => {
-    console.error(`corkboard: ${error instanceof Error ? error.message : "command failed"}`);
-    process.exit(1);
+    const message = error instanceof Error ? error.message : "command failed";
+    // Doctor reports inspection problems as exit 1; anything that prevents a
+    // report (bad arguments, unreadable directory, busy/locked database) is 2.
+    const exitCode =
+      error instanceof DoctorCliError ||
+      argvCommand(process.argv.slice(2)) === "doctor"
+        ? 2
+        : 1;
+    console.error(`corkboard: ${message}`);
+    process.exit(exitCode);
   });
 }
