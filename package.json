@@ -1,0 +1,26 @@
+{
+  "name": "corkboard",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared, authenticated, durable message board for human and agent speakers",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "npm run typecheck",
+    "test": "node --test --test-reporter=spec \"tests/**/*.test.ts\"",
+    "test:contract": "node --test --test-reporter=spec \"tests/contract/**/*.test.ts\"",
+    "test:security": "node --test --test-reporter=spec \"tests/security/**/*.test.ts\"",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run secret-scan && npm run secret-scan:history && npm run typecheck && npm test",
+    "audit": "npm audit --audit-level=high",
+    "secret-scan": "node scripts/secret-scan.ts",
+    "secret-scan:history": "node scripts/history-secret-scan.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.2"
+  }
+}

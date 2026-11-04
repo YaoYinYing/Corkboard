@@ -1,0 +1,54 @@
+# local tooling and installed skills
+.agents/
+.claude/
+skills-lock.json
+
+# private archival source (credential-bearing); never commit
+ORIGINAL_DESIGN.md
+
+# dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# local runtime data and secrets
+.env
+.env.*
+*.env
+secrets.env
+!.env.example
+data/
+keys/
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-*
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.p8
+*.crt
+*.cer
+*.der
+*.keystore
+*.ovpn
+*.gpg
+*.asc
+*.secret
+credentials.json
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+id_xmss*
+.ssh/
+*.ppk
+.npmrc
+
+# logs and OS noise
+*.log
+.DS_Store
