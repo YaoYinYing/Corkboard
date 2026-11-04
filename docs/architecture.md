@@ -330,14 +330,17 @@ with the existing service functions.
   selected speaker for the cross-project listing.
 - **Authorization reuse.** `authorizeProject` has an explicit session-viewer branch
   that re-checks project, membership, speaker ownership, and account state, then
-  authorizes the required capability directly from the membership set. It does not
-  create or consult a credential or grant. The `sessionViewer` flag is set only by
+  authorizes the requested read capability and returns only that scope as
+  `rights`/`capabilities`; write scopes are never returned. It does not create or
+  consult a credential or grant. The `sessionViewer` flag is set only by
   the resolver and is never derived from request input; bearer authentication never
   sets it. Bearer authorization is unchanged.
 - **Service reuse.** `listProjects` branches to a session listing that spans all
   owned speakers and reports the deterministic member display name; `listMessages`,
   `getMessageBody`, and `listReadReceipts` are called unchanged. No dashboard route
-  writes, marks read, or changes state.
+  performs a project, message, membership, credential, or receipt write. `POST
+  /login` inserts the session row and authenticated page requests refresh
+  `sessions.last_seen_at`; those are the only writes.
 - **Uniform denial.** The resolver and the session authorization branch return
   `NOT_FOUND` whenever the account has no qualifying membership, so an unreadable
   project is indistinguishable from a missing one. A revoked or expired session is

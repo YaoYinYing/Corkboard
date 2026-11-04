@@ -323,10 +323,43 @@ function queryInt(
   return value;
 }
 
+// The login form validates return_to at the same bound. Dropping an over-long
+// query (and, if needed, the whole path) keeps the redirect actionable instead
+// of emitting a Location that the next request rejects.
+function boundedReturnTo(url: URL): string {
+  const full = url.pathname + url.search;
+  if (full.length <= MAX_RETURN_TO_LENGTH) return full;
+  return url.pathname.length <= MAX_RETURN_TO_LENGTH ? url.pathname : "/";
+}
+
 function loginRedirect(url: URL, locale: Locale): Response {
-  const params = new URLSearchParams({ return_to: url.pathname + url.search });
+  const params = new URLSearchParams({ return_to: boundedReturnTo(url) });
   if (locale !== "en") params.set("lang", locale);
   return redirect(303, `/login?${params.toString()}`);
+}
+
+// Defense in depth on top of the double-submit CSRF value. Browser fetch
+// metadata must not say cross-site/same-site, and a browser-supplied Origin
+// must name this host (scheme is ignored so TLS termination at the proxy does
+// not break the check). Clients without either header still need the
+// double-submit value.
+function sameOriginFormPost(request: Request): boolean {
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite !== null && fetchSite !== "same-origin" && fetchSite !== "none") {
+    return false;
+  }
+  const origin = request.headers.get("origin");
+  // `null` is the serialized opaque origin some clients/browsers send. It is
+  // not a usable same-origin assertion, so fall back to the double-submit
+  // value rather than rejecting a legitimate form post.
+  if (origin === null || origin === "null") return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  return parsed.host === new URL(request.url).host;
 }
 
 async function readForm(request: Request): Promise<URLSearchParams> {
@@ -412,8 +445,18 @@ async function handleLoginSubmit(
   const form = await readForm(request);
   const returnTo = normalizeReturnTo(singleFormParam(form, "return_to"));
 
+  if (!sameOriginFormPost(request)) {
+    return renderLogin(locale, url, returnTo, 400, "loginExpired");
+  }
+
   const cookieCsrf = cookieValue(request.headers.get("cookie"), WEB_LOGIN_CSRF_COOKIE);
-  const formCsrf = singleFormParam(form, "login_csrf");
+  // A duplicate hidden value is a malformed/expired form, not a generic
+  // request error; keep it on the retry page with a fresh cookie.
+  const formCsrfValues = form.getAll("login_csrf");
+  if (formCsrfValues.length > 1) {
+    return renderLogin(locale, url, returnTo, 400, "loginExpired");
+  }
+  const formCsrf = formCsrfValues[0] ?? null;
   if (cookieCsrf === undefined || formCsrf === null || formCsrf === "") {
     return renderLogin(locale, url, returnTo, 400, "loginExpired");
   }

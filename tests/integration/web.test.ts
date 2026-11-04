@@ -12,7 +12,13 @@ import { SCOPES } from "../../src/domain/authz.ts";
 import { sha256Hex } from "../../src/domain/digest.ts";
 import { AppError } from "../../src/domain/errors.ts";
 import { authorizeProject, resolveSessionViewer } from "../../src/service/auth.ts";
-import { sendMessage, markRead } from "../../src/service/messages.ts";
+import {
+  getMessageBody,
+  listMessages,
+  markRead,
+  sendMessage,
+} from "../../src/service/messages.ts";
+import { expireMessageBody } from "../../src/service/expiry.ts";
 import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "../../src/service/sessions.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
 import { startServer } from "../../src/platforms/node/main.ts";
@@ -87,11 +93,17 @@ function loginSubmit(
   app: App,
   csrf: string | undefined,
   fields: Record<string, string>,
-  options: { path?: string; cookie?: string; contentType?: string } = {},
+  options: {
+    path?: string;
+    cookie?: string;
+    contentType?: string;
+    headers?: Record<string, string>;
+  } = {},
 ): Promise<Response> {
   const form = new URLSearchParams(fields);
   const headers: Record<string, string> = {
     "content-type": options.contentType ?? "application/x-www-form-urlencoded",
+    ...(options.headers ?? {}),
   };
   const cookie =
     options.cookie ?? (csrf === undefined ? undefined : `${WEB_LOGIN_CSRF_COOKIE}=${csrf}`);
@@ -175,6 +187,7 @@ function assertHardened(response: Response): void {
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(response.headers.get("x-frame-options"), "DENY");
 }
 
 test("dashboard lists authorized projects with escaped metadata and hardened headers", async (t) => {
@@ -202,6 +215,14 @@ test("dashboard lists authorized projects with escaped metadata and hardened hea
   assert.equal(page.html.includes("<script>alert"), false);
   assert.equal(page.html.includes("<img src=x"), false);
   assert.ok(page.html.includes("Active"));
+  // Accessibility structure asserted in the committed HTML: skip link, banner,
+  // labeled navigation, main landmark, and the current-language marker.
+  assert.ok(page.html.includes('<a class="skip-link" href="#main">'));
+  assert.ok(page.html.includes('<header class="site-header">'));
+  assert.ok(page.html.includes('<nav aria-label="Language">'));
+  assert.ok(page.html.includes('<main id="main" tabindex="-1">'));
+  assert.ok(page.html.includes('lang="en" hreflang="en" aria-current="true"'));
+  assert.ok(page.html.includes('lang="zh-Hans" hreflang="zh-Hans"'));
 });
 
 test("no eligible speaker, removed membership, and another account's project are uniform 404", async (t) => {
@@ -247,11 +268,52 @@ test("no eligible speaker, removed membership, and another account's project are
   assert.equal(removedTimeline.html.includes("SECRET PROJECT TITLE"), false);
 });
 
-test("a session viewer can never authorize a write scope", async (t) => {
+test("a session viewer can read but can never authorize a write scope", async (t) => {
   const { fx } = await withApp(t);
-  await basicProject(fx);
+  const credential = await basicProject(fx);
+  const message = await send(
+    fx,
+    credential.token,
+    "proj_a",
+    "viewer-read",
+    "viewer summary",
+    "viewer body",
+  );
   const session = { sessionId: "sess_test", accountId: "acct_a" };
   const viewer = await resolveSessionViewer(fx.deps, session, "proj_a", "message.read");
+  assert.deepEqual([...viewer.scopes], ["message.read"]);
+
+  const access = await authorizeProject(fx.deps, viewer, "proj_a", "message.read");
+  // The membership has every capability, but the session rights are only the
+  // requested read. markRead's receipt.write check must therefore fail.
+  assert.deepEqual([...access.rights], ["message.read"]);
+  assert.deepEqual([...access.capabilities], ["message.read"]);
+
+  // Read paths still work.
+  assert.equal((await listMessages(fx.deps, viewer, "proj_a")).messages.length, 1);
+  assert.equal(
+    (await getMessageBody(fx.deps, viewer, "proj_a", message.messageId)).text,
+    "viewer body",
+  );
+
+  await assert.rejects(
+    markRead(fx.deps, viewer, "proj_a", message.messageId),
+    (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+  );
+  await assert.rejects(
+    expireMessageBody(fx.deps, viewer, "proj_a", message.messageId),
+    (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+  );
+  await assert.rejects(
+    sendMessage(fx.deps, viewer, "proj_a", "viewer-write", {
+      summary: "summary",
+      type: "note",
+      language: "en",
+      text: "text",
+      bodyDigest: `sha256:${"0".repeat(64)}`,
+    }),
+    (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+  );
   await assert.rejects(
     authorizeProject(fx.deps, viewer, "proj_a", "message.send"),
     (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
@@ -533,6 +595,193 @@ test("login requires a matching double-submit CSRF value and rejects unsafe retu
   assert.ok(cookieValue(setCookies, SESSION_COOKIE_NAME));
   assert.ok(cookieValue(setCookies, CSRF_COOKIE_NAME));
   assert.ok(setCookies.some((cookie) => cookie.startsWith(`${WEB_LOGIN_CSRF_COOKIE}=;`)));
+});
+
+test("an unauthenticated long URL redirects to a bounded same-origin login form", async (t) => {
+  const { app } = await withApp(t);
+  const longQuery = `x=${"a".repeat(3000)}`;
+  const original = await call(app, `/projects/proj_a?${longQuery}`);
+  assert.equal(original.status, 303);
+  const location = original.headers.get("location");
+  assert.ok(location);
+  assert.ok(location.startsWith("/login?return_to=%2Fprojects%2Fproj_a"));
+  assert.equal(location.includes("a".repeat(3000)), false);
+  assert.equal(new URL(location, "http://localhost").origin, "http://localhost");
+
+  // The bounded Location must be accepted by the login page, not rejected by
+  // its own return_to validator.
+  const form = await call(app, location);
+  assert.equal(form.status, 200);
+  assertHardened(form);
+  assert.ok((await form.text()).includes('name="login_csrf"'));
+});
+
+test("login rejects cross-site fetch metadata and duplicate CSRF fields with the retry page", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicProject(fx, "acct_a", "spk_a", "proj_a", "a@example.test", "known-login-secret");
+  const csrf = await loginFormCsrf(app);
+  const fields = {
+    return_to: "/",
+    login_csrf: csrf,
+    email: "a@example.test",
+    password: "known-login-secret",
+  };
+
+  for (const headers of [
+    { origin: "https://evil.example" },
+    { "sec-fetch-site": "cross-site" },
+    { "sec-fetch-site": "same-site" },
+  ]) {
+    const response = await loginSubmit(app, csrf, fields, { headers });
+    assert.equal(response.status, 400, JSON.stringify(headers));
+    assert.ok((await response.text()).includes("The sign-in form expired"));
+    assert.equal(
+      cookieValue(response.headers.getSetCookie(), SESSION_COOKIE_NAME),
+      undefined,
+    );
+  }
+
+  const duplicate = new URLSearchParams();
+  for (const [name, value] of Object.entries(fields)) {
+    duplicate.append(name, value);
+  }
+  duplicate.append("login_csrf", csrf);
+  const duplicateResponse = await call(app, "/login", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: `${WEB_LOGIN_CSRF_COOKIE}=${csrf}`,
+    },
+    body: duplicate.toString(),
+  });
+  assert.equal(duplicateResponse.status, 400);
+  assert.ok((await duplicateResponse.text()).includes("The sign-in form expired"));
+  assert.equal(
+    cookieValue(duplicateResponse.headers.getSetCookie(), SESSION_COOKIE_NAME),
+    undefined,
+  );
+
+  // A matching origin and same-origin fetch metadata still authenticate.
+  const accepted = await loginSubmit(app, csrf, fields, {
+    headers: { origin: "http://localhost", "sec-fetch-site": "same-origin" },
+  });
+  assert.equal(accepted.status, 303);
+
+  // An opaque/null Origin is not a usable assertion; the double-submit value
+  // still authenticates. Headless Chrome sends this for a script-submitted form.
+  const opaque = await loginSubmit(app, csrf, fields, { headers: { origin: "null" } });
+  assert.equal(opaque.status, 303);
+});
+
+test("listing parses capabilities instead of substring matching", async (t) => {
+  const { fx, app } = await withApp(t);
+  await addPasswordAccount(fx, "acct_m", "m@example.test", "malformed-secret");
+  await fx.addSpeaker("spk_m", "acct_m");
+  await fx.addProject("proj_m", "acct_m");
+  // Contains the exact '"project.read"' token as a substring but is not JSON;
+  // the old instr() filter would have listed this project.
+  await fx.db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    ["proj_m", "spk_m", 'not-json "project.read" not-json', "2026-11-03T12:00:00.000Z"],
+  );
+
+  const { cookie } = await loginAs(app, "m@example.test", "malformed-secret");
+  const dashboard = await getPage(app, "/", cookie);
+  assert.equal(dashboard.status, 200);
+  assert.equal(dashboard.html.includes("proj_m"), false);
+  assert.ok(dashboard.html.includes("No projects are available for this account."));
+  assert.equal((await getPage(app, "/projects/proj_m", cookie)).status, 404);
+});
+
+test("per-read capabilities gate listing, timeline, and body with uniform 404", async (t) => {
+  const { fx, app } = await withApp(t);
+
+  // project.read only: listed, but the timeline and body are uniform 404.
+  await addPasswordAccount(fx, "acct_r", "r@example.test", "read only");
+  await fx.addSpeaker("spk_r", "acct_r");
+  await fx.addProject("proj_r", "acct_r");
+  await fx.addMembership("proj_r", "spk_r", ["project.read"]);
+  const readOnly = await loginAs(app, "r@example.test", "read only");
+  const readDashboard = await getPage(app, "/", readOnly.cookie);
+  assert.ok(readDashboard.html.includes("proj_r"));
+  assert.equal((await getPage(app, "/projects/proj_r", readOnly.cookie)).status, 404);
+  assert.equal(
+    (await getPage(app, "/projects/proj_r/messages/msg_any/body", readOnly.cookie)).status,
+    404,
+  );
+
+  // message.read/send but no project.read: timeline/body work by direct URL,
+  // but the project is not listed because the listing capability is
+  // project.read. message.send is only so this fixture can create the body.
+  await addPasswordAccount(fx, "acct_w", "w@example.test", "message only");
+  await fx.addSpeaker("spk_w", "acct_w");
+  await fx.addProject("proj_w", "acct_w");
+  await fx.addMembership("proj_w", "spk_w", ["message.read", "message.send"]);
+  const messageOnly = await fx.addCredential({ speakerId: "spk_w" });
+  const sent = await send(fx, messageOnly.token, "proj_w", "msg-only", "summary", "body");
+  const messageCookie = await loginAs(app, "w@example.test", "message only");
+  const messageDashboard = await getPage(app, "/", messageCookie.cookie);
+  assert.equal(messageDashboard.html.includes("proj_w"), false);
+  assert.equal((await getPage(app, "/projects/proj_w", messageCookie.cookie)).status, 200);
+  assert.equal(
+    (
+      await getPage(
+        app,
+        `/projects/proj_w/messages/${sent.messageId}/body`,
+        messageCookie.cookie,
+      )
+    ).status,
+    200,
+  );
+
+  // No read capability: listing empty and every project read is 404.
+  await addPasswordAccount(fx, "acct_n", "n@example.test", "no read");
+  await fx.addSpeaker("spk_n", "acct_n");
+  await fx.addProject("proj_n", "acct_n");
+  await fx.addMembership("proj_n", "spk_n", ["message.send"]);
+  const none = await loginAs(app, "n@example.test", "no read");
+  const noneDashboard = await getPage(app, "/", none.cookie);
+  assert.ok(noneDashboard.html.includes("No projects are available for this account."));
+  assert.equal((await getPage(app, "/projects/proj_n", none.cookie)).status, 404);
+});
+
+test("timeline and body GETs create no receipts and mutate no message tables", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  const message = await send(
+    fx,
+    credential.token,
+    "proj_a",
+    "no-write",
+    "read-only summary",
+    "read-only body",
+  );
+  const counts = async () => ({
+    messages: (await fx.db.all<{ id: string }>("SELECT id FROM messages")).length,
+    receipts: (await fx.db.all<{ message_id: string }>("SELECT message_id FROM message_receipts"))
+      .length,
+    bodies: (await fx.db.all<{ id: string }>("SELECT id FROM body_objects")).length,
+    audit: (await fx.db.all<{ id: string }>("SELECT id FROM audit_events")).length,
+  });
+  const before = await counts();
+
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+  assert.equal((await getPage(app, "/projects/proj_a", cookie)).status, 200);
+  assert.equal(
+    (
+      await getPage(
+        app,
+        `/projects/proj_a/messages/${message.messageId}/body`,
+        cookie,
+      )
+    ).status,
+    200,
+  );
+
+  const after = await counts();
+  assert.deepEqual(after, before);
+  assert.equal(after.receipts, 0);
 });
 
 test("the Node adapter buffers the login form body and serves the full page flow over HTTP", async (t) => {

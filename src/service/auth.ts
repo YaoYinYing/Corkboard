@@ -42,7 +42,11 @@ export interface Principal {
 export interface ProjectAccess {
   /** Intersection of the credential scopes and the active membership capabilities. */
   rights: Set<Scope>;
-  /** The active membership's capability set, filtered to known identifiers. */
+  /**
+   * The active membership's capability set, filtered to known identifiers.
+   * A session viewer receives only the requested read authority because its
+   * surface is read-only.
+   */
   capabilities: Set<Scope>;
 }
 
@@ -152,11 +156,11 @@ export async function authenticateBearer(
 }
 
 // A session viewer is an account viewing as one of its owned speakers. Its
-// authority is the active membership capability set. It has no credential,
-// grant, or credential-scope intersection: the human authenticated an account,
-// not a speaker credential. Any membership that cannot grant the requested
-// scope is NOT_FOUND so a project the account cannot read is indistinguishable
-// from a missing project.
+// authority is exactly the requested read scope, never the membership's write
+// capabilities. It has no credential, grant, or credential-scope intersection:
+// the human authenticated an account, not a speaker credential. Any membership
+// that cannot grant the requested scope is NOT_FOUND so a project the account
+// cannot read is indistinguishable from a missing project.
 async function authorizeSessionProject(
   deps: ServiceDeps,
   principal: Principal,
@@ -189,8 +193,17 @@ async function authorizeSessionProject(
 
   const capabilities = parseScopeJson(membership.capabilities);
   if (!capabilities.has(scope)) throw new AppError("NOT_FOUND");
-  authorizeProjectAccess({ isMember: true, membershipRemovedAt: null, rights: capabilities, scope });
-  return { rights: capabilities, capabilities };
+  // Do not return the membership's write capabilities as rights. A caller such
+  // as markRead checks access.rights for receipt.write, so returning the full
+  // set would turn the read-only viewer into a receipt writer.
+  const readAuthority = new Set<Scope>([scope]);
+  authorizeProjectAccess({
+    isMember: true,
+    membershipRemovedAt: null,
+    rights: readAuthority,
+    scope,
+  });
+  return { rights: readAuthority, capabilities: new Set<Scope>([scope]) };
 }
 
 // Decision order: unknown/inactive project, missing membership, or an inactive
@@ -291,7 +304,7 @@ export function sessionAccountPrincipal(session: {
     credentialId: `session:${session.sessionId}`,
     speakerId: "",
     accountId: session.accountId,
-    scopes: new Set<Scope>(),
+    scopes: new Set<Scope>(["project.read"]),
     sessionViewer: true,
   };
 }
@@ -329,7 +342,8 @@ export async function resolveSessionViewer(
         credentialId: `session:${session.sessionId}`,
         speakerId: row.speaker_id,
         accountId: session.accountId,
-        scopes: capabilities,
+        // The session principal carries only the requested read authority.
+        scopes: new Set<Scope>([scope]),
         sessionViewer: true,
       };
     }

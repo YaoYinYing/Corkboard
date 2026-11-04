@@ -155,8 +155,10 @@ written) is not prevented; no stronger guarantee is claimed. See
   browser cannot send `application/json` cross-origin without a preflight. The HTML
   `POST /login` route instead requires a `login_csrf` hidden field matching the
   `HttpOnly; Secure; SameSite=Lax` `corkboard_web_login` cookie, compared as SHA-256
-  digests. There is no Origin allowlist; the session cookie's `SameSite=Strict` covers
-  subsequent requests.
+  digests, and rejects a cross-site `Sec-Fetch-Site` value or a non-null browser
+  `Origin` naming a different host (absent/`null` Origin falls back to the
+  double-submit value). There is no Origin allowlist; the session cookie's
+  `SameSite=Strict` covers subsequent requests.
 - **What a session can do.** Read the signed-in account (`GET /api/v1/session`), sign
   out (`DELETE`), and open the read-only HTML dashboard, where it is resolved to an
   owned speaker's active membership for `project.read`/`message.read`. It cannot call
@@ -217,9 +219,13 @@ or as authority to act as a speaker.
 - **Trust domain.** The dashboard derives a viewer only from active, non-removed
   memberships of speakers owned by the account and calls the existing read service
   functions. A project without a qualifying membership is a uniform `404`. The
-  `sessionViewer` flag is set in code only, never from request input.
-- **Limits.** There are no write actions, so there is no dashboard state-changing
-  CSRF surface. The dashboard does not add registration, recovery, or
+  `sessionViewer` flag is set in code only, never from request input. The session
+  principal's scopes and the authorization result's rights are exactly the
+  requested `project.read`/`message.read` scope, so receipt or write checks fail.
+- **Limits.** There are no project/message/membership/credential/receipt write
+  actions, so the only dashboard state-changing surface is the login form (which
+  inserts a session row); authenticated page requests also refresh
+  `sessions.last_seen_at`. The dashboard does not add registration, recovery, or
   administrative capability.
 
 ## OAuth 2.1 authorization server

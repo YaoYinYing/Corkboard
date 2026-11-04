@@ -141,8 +141,12 @@ write actions.
   `login_csrf` value matching an independent `HttpOnly; Secure; SameSite=Lax`
   cookie, compared as SHA-256 digests in constant time. A cross-site form cannot
   read the cookie and does not send it under `SameSite=Lax`. The route also rejects
-  other content types. The only other cookie-authenticated state change remains
-  `DELETE /api/v1/session` with its `X-CSRF-Token`.
+  other content types and, as defense in depth, rejects a `Sec-Fetch-Site` value
+  other than `same-origin`/`none` or a non-null browser `Origin` naming a different
+  host; absent/`null` Origin falls back to the double-submit control.
+  The other cookie-authenticated state changes are `DELETE /api/v1/session` with
+  its `X-CSRF-Token` and the OAuth consent form `POST /oauth/consent`, which uses
+  the same session-CSRF check.
 - **Session fixation.** Sign-in always generates a new random session token and
   ignores any pre-existing session cookie value; the dashboard never accepts a
   session id from input.
@@ -152,6 +156,13 @@ write actions.
   from the request.
 - **Clickjacking.** `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop the
   dashboard from being framed.
+- **Session viewer write isolation.** The session branch returns only the
+  requested `project.read`/`message.read` scope as the principal's `scopes` and
+  the authorization result's `rights`/`capabilities`. A membership may carry
+  `receipt.write` or other write capabilities, but `markRead`, `sendMessage`,
+  expiry, and every non-read scope are rejected for a session viewer. Tests assert
+  this directly, so a future dashboard write cannot silently inherit the
+  membership's write set.
 - **Enumeration and cross-account reads.** The viewer is derived only from active,
   non-removed memberships of speakers owned by the session account. A project
   without a qualifying membership is a uniform `404`, whether it is missing,

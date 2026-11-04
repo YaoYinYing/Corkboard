@@ -48,9 +48,12 @@ functions take one principal.
 
 The session viewer has no credential and no `credential_project_grants` row.
 `authorizeProject` therefore takes an explicit session branch that checks the
-same project, membership, speaker-ownership, and account state, then uses the
-**membership capability set** as the rights. It does not substitute a speaker
-credential or its scopes. The `sessionViewer` flag is set in code only and is
+same project, membership, speaker-ownership, and account state, requires the
+requested scope in the parsed membership capabilities, and returns **only that
+read scope** as the session principal's `scopes` and the authorization result's
+`rights`/`capabilities`. It never returns or authorizes the membership's receipt
+or write capabilities, and it does not substitute a speaker credential or its
+scopes. The `sessionViewer` flag is set in code only and is
 never read from request input; a bearer principal never has it.
 
 Fail-closed behavior:
@@ -65,9 +68,11 @@ Fail-closed behavior:
   decryption and before returning plaintext. An expired body is `410`; an
   integrity failure is a generic safe error page with no partial content.
 
-No dashboard request writes, marks read, sends a read receipt, or changes state.
-Read receipt identities are displayed only through `listReadReceipts`, which
-authorizes `message.read` and re-applies the project filter.
+No dashboard request performs a project, message, membership, credential, or
+read-receipt write, and none marks a message read. The only writes are the session
+row inserted by `POST /login` and the `sessions.last_seen_at` refresh performed by
+authenticated page requests. Read receipt identities are displayed only through
+`listReadReceipts`, which authorizes `message.read` and re-applies the project filter.
 
 ## Rendering and security
 
@@ -98,6 +103,13 @@ sets a short-lived `corkboard_web_login` cookie (`HttpOnly`, `Secure`,
 `application/x-www-form-urlencoded`, then compares the hidden value and cookie
 as SHA-256 digests in constant time. A missing, duplicate, or mismatched value
 returns the expired-form page and creates no session.
+
+Browser fetch metadata is checked as defense in depth: a `Sec-Fetch-Site` value
+other than `same-origin` or `none`, or a non-null browser `Origin` whose host
+differs from the request host, also returns the expired-form page. An absent or
+`Origin: null` value is not a usable assertion and falls back to the double-submit
+value. The host comparison ignores the scheme so TLS termination at a reverse
+proxy does not break the check.
 
 `return_to` must be a same-origin path. Absolute URLs, scheme-relative values,
 backslashes, control characters, and values longer than 2,048 characters are
@@ -145,4 +157,8 @@ share the existing per-email-digest rate limiter and return `429` with
   editor, registration, email verification, password reset, or account settings.
 - No client-side navigation or live updates; every action is a full page load.
 - Server-side rendering only; there is no CSRF protection for state-changing
-  dashboard actions because there are no such actions.
+  dashboard actions because there are none (login is the only form and uses the
+  double-submit plus fetch-metadata checks).
+- Accessibility evidence consists of committed DOM assertions, semantic markup,
+  and manual browser inspection. No automated axe audit has been run and no WCAG
+  conformance level is claimed.
