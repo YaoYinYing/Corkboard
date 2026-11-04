@@ -139,6 +139,66 @@ async function writeWebResponse(response: ServerResponse, body: Response): Promi
   response.end(Buffer.from(await body.arrayBuffer()));
 }
 
+// A metrics failure must never prevent or alter a response.
+function recordSafely(
+  metrics: MetricsRegistry,
+  request: IncomingMessage,
+  status: number,
+  errorCode: string | undefined,
+  started: number,
+): void {
+  try {
+    metrics.recordRequest(
+      routeLabelFor(requestPathname(request)),
+      status,
+      errorCode,
+      performance.now() - started,
+    );
+  } catch {
+    // Recording is best effort.
+  }
+}
+
+async function handleNodeRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  app: (request: Request) => Promise<Response>,
+  metrics: MetricsRegistry,
+): Promise<void> {
+  const started = performance.now();
+  let webResponse: Response;
+  try {
+    // Pre-core work: body reading and routing. A failure here produced no
+    // application response, so it is recorded as REQUEST_TOO_LARGE or 503.
+    webResponse = await app(await toWebRequest(request));
+  } catch (error) {
+    if (error instanceof BodyTooLargeError) {
+      const tooLarge = requestTooLargeResponse();
+      recordSafely(metrics, request, tooLarge.status, "REQUEST_TOO_LARGE", started);
+      try {
+        await writeWebResponse(response, tooLarge);
+      } catch {
+        if (!response.headersSent) response.statusCode = 503;
+        response.end();
+      }
+      return;
+    }
+    recordSafely(metrics, request, 503, "UNAVAILABLE", started);
+    if (!response.headersSent) response.statusCode = 503;
+    response.end();
+    return;
+  }
+
+  try {
+    await writeWebResponse(response, webResponse);
+  } catch {
+    // The core already recorded this response's real status. A socket/write
+    // failure must not be counted as an additional application 503.
+    if (!response.headersSent) response.statusCode = 503;
+    response.end();
+  }
+}
+
 export async function startServer(options: StartServerOptions = {}): Promise<RunningServer> {
   const env = options.env ?? process.env;
   const configuredDataDir = env.CORKBOARD_DATA_DIR;
@@ -203,33 +263,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     });
 
     const server = createServer((request, response) => {
-      // The core records every request it sees; adapter-level rejections never
-      // reach it, so they are recorded here with the same fixed route labels.
-      const started = performance.now();
-      void toWebRequest(request)
-        .then(app)
-        .then((webResponse) => writeWebResponse(response, webResponse))
-        .catch((error: unknown) => {
-          if (error instanceof BodyTooLargeError) {
-            const webResponse = requestTooLargeResponse();
-            metrics.recordRequest(
-              routeLabelFor(requestPathname(request)),
-              webResponse.status,
-              "REQUEST_TOO_LARGE",
-              performance.now() - started,
-            );
-            void writeWebResponse(response, webResponse);
-            return;
-          }
-          metrics.recordRequest(
-            routeLabelFor(requestPathname(request)),
-            503,
-            "UNAVAILABLE",
-            performance.now() - started,
-          );
+      void handleNodeRequest(request, response, app, metrics).catch(() => {
+        try {
           if (!response.headersSent) response.statusCode = 503;
           response.end();
-        });
+        } catch {
+          // The socket is already gone; nothing left to write.
+        }
+      });
     });
     server.requestTimeout = REQUEST_TIMEOUT_MS;
     server.headersTimeout = HEADERS_TIMEOUT_MS;

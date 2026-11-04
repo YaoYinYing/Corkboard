@@ -11,6 +11,7 @@ import {
 import {
   MetricsRegistry,
   metricsAuthorized,
+  normalizeMetricsToken,
   routeLabelFor,
 } from "./metrics.ts";
 import {
@@ -403,7 +404,7 @@ async function route(
     // route, so the endpoint's existence is not disclosed. It is operator-only
     // and never touches the per-credential rate limiter.
     if (metricsToken === undefined) return notFound(requestId);
-    if (!metricsAuthorized(request.headers.get("authorization"), metricsToken)) {
+    if (!(await metricsAuthorized(request.headers.get("authorization"), metricsToken))) {
       return notFound(requestId);
     }
     if (method !== "GET") return methodNotAllowed("GET", requestId);
@@ -528,6 +529,9 @@ export function createApp(
   deps: ServiceDeps,
   options: CreateAppOptions = {},
 ): (request: Request) => Promise<Response> {
+  // Validate at the construction boundary too, so a direct caller cannot
+  // enable an empty/whitespace or sub-minimum token by bypassing env parsing.
+  const metricsToken = normalizeMetricsToken(options.metricsToken);
   const mcp = createMcpEndpoint(deps, { maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
   const limiter = new RateLimiter(options.rateLimit ?? DEFAULT_RATE_LIMIT, {
     ...(options.rateLimitNow === undefined ? {} : { now: options.rateLimitNow }),
@@ -550,7 +554,7 @@ export function createApp(
         mcp,
         limiter,
         metrics,
-        options.metricsToken,
+        metricsToken,
       );
     } catch (error) {
       if (error instanceof AppError) {

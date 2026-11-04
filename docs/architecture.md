@@ -337,11 +337,18 @@ label; tool names and arguments are not read. Error codes come from the server-a
 response envelope, not from client input. No bodies, summaries, tokens, IDs, or IPs are
 stored.
 
-`GET /metrics` is operator-only. It is disabled unless `CORKBOARD_METRICS_TOKEN` is set
-to at least 32 characters; a shorter value fails startup before filesystem writes.
-Disabled, missing-token, and wrong-token requests all return the ordinary unknown-route
-`404`, so the endpoint cannot be discovered. A valid token sees a stable JSON snapshot
-with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. The route does not
+`GET /metrics` is operator-only. Unset, empty, and whitespace-only tokens disable it; any
+other token must be at least 32 characters at both env parsing and `createApp`
+construction. A shorter value fails closed before filesystem writes, and the fixed error
+never contains the value. Disabled, missing-token, wrong-token, and non-operator speaker
+token requests all return the ordinary unknown-route `404` with the same envelope and
+security headers. Authentication is header-only (`?token=` is ignored). Both values are
+SHA-256 digested and the fixed-length digests are compared without an early exit, so
+equality and the configured token's length are not inferable from the comparison. A
+timing caveat remains: enabled requests with a `Bearer` header hash while disabled
+requests do not, so response timing may reveal the enabled state even though the status
+and body are identical. A valid token sees a stable JSON snapshot with
+`Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. The route does not
 authenticate a speaker and does not touch the per-credential limiter.
 
 The registry is process-local and in-memory: values reset on restart and are not shared

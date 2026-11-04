@@ -18,9 +18,17 @@ prevented regression; when to remove the advice.
   from the server-authored envelope. `metricsConfigFromEnv` runs beside the limiter
   parser before any filesystem work, and the endpoint returns the ordinary `404` for
   disabled, missing-token, and wrong-token requests; only a valid operator token can
-  reach the method check. Token comparison is constant-time.
+  reach the method check.
+- **Second failure pattern:** Env-only validation lets a direct `createApp` caller enable
+  an empty/whitespace or sub-minimum token, and comparing raw strings leaks length and
+  content through comparison time. Validate at both the env parser and the construction
+  boundary (empty/whitespace disables; non-empty requires at least 32 characters), and
+  SHA-256 both sides so the constant-time fold always compares fixed-length digests.
+  Document the remaining enabled-vs-disabled hashing-time caveat rather than claiming
+  perfect indistinguishability.
 - **Prevents:** Unbounded metric cardinality, content/ID leakage, endpoint discovery,
-  and startup that creates data before rejecting invalid metrics configuration.
+  weak/directly constructed operator tokens, token-length timing inference, and startup
+  that creates data before rejecting invalid metrics configuration.
 - **Remove when:** Metrics move to a platform collector that enforces bounded labels and
   an authenticated, explicitly registered scrape endpoint before application startup.
 

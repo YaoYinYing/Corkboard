@@ -157,12 +157,25 @@ Public. Returns `{ "status": "ok" }`. No configuration, credentials, or private 
 
 ### `GET /metrics` (operator-only)
 
-Disabled by default. If `CORKBOARD_METRICS_TOKEN` is unset or empty, the route returns
-the ordinary unknown-route `404 NOT_FOUND`; there is no existence leak. When configured,
-it requires exactly `Authorization: Bearer <token>` (constant-time comparison). A
-missing or wrong token also returns `404 NOT_FOUND`, not `401`/`403`. The token must be
-at least 32 characters; a shorter or otherwise invalid value fails startup before the
-data directory is created or opened.
+Disabled by default. If `CORKBOARD_METRICS_TOKEN` is unset, empty, or whitespace-only,
+the route returns the ordinary unknown-route `404 NOT_FOUND`; there is no existence
+leak. When configured, it requires exactly `Authorization: Bearer <token>` in the header
+(query parameters such as `?token=` are ignored). Missing, wrong, and non-operator
+speaker bearer tokens also return `404 NOT_FOUND`, not `401`/`403`, with the same
+status, envelope, and security headers. Both values are SHA-256 digested and the
+fixed-length digests are compared without an early exit, so token equality and the
+configured token's length are not inferable from the comparison itself.
+
+Any non-empty token must be at least 32 characters at both the environment parser and
+the `createApp` construction boundary; a shorter value fails startup/construction with a
+fixed message that never includes the value. The env parser runs before the data
+directory is created or opened.
+
+Timing caveat: a disabled endpoint returns before hashing, while an enabled endpoint
+with a `Bearer` header performs two SHA-256 operations before returning the same `404`.
+An observer may therefore be able to infer whether the endpoint is enabled from response
+timing, even though the status, body, and headers are identical. No token content or
+length is disclosed by the fixed-length comparison.
 
 A successful response is `200` with a stable JSON snapshot and
 `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and

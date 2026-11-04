@@ -66,24 +66,36 @@ CORKBOARD_RATE_LIMIT_PER_MINUTE=120 CORKBOARD_RATE_LIMIT_BURST=30 \
 ```
 
 Metrics are optional and operator-only. Set `CORKBOARD_METRICS_TOKEN` to a random value
-of **at least 32 characters** (keep it out of argv and logs) to enable `GET /metrics`.
-Unset or empty disables the route with `404`. A configured token shorter than 32
-characters stops startup before the data directory is created. Requests must send
-`Authorization: Bearer <token>`; missing/wrong tokens also receive `404`, so the
-endpoint is not discoverable without the token. The snapshot is process-local, resets on
-restart, and is not aggregated across processes or Workers; scrape it per process. The
-endpoint is not keyed by the per-credential rate limiter. Treat the token as a secret
-and rotate it by restarting with a new value.
+of **at least 32 characters** to enable `GET /metrics`. Unset, empty, and
+whitespace-only values disable the route with `404`. Any non-empty token shorter than 32
+characters stops startup before the data directory is created; the error never includes
+the value. Requests must send `Authorization: Bearer <token>`; missing, wrong, and
+non-operator speaker tokens also receive `404`, so the endpoint is not discoverable
+without the token. Token comparison uses SHA-256 digests at fixed length, so equality
+and token length are not inferable from the comparison. One timing caveat remains:
+disabled requests return without hashing while enabled requests with a `Bearer` header
+perform hashing, so timing may reveal whether the endpoint is enabled even though the
+status and body are identical.
+
+The snapshot is process-local, resets on restart, and is not aggregated across processes
+or Workers; scrape it per process. The endpoint is not keyed by the per-credential rate
+limiter. Treat the token as a secret and rotate it by restarting with a new value.
+
+The token must be exported into the environment of **both** the server and the scraper.
+Put it in the same `0600` secrets file used for the other secrets (the `set -a` source
+below exports every assignment), or export it once in the shell before starting the
+service:
 
 ```sh
-CORKBOARD_METRICS_TOKEN="$(head -c 32 /dev/urandom | base64)" \
-  NODE_ENV=production node dist/scripts/corkboard.js serve
+# after sourcing the secrets file:
+export CORKBOARD_METRICS_TOKEN="<at-least-32-character-random-token>"
+NODE_ENV=production node dist/scripts/corkboard.js serve
 curl -sS -H "Authorization: Bearer $CORKBOARD_METRICS_TOKEN" http://127.0.0.1:8787/metrics
 ```
 
-The second line reads the token from the operator's environment; do not paste a real
-token into shell history or documentation. See [`api.md`](./api.md#get-metrics-operator-only)
-for the exact JSON shape and limitations.
+Do not paste a real token into shell history or documentation. The placeholder above is
+not a value to use. See [`api.md`](./api.md#get-metrics-operator-only) for the exact JSON
+shape and limitations.
 
 The slice-A server makes no outbound requests, so `HTTP_PROXY`/`HTTPS_PROXY` are not
 read. If a proxy is configured in the developer environment, never log its value.

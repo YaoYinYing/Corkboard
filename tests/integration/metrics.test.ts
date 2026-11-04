@@ -11,9 +11,10 @@ import {
 import {
   LATENCY_BUCKETS_MS,
   MetricsRegistry,
+  metricsAuthorized,
   metricsConfigFromEnv,
 } from "../../src/app/metrics.ts";
-import { startServer } from "../../src/platforms/node/main.ts";
+import { startServer, type RunningServer } from "../../src/platforms/node/main.ts";
 import { createServiceFixture, type ServiceFixture } from "../helpers/service-fixture.ts";
 
 type App = (request: Request) => Promise<Response>;
@@ -80,6 +81,33 @@ async function withApp(
   const fx = await createServiceFixture();
   t.after(() => fx.close());
   return { fx, app: createApp(fx.deps, options) };
+}
+
+async function startMetricsServer(
+  t: { after(fn: () => void | Promise<void>): void },
+  metricsToken: string,
+): Promise<{ base: string; running: RunningServer }> {
+  const dir = mkdtempSync(join(tmpdir(), "corkboard-metrics-server-"));
+  const running = await startServer({
+    env: {
+      CORKBOARD_DATA_DIR: join(dir, "data"),
+      CORKBOARD_ROOT_KEY: Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64"),
+      CORKBOARD_CREDENTIAL_PEPPER: Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64"),
+      CORKBOARD_METRICS_TOKEN: metricsToken,
+      PORT: "0",
+    },
+  });
+  t.after(async () => {
+    await running.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const address = running.server.address();
+  assert.ok(address !== null && typeof address === "object");
+  return { base: `http://127.0.0.1:${address.port}`, running };
 }
 
 function rawMcp(
@@ -149,6 +177,100 @@ test("metrics is disabled by default: missing and wrong tokens both 404", async 
     token: METRICS_TOKEN,
   });
   assert.equal(post.status, 404);
+});
+
+test("direct createApp treats empty/whitespace tokens as disabled and rejects short tokens", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+
+  for (const token of ["", "   ", "\t\n"]) {
+    const app = createApp(fx.deps, { metricsToken: token });
+    const response = await metricsCall(app, METRICS_TOKEN);
+    assert.equal(response.status, 404);
+    assert.equal((await jsonBody(response)).error.code, "NOT_FOUND");
+  }
+
+  assert.throws(
+    () => createApp(fx.deps, { metricsToken: "x".repeat(31) }),
+    /CORKBOARD_METRICS_TOKEN must be at least 32 characters/,
+  );
+});
+
+test("startServer treats a whitespace-only metrics token as disabled", async (t) => {
+  const { base } = await startMetricsServer(t, "   ");
+
+  const metrics = await fetch(`${base}/metrics`, {
+    headers: { authorization: `Bearer ${METRICS_TOKEN}` },
+  });
+  assert.equal(metrics.status, 404);
+  assert.equal(((await metrics.json()) as JsonObject).error.code, "NOT_FOUND");
+  assert.equal((await fetch(`${base}/healthz`)).status, 200);
+});
+
+test("speaker tokens and query values cannot authorize metrics; refusals are identical", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  const actor = await addActor(fx, "speaker_metrics");
+  const disabledApp = createApp(fx.deps);
+  const enabledApp = createApp(fx.deps, { metricsToken: METRICS_TOKEN });
+
+  const responses = [
+    await metricsCall(disabledApp, METRICS_TOKEN),
+    await metricsCall(enabledApp),
+    await metricsCall(enabledApp, WRONG_TOKEN),
+    await metricsCall(enabledApp, actor.token),
+    await call(enabledApp, `/metrics?token=${encodeURIComponent(METRICS_TOKEN)}`),
+  ];
+
+  const normalizedBodies: JsonObject[] = [];
+  for (const response of responses) {
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("content-type"), "application/json; charset=utf-8");
+    assert.equal(response.headers.get("www-authenticate"), null);
+    const body = await jsonBody(response);
+    assert.deepEqual(Object.keys(body.error).sort(), ["code", "message", "request_id"]);
+    assert.match(body.error.request_id, /^req_/);
+    normalizedBodies.push({ error: { code: body.error.code, message: body.error.message } });
+  }
+  for (const body of normalizedBodies) assert.deepEqual(body, normalizedBodies[0]);
+});
+
+test("adversarial unknown paths collapse to one label without IDs or queries", async (t) => {
+  const { app } = await withApp(t, { metricsToken: METRICS_TOKEN });
+  const queryValue = "query" + "-value";
+  const paths = [
+    `/nope/proj_secret?token=${queryValue}`,
+    "/api/v1/projects/proj_secret/messages/msg_secret/body/extra",
+    "/api/v1/projects/proj_secret/messages/msg_secret/unknown-action",
+    "/api/v1/proj_secret/%2e%2e/encoded-segment",
+  ];
+  for (const path of paths) {
+    assert.equal((await call(app, path)).status, 404);
+  }
+
+  const snapshot = await jsonBody(await metricsCall(app, METRICS_TOKEN));
+  // The snapshot request itself is recorded after the snapshot is built.
+  assert.deepEqual(snapshot.routes, [{ route: "unknown", count: paths.length }]);
+  const serialized = JSON.stringify(snapshot);
+  for (const forbidden of [
+    "proj_secret",
+    "msg_secret",
+    queryValue,
+    "%2e",
+    "encoded-segment",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, `snapshot leaked ${forbidden}`);
+  }
+});
+
+test("metricsAuthorized hashes and compares fixed-length values", async () => {
+  assert.equal(await metricsAuthorized(`Bearer ${METRICS_TOKEN}`, METRICS_TOKEN), true);
+  assert.equal(await metricsAuthorized(`Bearer ${WRONG_TOKEN}`, METRICS_TOKEN), false);
+  assert.equal(await metricsAuthorized(`Bearer ${"x".repeat(100_000)}`, METRICS_TOKEN), false);
+  assert.equal(await metricsAuthorized(`bearer ${METRICS_TOKEN}`, METRICS_TOKEN), false);
+  assert.equal(await metricsAuthorized(null, METRICS_TOKEN), false);
 });
 
 test("enabled metrics requires the exact bearer token and never echoes it", async (t) => {
@@ -356,9 +478,11 @@ async function sha256(text: string): Promise<string> {
     .join("");
 }
 
-test("metrics env config is disabled when unset/empty and enforces the minimum", () => {
+test("metrics env config is disabled when unset/empty/whitespace and enforces the minimum", () => {
   assert.equal(metricsConfigFromEnv({}), undefined);
   assert.equal(metricsConfigFromEnv({ CORKBOARD_METRICS_TOKEN: "" }), undefined);
+  assert.equal(metricsConfigFromEnv({ CORKBOARD_METRICS_TOKEN: "   " }), undefined);
+  assert.equal(metricsConfigFromEnv({ CORKBOARD_METRICS_TOKEN: "\t\n" }), undefined);
   assert.deepEqual(metricsConfigFromEnv({ CORKBOARD_METRICS_TOKEN: METRICS_TOKEN }), {
     token: METRICS_TOKEN,
   });
@@ -366,6 +490,35 @@ test("metrics env config is disabled when unset/empty and enforces the minimum",
     () => metricsConfigFromEnv({ CORKBOARD_METRICS_TOKEN: "x".repeat(31) }),
     /CORKBOARD_METRICS_TOKEN must be at least 32 characters/,
   );
+});
+
+test("adapter-level 413 is counted once under the fixed route label", async (t) => {
+  const { base } = await startMetricsServer(t, METRICS_TOKEN);
+
+  // A declared body over 64 KiB is rejected by the adapter before the core.
+  const response = await fetch(`${base}/api/v1/projects/proj_secret/messages`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": "adapter-413",
+    },
+    body: new Uint8Array(70 * 1024),
+  });
+  assert.equal(response.status, 413);
+  assert.equal(((await response.json()) as JsonObject).error.code, "REQUEST_TOO_LARGE");
+
+  const metrics = await fetch(`${base}/metrics`, {
+    headers: { authorization: `Bearer ${METRICS_TOKEN}` },
+  });
+  assert.equal(metrics.status, 200);
+  const snapshot = (await metrics.json()) as JsonObject;
+  assert.deepEqual(snapshot.requests, { total: 1 });
+  assert.deepEqual(snapshot.routes, [
+    { route: "/api/v1/projects/:projectId/messages", count: 1 },
+  ]);
+  assert.deepEqual(snapshot.statuses, [{ status: 413, count: 1 }]);
+  assert.deepEqual(snapshot.errors, [{ code: "REQUEST_TOO_LARGE", count: 1 }]);
+  assert.equal(JSON.stringify(snapshot).includes("proj_secret"), false);
 });
 
 test("a too-short metrics token fails startup before creating the data directory", async (t) => {

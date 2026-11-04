@@ -2,8 +2,23 @@
 // IDs, IPs, or raw pathnames are stored. Route labels are fixed templates so
 // attacker-controlled paths cannot grow the map. Values reset on restart and
 // are not shared across processes or Workers isolates.
+import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 
 export const METRICS_TOKEN_MIN_LENGTH = 32;
+const ENCODER = new TextEncoder();
+
+// One normalization boundary for env parsing and direct createApp callers.
+// Empty/whitespace-only means disabled; a non-empty value below the minimum
+// fails without ever including the value in the error.
+export function normalizeMetricsToken(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  if (raw.length < METRICS_TOKEN_MIN_LENGTH) {
+    throw new Error(
+      `CORKBOARD_METRICS_TOKEN must be at least ${METRICS_TOKEN_MIN_LENGTH} characters`,
+    );
+  }
+  return raw;
+}
 
 /** Cumulative upper bounds (milliseconds). Durations above the last land in `+Inf`. */
 export const LATENCY_BUCKETS_MS = [
@@ -14,19 +29,14 @@ export interface MetricsConfig {
   token: string;
 }
 
-// An absent or empty token disables the endpoint. Any configured token shorter
-// than the minimum fails startup rather than weakening the operator boundary.
+// An absent, empty, or whitespace-only token disables the endpoint. Any other
+// token shorter than the minimum fails startup rather than weakening the
+// operator boundary.
 export function metricsConfigFromEnv(
   env: Readonly<Record<string, string | undefined>>,
 ): MetricsConfig | undefined {
-  const raw = env.CORKBOARD_METRICS_TOKEN;
-  if (raw === undefined || raw === "") return undefined;
-  if (raw.length < METRICS_TOKEN_MIN_LENGTH) {
-    throw new Error(
-      `CORKBOARD_METRICS_TOKEN must be at least ${METRICS_TOKEN_MIN_LENGTH} characters`,
-    );
-  }
-  return { token: raw };
+  const token = normalizeMetricsToken(env.CORKBOARD_METRICS_TOKEN);
+  return token === undefined ? undefined : { token };
 }
 
 export type RouteLabel =
@@ -155,23 +165,27 @@ export class MetricsRegistry {
   }
 }
 
-// Constant-time for equal-length secrets: the loop always runs to the longer
-// input and folds the length difference into the result.
-function constantTimeEqual(presented: string, expected: string): boolean {
-  const encoder = new TextEncoder();
-  const left = encoder.encode(presented);
-  const right = encoder.encode(expected);
-  const length = Math.max(left.length, right.length);
-  let difference = left.length ^ right.length;
-  for (let index = 0; index < length; index += 1) {
-    difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
-  }
-  return difference === 0;
+// Both inputs are digested to a fixed 64-character representation before the
+// constant-time fold, so the equality comparison always has fixed length and no
+// early exit. Hashing itself still costs time proportional to its input length.
+async function fixedLengthEqual(presented: string, expected: string): Promise<boolean> {
+  const [left, right] = await Promise.all([
+    sha256Hex(ENCODER.encode(presented)),
+    sha256Hex(ENCODER.encode(expected)),
+  ]);
+  return digestsEqual(left, right);
 }
 
-/** Accepts exactly `Authorization: Bearer <token>`. */
-export function metricsAuthorized(header: string | null, token: string): boolean {
+/**
+ * Accepts exactly `Authorization: Bearer <token>`.
+ *
+ * The token comparison is fixed-length and constant-time. Timing can still
+ * differ between a disabled endpoint (no hashing) and an enabled endpoint with
+ * a Bearer header (two SHA-256 operations), so status/body non-disclosure does
+ * not imply perfect timing indistinguishability of the enabled state.
+ */
+export function metricsAuthorized(header: string | null, token: string): Promise<boolean> {
   const prefix = "Bearer ";
-  if (header === null || !header.startsWith(prefix)) return false;
-  return constantTimeEqual(header.slice(prefix.length), token);
+  if (header === null || !header.startsWith(prefix)) return Promise.resolve(false);
+  return fixedLengthEqual(header.slice(prefix.length), token);
 }

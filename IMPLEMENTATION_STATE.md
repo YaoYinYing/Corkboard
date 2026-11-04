@@ -464,23 +464,36 @@ pushed.
   `unknown`. Raw pathnames, query strings, object IDs, bodies, summaries, tokens,
   speaker/account IDs, and IPs are never stored. `/mcp` counts every transport HTTP
   request under one label; tool names and arguments are not read.
-- **Operator endpoint.** `GET /metrics` is disabled by default. `CORKBOARD_METRICS_TOKEN`
-  unset/empty returns the ordinary unknown-route `404`; a configured token requires an
-  exact constant-time `Authorization: Bearer <token>` and missing/wrong tokens also
-  return `404`. The token must be at least 32 characters; a shorter value throws in
-  `startServer` before the data directory is created, opened, chmodded, or migrated.
-  Responses carry `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+- **Operator endpoint.** `GET /metrics` is disabled by default. Unset, empty, and
+  whitespace-only `CORKBOARD_METRICS_TOKEN` values return the ordinary unknown-route
+  `404`; any other configured token must be at least 32 characters at both env parsing
+  and `createApp` construction (a shorter value throws a fixed, value-free error; the
+  env parser runs before the data directory is created, opened, chmodded, or migrated).
+  Authentication is header-only: exactly `Authorization: Bearer <token>`; `?token=` is
+  ignored. Both values are SHA-256 digested and compared at fixed length without an
+  early exit. Missing, wrong, and non-operator speaker tokens return the same `404`
+  status, envelope, and security headers. Responses carry `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`. Documented timing caveat: enabled requests with a
+  `Bearer` header hash while disabled requests do not, so timing may reveal the enabled
+  state even though status/body are identical.
 - **Instrumentation.** `createApp` records every response it produces, including
   successes, application errors, `429 RATE_LIMITED`, and `/mcp`. The Node adapter
-  records adapter-only responses (64 KiB body rejection and unexpected 503) with the
-  same fixed labels. Auth/authz/error ordering is unchanged. `/metrics` does not
-  authenticate a speaker and never touches the per-credential limiter.
+  records only pre-core rejections (64 KiB body rejection and pre-response 503) with the
+  same fixed labels; every adapter `recordRequest` is wrapped so metrics can never
+  prevent or alter a response, and a failure while writing an already-recorded core
+  response is not counted as an extra 503. Auth/authz/error ordering is unchanged.
+  `/metrics` does not authenticate a speaker and never touches the per-credential
+  limiter.
 - **Docs.** `docs/api.md` (shape, auth, labels, limitations), `docs/architecture.md`,
   `docs/security-operations.md`, `docs/deployments.md` (env table and operator usage),
   `docs/mcp.md`, `TODO.md` (implemented subset only), and `LESSIONS.md` are updated.
-- **Tests.** New `tests/integration/metrics.test.ts` (9 tests) covers disabled
-  404 behavior, exact token auth with no echo/log, REST success/error/429 and MCP
-  initialize/tool counters with fixed labels, deterministic bucket boundaries (direct
+- **Tests.** New `tests/integration/metrics.test.ts` (15 tests) covers disabled
+  404 behavior, direct-construction and env normalization of empty/whitespace tokens and
+  rejection of sub-minimum tokens, whitespace disabled through `startServer`, exact
+  token auth with no echo/log and identical disabled/wrong/speaker-token/query refusals,
+  fixed-length digest auth, REST success/error/429 and MCP initialize/tool counters with
+  fixed labels, adversarial unknown paths collapsing to one `unknown` label, adapter
+  413 recording under the fixed route label, deterministic bucket boundaries (direct
   registry and injected app clock), no content/ID/token leakage with consistent totals,
   env parsing and startup refusal before filesystem creation, and no rate-limit bucket
   consumption by `/metrics` or `/healthz`.

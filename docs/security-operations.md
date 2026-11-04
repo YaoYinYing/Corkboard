@@ -334,15 +334,25 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
 
 ## Operator metrics endpoint
 
-- `GET /metrics` is disabled unless `CORKBOARD_METRICS_TOKEN` is set. The token is a
-  secret: supply it through the environment or a `0600` secrets file, never argv, a URL,
-  a log line, or a chat transcript. It must be at least 32 characters; a shorter value
-  fails startup before the data directory is created or opened. Rotate it by restarting
-  with a new value.
-- The endpoint requires exactly `Authorization: Bearer <token>` and compares the
-  presented value in constant time. Missing and wrong tokens receive the ordinary
-  unknown-route `404 NOT_FOUND`, not `401`/`403`, so its existence is not disclosed.
-  The response does not echo the token and the request log never contains it.
+- `GET /metrics` is disabled unless `CORKBOARD_METRICS_TOKEN` is set. Unset, empty, and
+  whitespace-only values disable it. The token is a secret: supply it through the
+  environment or a `0600` secrets file, never argv, a URL, a log line, or a chat
+  transcript. Any non-empty token must be at least 32 characters at both env parsing and
+  `createApp` construction; a shorter value fails closed with a fixed message that never
+  includes the value. The env parser runs before the data directory is created or
+  opened. Rotate it by restarting with a new value.
+- The endpoint requires exactly `Authorization: Bearer <token>` (query parameters are
+  ignored). Both values are SHA-256 digested and the fixed-length digests are compared
+  without an early exit, so token content and the configured token's length cannot be
+  inferred from the comparison. Missing, wrong, and non-operator speaker tokens receive
+  the ordinary unknown-route `404 NOT_FOUND`, not `401`/`403`, with the same body and
+  security headers. The response does not echo the token and the request log never
+  contains it.
+- Timing caveat: the disabled path returns without hashing, while the enabled path with
+  a `Bearer` header performs two SHA-256 operations before the same `404`. Response
+  timing may reveal whether the endpoint is enabled; no status/body non-disclosure claim
+  covers perfect timing indistinguishability, and no token content or length is
+  exposed.
 - The snapshot contains counters and timing only: total requests, fixed route labels,
   HTTP status counts, stable Corkboard error codes (including `RATE_LIMITED`), and
   cumulative latency buckets. It never contains bodies, summaries, tokens, keys,
