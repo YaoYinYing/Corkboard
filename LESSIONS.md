@@ -6,6 +6,48 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — OAuth access tokens should be ordinary credentials
+
+- **Failure pattern:** A second token table (or a JWT branch) for OAuth would duplicate
+  `authenticateBearer`, project membership, grant, revocation, and expiry checks. The
+  two paths drift, and OAuth silently gains a right the REST path denies.
+- **Fix:** An approved consent creates one `credentials` row for the selected speaker
+  with the consented scopes and one `credential_project_grants` row. Access tokens are
+  `cb_oat_` + 256 bits verified by the existing prefix + keyed HMAC lookup. Refresh
+  replaces that credential's prefix/verifier/expiry and retires the old access token.
+  A second `oauth_refresh_tokens` table stores only the prefix and HMAC verifier for
+  rotation/reuse detection.
+- **Prevents:** A parallel authorization path and OAuth-only privilege widening.
+- **Remove when:** Never; keep the single-authorization rule.
+
+## 2026-11-04 — Bind the authorization code and PKCE challenge in one stored hash
+
+- **Failure pattern:** The code table needs to verify both the random authorization
+  code and the PKCE verifier, but a naive design stores them separately or trusts the
+  submitted challenge. Missing either binding allows code guessing or PKCE bypass.
+- **Fix:** Store `code_verifier_hash = HMAC(pepper, code + "\n" + S256(verifier))`.
+  Lookup by the public code prefix, recompute from the presented code and verifier,
+  and compare at fixed length. The raw code and verifier are never stored; one
+  constant-time comparison proves both.
+- **Prevents:** Stored-plaintext codes, PKCE downgrade, and code/verifier replay.
+- **Remove when:** The schema gains separate audited verifier columns without
+  weakening the binding.
+
+## 2026-11-04 — A form-based consent flow still needs CSRF, and HTML needs a CSP
+
+- **Failure pattern:** A server-rendered consent form cannot set `X-CSRF-Token`
+  without script, but accepting a hidden CSRF field only would diverge from the session
+  contract. Adding inline JavaScript to solve it weakens CSP and risks injection.
+- **Fix:** Keep the session CSRF header and serve one constant same-origin script that
+  reads the non-HttpOnly CSRF cookie and submits the form. CSP is
+  `default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self';
+  base-uri 'none'; frame-ancestors 'none'`. The sign-in form needs no script and uses a
+  separate double-submit cookie. Escape every project/speaker/client/state value.
+- **Prevents:** Consent CSRF, inline-script XSS, and CSP exceptions that hide future
+  injection.
+- **Remove when:** A framework provides nonce-based, non-inline form handling with the
+  same headers.
+
 ## 2026-11-04 — The Node adapter must mirror core body and header behavior
 
 - **Failure pattern:** Tests called `createApp` directly, so they stayed green while the

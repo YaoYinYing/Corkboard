@@ -12,6 +12,7 @@ import {
   type RequestLogEntry,
 } from "../../app/handlers.ts";
 import { rateLimitConfigFromEnv } from "../../app/rate-limit.ts";
+import { oauthBaseUrlFromEnv } from "../../app/oauth.ts";
 import {
   MetricsRegistry,
   metricsConfigFromEnv,
@@ -63,6 +64,15 @@ function needsBody(method: string, pathname: string): boolean {
   if (method !== "POST") return false;
   const segments = pathname.split("/").filter((segment) => segment !== "");
   if (segments.length === 1 && segments[0] === "mcp") return true;
+  if (segments.length === 2 && segments[0] === "oauth") {
+    return (
+      segments[1] === "register" ||
+      segments[1] === "signin" ||
+      segments[1] === "consent" ||
+      segments[1] === "token" ||
+      segments[1] === "revoke"
+    );
+  }
   if (
     segments.length === 3 &&
     segments[0] === "api" &&
@@ -235,6 +245,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   // Parsed with the limiter, before anything is created or opened. A too-short
   // token fails startup rather than silently disabling or weakening the endpoint.
   const metricsConfig = metricsConfigFromEnv(env);
+  // OAuth is optional. An invalid configured base URL fails startup here,
+  // before the data directory is created, opened, or chmodded.
+  const publicBaseUrl = oauthBaseUrlFromEnv(env);
 
   const blobDir = join(dataDir, "blobs");
   const databasePath = join(dataDir, "corkboard.sqlite");
@@ -272,6 +285,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     const app = createApp(deps, {
       rateLimit,
       metrics,
+      ...(publicBaseUrl === undefined ? {} : { publicBaseUrl }),
       ...(metricsConfig === undefined ? {} : { metricsToken: metricsConfig.token }),
       // JSON lines for the service log; no headers, tokens, bodies or IPs.
       logger: (entry: RequestLogEntry): void => {

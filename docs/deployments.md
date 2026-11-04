@@ -1,10 +1,10 @@
 # Deployments
 
 Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slices
-A–E, including the bearer-authenticated MCP slice, read-only `doctor` diagnostics, and
-human account sessions), and the commands below are runnable after `npm run build`.
-Cloudflare Workers/D1/R2, OAuth 2.1/PKCE, and ChatGPT Web integration
-are planned and are not implemented or tested.
+A–E, including the bearer-authenticated MCP slice, read-only `doctor` diagnostics,
+human account sessions, and the OAuth 2.1 authorization-server core), and the commands
+below are runnable after `npm run build`. Cloudflare Workers/D1/R2 and the ChatGPT Web
+plugin experience are planned and are not implemented or tested.
 
 ## Self-hosted Node.js 24 LTS
 
@@ -70,6 +70,7 @@ Environment:
 | `CORKBOARD_RATE_LIMIT_PER_MINUTE` | no | authenticated requests/minute per credential; default `120`, `0` disables |
 | `CORKBOARD_RATE_LIMIT_BURST` | no | token-bucket burst size 1–1000; default `30` |
 | `CORKBOARD_METRICS_TOKEN` | no | enables operator-only `GET /metrics`; at least 32 characters, unset/empty disables |
+| `CORKBOARD_PUBLIC_BASE_URL` | for OAuth | public `https` origin used by OAuth discovery, resource, and endpoints; unset disables OAuth with `503`, invalid fails startup |
 | `CORKBOARD_BOOTSTRAP_PASSWORD` | no | owner bootstrap password, environment only |
 
 Rate limiting is per credential and **process-local**. Invalid limiter values stop
@@ -241,6 +242,44 @@ directly over plain HTTP beyond localhost.
 
 Health: `GET /healthz`. Backups: see `security-operations.md`.
 
+### OAuth (remote MCP linking)
+
+Set `CORKBOARD_PUBLIC_BASE_URL` to the public HTTPS origin clients use, for example
+`https://corkboard.example`. It must be an origin only: no path, query, fragment, or
+userinfo. An invalid value stops startup before the data directory is touched; the
+error never includes the value. Leaving it unset disables OAuth:
+
+```sh
+CORKBOARD_PUBLIC_BASE_URL=https://corkboard.example \
+  NODE_ENV=production node dist/scripts/corkboard.js serve
+```
+
+The authorization server then publishes:
+
+```text
+GET  /.well-known/oauth-protected-resource
+GET  /.well-known/oauth-authorization-server
+POST /oauth/register        public-client dynamic registration (JSON)
+GET  /oauth/authorize       session sign-in + consent
+POST /oauth/signin          same-origin sign-in form handler
+GET  /oauth/client.js       constant consent-form script
+POST /oauth/consent         session + X-CSRF-Token
+POST /oauth/token           authorization_code / refresh_token
+POST /oauth/revoke          RFC 7009, always 200 for well-formed requests
+```
+
+Only `message.read` and `message.send` can be delegated. Access tokens are 1-hour
+`cb_oat_` speaker credentials; authorization codes are 5-minute single-use; refresh
+tokens rotate on each use and live 30 days, with family-wide revocation on reuse.
+Registration is limited to 10/minute and token exchange to 60/minute; both are
+process-local and reset on restart. The two HTML pages are same-origin, fully escaped,
+CSP-constrained, and have no inline JavaScript or third-party resources. See
+[`oauth.md`](./oauth.md) for the exact flow, headers, and limits.
+
+The ChatGPT Web plugin installation/sharing experience and conversation-level ChatGPT
+tool invocation are **not implemented or verified**. A successful local OAuth flow is
+not evidence of ChatGPT support or of write availability on a particular plan.
+
 ### MCP endpoint
 
 `POST /mcp` exposes the six bearer-authenticated MCP tools over Streamable HTTP;
@@ -250,9 +289,11 @@ client with its own credential in the client's environment or MCP configuration,
 in a prompt or chat message. `POST /mcp` shares the 64 KiB request cap; a reverse proxy
 body limit is still recommended.
 
-OAuth 2.1/PKCE, ChatGPT Web plugin installation/linking, and conversation-level ChatGPT
-tool invocation are **not implemented or verified** in this slice. Do not document or
-claim them. See [`mcp.md`](./mcp.md).
+OAuth-issued `cb_oat_` access tokens are accepted by the same `/mcp` authentication
+path (they are ordinary scoped credentials). The ChatGPT Web plugin
+installation/linking experience and conversation-level ChatGPT tool invocation are
+**not implemented or verified** in this slice. Do not document or claim them. See
+[`mcp.md`](./mcp.md) and [`oauth.md`](./oauth.md).
 
 Sessions are in-memory, capped at **1024 concurrent sessions** (least-recently-used is
 evicted first), and a session idle for **30 minutes** is evicted on the next

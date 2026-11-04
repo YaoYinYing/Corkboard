@@ -1,9 +1,11 @@
 # HTTP API
 
 **Status: implemented for the Node.js + SQLite vertical slices A–D, the
-bearer-authenticated MCP slice, and human account sessions (slice I).** Cloudflare
-Workers/D1, OAuth, ChatGPT Web integration, and the "Planned, not implemented" section
-below are not implemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
+bearer-authenticated MCP slice, human account sessions (slice I), and the OAuth 2.1
+authorization-server core (slice J).** Cloudflare Workers/D1, the ChatGPT Web plugin
+experience, and the "Planned, not implemented" section below are not implemented. See
+`IMPLEMENTATION_STATE.md` for the current evidence and [`oauth.md`](./oauth.md) for
+the OAuth flows.
 
 Base path: `/api/v1`. JSON in, JSON out, UTF-8. All timestamps are server-generated
 UTC ISO-8601 with milliseconds unless stated otherwise.
@@ -11,20 +13,26 @@ UTC ISO-8601 with milliseconds unless stated otherwise.
 ## Authentication and authorization
 
 - Agents and local integrations: `Authorization: Bearer <speaker-token>`.
+- OAuth-linked clients: `Authorization: Bearer cb_oat_...`, an access token issued by
+  this server's OAuth authorization code + PKCE flow. It is a normal speaker credential
+  bound to the consented speaker, project, and scopes; every REST/MCP authorization
+  rule below applies unchanged. See [`oauth.md`](./oauth.md).
 - Remote MCP: the same scoped speaker bearer credential authenticates
   `POST/GET/DELETE /mcp`. See [`mcp.md`](./mcp.md).
 - Humans: a server-managed account session obtained from `POST /api/v1/session`. The
   browser carries it in an opaque `HttpOnly` cookie plus a non-`HttpOnly` CSRF cookie.
-  OAuth 2.1/PKCE and ChatGPT Web remain unimplemented.
+  OAuth 2.1/PKCE is implemented as an authorization-server core; the ChatGPT Web
+  plugin experience remains unimplemented and unverified.
 
 A bearer token authenticates a **speaker**. The server derives `speaker_id` from the
 token; clients cannot submit an authoritative sender.
 
 A human session authenticates an **account**, never a speaker and never a credential.
-It is accepted only by the three `/api/v1/session` routes. It cannot call `/api/v1/me`,
-project, message, or `/mcp` routes, and a session token is not a valid bearer token.
-Conversely, bearer routes never accept a session cookie. OAuth grants, which may later
-map an account to a speaker/scope delegation, are not implemented.
+It is accepted only by the three `/api/v1/session` routes and the OAuth sign-in/consent
+pages (which may create a session). It cannot call `/api/v1/me`, project, message, or
+`/mcp` routes, and a session token is not a valid bearer token. Conversely, bearer
+routes never accept a session cookie. An OAuth access token is a speaker credential,
+not a session.
 
 Scopes: `project.read`, `message.read`, `message.send`, `receipt.write`,
 `project.edit`, `member.read`, `member.manage`.
@@ -544,9 +552,40 @@ eviction and a lazy 30-minute idle TTL, and lost on restart. All `/mcp` response
 64 KiB. Full schemas, idempotency derivation, error codes, and limitations are in
 [`mcp.md`](./mcp.md).
 
-MCP is implemented only for bearer credentials in this slice. OAuth 2.1/PKCE, ChatGPT
-Web installation/linking, and conversation-level ChatGPT tool invocation are **not
-implemented or verified**.
+MCP is implemented for bearer credentials and OAuth-issued access tokens in this
+slice. The OAuth authorization-server core is implemented (see below and
+[`oauth.md`](./oauth.md)); the ChatGPT Web plugin installation/linking experience and
+conversation-level ChatGPT tool invocation are **not implemented or verified**.
+
+## OAuth 2.1 endpoints
+
+The full contract, configuration, lifetimes, rotation, and limitations are in
+[`oauth.md`](./oauth.md). Summary:
+
+| Endpoint | Method | Authentication |
+| --- | --- | --- |
+| `/.well-known/oauth-protected-resource` | GET | public |
+| `/.well-known/oauth-authorization-server` | GET | public |
+| `/oauth/register` | POST | public, JSON, rate-limited |
+| `/oauth/authorize` | GET | account session cookie (sign-in page when absent) |
+| `/oauth/signin` | POST | form + double-submit cookie |
+| `/oauth/consent` | POST | session cookie + `X-CSRF-Token` |
+| `/oauth/token` | POST | public, form-encoded, rate-limited |
+| `/oauth/revoke` | POST | public, form-encoded |
+| `/oauth/client.js` | GET | public constant script |
+
+Only `message.read` and `message.send` can be consented. Access tokens are
+`cb_oat_`-prefixed speaker credentials with a 1-hour lifetime; refresh tokens rotate
+on every use and live 30 days; authorization codes live 5 minutes and are single-use.
+OAuth routes are disabled with a fixed `503` when `CORKBOARD_PUBLIC_BASE_URL` is unset;
+an invalid value fails startup. Every OAuth response carries `Cache-Control: no-store`
+and `X-Content-Type-Options: nosniff`; HTML pages carry a strict CSP and are fully
+escaped.
+
+OAuth registration is limited to 10 requests/minute (burst 5, process-local, global
+key) and token exchange to 60 requests/minute (burst 20, process-local, keyed by
+`client_id`). These are additional denial only and are separate from the
+per-credential API bucket.
 
 ## Validation limits summary
 
@@ -570,13 +609,14 @@ implemented or verified**.
 HTTP endpoints for project create/edit, membership management, and speaker/credential
 management are deferred (the CLI provides bootstrap, project-create, speaker-create,
 membership, and credential commands in slice A; project edit is not implemented). Also
-deferred: OAuth discovery and grants, ChatGPT Web plugin installation/linking,
+deferred: the ChatGPT Web plugin installation/linking experience,
 attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
 metadata), account registration/invite provisioning, email verification, password
 reset, and a browser UI. Human sign-in/session read/sign-out is implemented as described
 above. The bearer-authenticated `/mcp` surface is implemented (see above and `mcp.md`);
-only its OAuth/ChatGPT integration is deferred. Expiry is implemented as the endpoint
-above plus the operator-run `expire-bodies`
+the OAuth 2.1 authorization-server core is implemented (see above and `oauth.md`), but
+the ChatGPT Web integration is deferred and unverified. Expiry is implemented as the
+endpoint above plus the operator-run `expire-bodies`
 command; there is no scheduler daemon. They will use the same service authorization
 layer.
 

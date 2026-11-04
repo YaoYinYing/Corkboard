@@ -116,6 +116,54 @@ credential and grants no project, message, MCP, or administrative authority.
   Workers isolates enforce their own buckets, and a restart clears them. Per-IP and
   volumetric controls remain the reverse proxy's responsibility.
 
+## OAuth 2.1 delegated speaker grants (slice J)
+
+OAuth issues a speaker-scoped bearer credential for one project; it is not a second
+authorization system.
+
+- **Redirect mismatch / open redirect.** The authorization endpoint accepts only an
+  exact string match against a dynamically registered redirect URI. Unvalidated or
+  mismatched URIs get an HTML `400` and are never used for an error redirect. Redirect
+  URIs must be absolute HTTPS with no fragment or userinfo; plain HTTP is allowed only
+  for `127.0.0.1`/`localhost` local clients.
+- **Code interception.** PKCE S256 is mandatory. The stored `code_verifier_hash` is a
+  keyed HMAC over the authorization code plus the S256 verifier output, compared at
+  fixed length; an intercepted code is useless without the verifier, and a verifier
+  without the code is useless. Codes are random 256-bit, expire in 5 minutes, and are
+  consumed by one conditional `UPDATE`; replays are `invalid_grant`.
+- **Consent CSRF.** `POST /oauth/consent` requires the account session cookie and the
+  existing `X-CSRF-Token` header. The HTML form submits it through a constant
+  same-origin script. Project, speaker, and scope authorization are re-read from
+  storage; the form is never trusted.
+- **Login CSRF / fixation.** The sign-in form uses a 256-bit double-submit value in
+  an `HttpOnly; Secure; SameSite=Lax; Path=/oauth` cookie and a hidden field.
+  Cross-site posts cannot read the value and do not send a Lax cookie on POST.
+  Sign-in always creates a fresh server-generated session; client-supplied session
+  ids are impossible.
+- **Scope escalation.** Only `message.read` and `message.send` are accepted. The
+  authorization endpoint rejects all other scopes, the consent page offers only those
+  two, consent re-checks membership capabilities, and the token endpoint never broadens
+  on refresh. OAuth cannot add a grant, membership, project, or administrative right.
+- **Mix-up / wrong audience.** The `resource` must equal the configured public base
+  URL, is stored with the code, and is re-checked at exchange. A code is bound to its
+  client; an exchange with another client is `invalid_grant`.
+- **Token replay and rotation.** Access tokens live 1 hour and are ordinary
+  `credentials` rows. Refresh rotates the refresh token and the access credential's
+  prefix/verifier/expiry, so the old access token fails on the next request. Reuse of
+  a rotated or revoked refresh token revokes the whole family and credential.
+- **Revocation.** RFC 7009 always returns `200` for well-formed requests; unknown
+  tokens and wrong client IDs are silent no-ops. Revoking a refresh family or an
+  access token takes effect on the next REST/MCP request; there is no authorization
+  cache.
+- **Secrets and logging.** Codes, refresh/access tokens, cookies, CSRF values, client
+  names, and scopes are not logged. The database stores prefix + keyed HMAC verifiers
+  only. Known limit: concurrent refresh with the same token races and can revoke a
+  family; clients must serialize refresh.
+- **HTML/XSS.** Every value interpolated into the two pages is HTML-escaped; there is
+  no inline script and no third-party resource. CSP is `default-src 'none';
+  script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none';
+  frame-ancestors 'none'`.
+
 ## Attack cases to cover
 
 Cross-project `message_id` guessing; sender spoofing in HTTP/MCP parameters; forged

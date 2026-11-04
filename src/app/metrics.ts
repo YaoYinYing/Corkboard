@@ -43,6 +43,15 @@ export type RouteLabel =
   | "/healthz"
   | "/mcp"
   | "/metrics"
+  | "/.well-known/oauth-protected-resource"
+  | "/.well-known/oauth-authorization-server"
+  | "/oauth/register"
+  | "/oauth/authorize"
+  | "/oauth/signin"
+  | "/oauth/consent"
+  | "/oauth/token"
+  | "/oauth/revoke"
+  | "/oauth/client.js"
   | "/api/v1/me"
   | "/api/v1/session"
   | "/api/v1/projects"
@@ -64,6 +73,40 @@ export function routeLabelFor(pathname: string): RouteLabel {
     if (segments[0] === "mcp") return "/mcp";
     if (segments[0] === "metrics") return "/metrics";
     return "unknown";
+  }
+
+  // Public OAuth routes use fixed labels; no client IDs, scopes, or query
+  // values are retained.
+  if (segments.length === 2) {
+    if (segments[0] === ".well-known") {
+      if (segments[1] === "oauth-protected-resource") {
+        return "/.well-known/oauth-protected-resource";
+      }
+      if (segments[1] === "oauth-authorization-server") {
+        return "/.well-known/oauth-authorization-server";
+      }
+      return "unknown";
+    }
+    if (segments[0] === "oauth") {
+      switch (segments[1]) {
+        case "register":
+          return "/oauth/register";
+        case "authorize":
+          return "/oauth/authorize";
+        case "signin":
+          return "/oauth/signin";
+        case "consent":
+          return "/oauth/consent";
+        case "token":
+          return "/oauth/token";
+        case "revoke":
+          return "/oauth/revoke";
+        case "client.js":
+          return "/oauth/client.js";
+        default:
+          return "unknown";
+      }
+    }
   }
 
   if (segments[0] !== "api" || segments[1] !== "v1") return "unknown";

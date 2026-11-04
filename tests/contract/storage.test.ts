@@ -113,7 +113,7 @@ test("an existing v1 database receives the remaining migrations", async (t) => {
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2, 3],
+      [1, 2, 3, 4],
     );
 
     const table = await db.first<{ name: string }>(
@@ -165,7 +165,7 @@ test("an interrupted migration rolls back and the database reopens", async (t) =
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2, 3],
+      [1, 2, 3, 4],
     );
     const columns = await db.all<{ name: string }>("PRAGMA table_info(audit_events)");
     assert.equal(columns.filter((column) => column.name === "detail").length, 1);
@@ -215,7 +215,7 @@ db.close();
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2, 3],
+      [1, 2, 3, 4],
     );
     const columns = await db.all<{ name: string }>("PRAGMA table_info(audit_events)");
     assert.equal(columns.filter((column) => column.name === "detail").length, 1);
@@ -239,7 +239,7 @@ test("an existing v2 database receives migration 003 sessions", async (t) => {
     );
     assert.deepEqual(
       versions.map((row) => row.version),
-      [1, 2, 3],
+      [1, 2, 3, 4],
     );
     const table = await db.first<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
@@ -271,6 +271,73 @@ test("an existing v2 database receives migration 003 sessions", async (t) => {
     db.close();
   }
 });
+
+test("an existing v3 database receives migration 004 OAuth tables", async (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "corkboard-v3-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "legacy.sqlite");
+
+  createLegacyV3(dbPath, repoRoot);
+
+  const db = await openSqliteDatabase(dbPath);
+  try {
+    const versions = await db.all<{ version: number }>(
+      "SELECT version FROM schema_migrations ORDER BY version",
+    );
+    assert.deepEqual(
+      versions.map((row) => row.version),
+      [1, 2, 3, 4],
+    );
+    for (const table of [
+      "oauth_clients",
+      "oauth_authorization_codes",
+      "oauth_refresh_tokens",
+    ]) {
+      const row = await db.first<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        [table],
+      );
+      assert.equal(row?.name, table);
+    }
+    const codeColumns = (await db.all<{ name: string }>(
+      "PRAGMA table_info(oauth_authorization_codes)",
+    )).map((column) => column.name);
+    for (const column of [
+      "client_id",
+      "account_id",
+      "speaker_id",
+      "project_id",
+      "scopes_json",
+      "code_prefix",
+      "code_verifier_hash",
+      "redirect_uri",
+      "resource",
+      "expires_at",
+      "consumed_at",
+    ]) {
+      assert.ok(codeColumns.includes(column), `missing column ${column}`);
+    }
+  } finally {
+    db.close();
+  }
+});
+
+function createLegacyV3(dbPath: string, repoRoot: string): void {
+  const legacy = new DatabaseSync(dbPath);
+  for (const file of [
+    "001_init.sql",
+    "002_credential_project_grants.sql",
+    "003_sessions.sql",
+  ]) {
+    legacy.exec(readFileSync(join(repoRoot, "migrations", file), "utf8"));
+  }
+  const insert = legacy.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  );
+  for (const version of [1, 2, 3]) insert.run(version, new Date().toISOString());
+  legacy.close();
+}
 
 function createLegacyV2(dbPath: string, repoRoot: string): void {
   const legacy = new DatabaseSync(dbPath);
@@ -306,6 +373,7 @@ test("built adapter opens its bundled migration from dist", async (t) => {  cons
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "001_init.sql")));
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "002_credential_project_grants.sql")));
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "003_sessions.sql")));
+  assert.ok(existsSync(join(repoRoot, "dist", "migrations", "004_oauth.sql")));
 
   const dir = mkdtempSync(join(tmpdir(), "corkboard-built-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

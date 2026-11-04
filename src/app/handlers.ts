@@ -6,6 +6,20 @@ import { sha256Hex } from "../domain/digest.ts";
 import { normalizeEmail, validateLoginPassword } from "../domain/validation.ts";
 import { createMcpEndpoint } from "../mcp/http.ts";
 import {
+  clearedCookie,
+  csrfCookie,
+  sessionCookie,
+} from "./cookies.ts";
+import { json, noContent, randomRequestId } from "./responses.ts";
+import {
+  DEFAULT_OAUTH_REGISTER_RATE_LIMIT,
+  DEFAULT_OAUTH_TOKEN_RATE_LIMIT,
+  handleOAuthRoute,
+  isOAuthPath,
+  normalizeOAuthBaseUrl,
+  type OAuthRouteOptions,
+} from "./oauth.ts";
+import {
   DEFAULT_LOGIN_RATE_LIMIT,
   DEFAULT_RATE_LIMIT,
   RateLimiter,
@@ -27,7 +41,6 @@ import { getPrincipalIdentity } from "../service/identity.ts";
 import {
   CSRF_COOKIE_NAME,
   CSRF_HEADER_NAME,
-  SESSION_ABSOLUTE_MS,
   SESSION_COOKIE_NAME,
   authenticateSession,
   loginAccount,
@@ -50,8 +63,6 @@ export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const MAX_LIMIT = 100;
 const DECODER = new TextDecoder();
 const EMAIL_ENCODER = new TextEncoder();
-const SESSION_MAX_AGE_SECONDS = SESSION_ABSOLUTE_MS / 1000;
-const COOKIE_EXPIRY_EPOCH = "Thu, 01 Jan 1970 00:00:00 GMT";
 
 const FORBIDDEN_SEND_FIELDS: ReadonlySet<string> = new Set([
   "speaker_id",
@@ -96,6 +107,18 @@ export interface CreateAppOptions {
   loginRateLimitNow?: () => number;
   loginRateLimitMaxKeys?: number;
   loginRateLimitIdleMs?: number;
+  /**
+   * OAuth authorization-server base URL (`https://host`, no path/query/hash).
+   * Omitted/undefined disables every OAuth route with a fixed 503; an invalid
+   * value fails construction. The Node adapter validates it at startup.
+   */
+  publicBaseUrl?: string;
+  oauthRegisterRateLimit?: RateLimitConfig;
+  oauthTokenRateLimit?: RateLimitConfig;
+  /** Injectable clock (milliseconds) for deterministic OAuth limit tests. */
+  oauthRateLimitNow?: () => number;
+  oauthRateLimitMaxKeys?: number;
+  oauthRateLimitIdleMs?: number;
 }
 
 interface RequestContext {
@@ -111,64 +134,6 @@ interface ProjectRow {
   status: string;
   created_at: string;
   updated_at: string | null;
-}
-
-function randomRequestId(): string {
-  const raw = crypto.getRandomValues(new Uint8Array(16));
-  let binary = "";
-  for (const byte of raw) binary += String.fromCharCode(byte);
-  return `req_${btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
-}
-
-function json(
-  status: number,
-  body: unknown,
-  extra: Record<string, string | readonly string[]> = {},
-): Response {
-  const headers = new Headers({
-    "cache-control": "no-store",
-    "content-type": "application/json; charset=utf-8",
-    "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer",
-  });
-  for (const [name, value] of Object.entries(extra)) {
-    if (typeof value === "string") {
-      headers.set(name, value);
-    } else {
-      for (const item of value) headers.append(name, item);
-    }
-  }
-  return new Response(JSON.stringify(body), { status, headers });
-}
-
-// 204 keeps the same hardening headers and carries no body or content type.
-function noContent(extra: Record<string, string | readonly string[]> = {}): Response {
-  const headers = new Headers({
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer",
-  });
-  for (const [name, value] of Object.entries(extra)) {
-    if (typeof value === "string") {
-      headers.set(name, value);
-    } else {
-      for (const item of value) headers.append(name, item);
-    }
-  }
-  return new Response(null, { status: 204, headers });
-}
-
-function sessionCookie(token: string): string {
-  return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
-}
-
-function csrfCookie(token: string): string {
-  return `${CSRF_COOKIE_NAME}=${token}; Path=/; Secure; SameSite=Strict; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
-}
-
-function clearedCookie(name: string, httpOnly: boolean): string {
-  const httpOnlyFlag = httpOnly ? "HttpOnly; " : "";
-  return `${name}=; Path=/; ${httpOnlyFlag}Secure; SameSite=Strict; Max-Age=0; Expires=${COOKIE_EXPIRY_EPOCH}`;
 }
 
 function errorBody(code: ErrorCode, message: string, requestId: string): unknown {
@@ -507,6 +472,7 @@ async function route(
   loginLimiter: RateLimiter,
   metrics: MetricsRegistry,
   metricsToken: string | undefined,
+  oauth: OAuthRouteOptions,
 ): Promise<Response> {
   const url = new URL(request.url);
   const segments = url.pathname.split("/").filter((segment) => segment !== "");
@@ -537,6 +503,12 @@ async function route(
     }
     if (method !== "GET") return methodNotAllowed("GET", requestId);
     return json(200, metrics.snapshot());
+  }
+
+  // Public OAuth discovery, registration, authorization, and token routes use
+  // the account session (not a bearer credential) and their own limiters.
+  if (isOAuthPath(segments)) {
+    return handleOAuthRoute(deps, request, url, oauth, loginLimiter, requestId);
   }
 
   const isApi = segments[0] === "api" && segments[1] === "v1";
@@ -685,6 +657,38 @@ export function createApp(
       ? {}
       : { idleMs: options.loginRateLimitIdleMs }),
   });
+  // OAuth is optional: no base URL means its routes answer with a fixed 503.
+  // An invalid configured URL throws here, before any route can serve.
+  const oauthOptions: OAuthRouteOptions = {
+    publicBaseUrl:
+      options.publicBaseUrl === undefined
+        ? undefined
+        : normalizeOAuthBaseUrl(options.publicBaseUrl),
+    registerLimiter: new RateLimiter(
+      options.oauthRegisterRateLimit ?? DEFAULT_OAUTH_REGISTER_RATE_LIMIT,
+      {
+        ...(options.oauthRateLimitNow === undefined ? {} : { now: options.oauthRateLimitNow }),
+        ...(options.oauthRateLimitMaxKeys === undefined
+          ? {}
+          : { maxKeys: options.oauthRateLimitMaxKeys }),
+        ...(options.oauthRateLimitIdleMs === undefined
+          ? {}
+          : { idleMs: options.oauthRateLimitIdleMs }),
+      },
+    ),
+    tokenLimiter: new RateLimiter(
+      options.oauthTokenRateLimit ?? DEFAULT_OAUTH_TOKEN_RATE_LIMIT,
+      {
+        ...(options.oauthRateLimitNow === undefined ? {} : { now: options.oauthRateLimitNow }),
+        ...(options.oauthRateLimitMaxKeys === undefined
+          ? {}
+          : { maxKeys: options.oauthRateLimitMaxKeys }),
+        ...(options.oauthRateLimitIdleMs === undefined
+          ? {}
+          : { idleMs: options.oauthRateLimitIdleMs }),
+      },
+    ),
+  };
   const metrics = options.metrics ?? new MetricsRegistry();
   const clock = options.metricsNow ?? ((): number => performance.now());
   return async (request: Request): Promise<Response> => {
@@ -703,6 +707,7 @@ export function createApp(
         loginLimiter,
         metrics,
         metricsToken,
+        oauthOptions,
       );
     } catch (error) {
       if (error instanceof AppError) {

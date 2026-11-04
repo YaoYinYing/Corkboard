@@ -47,8 +47,10 @@ function isScope(value: string): value is Scope {
   return (SCOPES as readonly string[]).includes(value);
 }
 
-// Unknown strings and malformed JSON fail closed to an empty scope set.
-function parseScopeJson(value: string): Set<Scope> {
+// Unknown strings and malformed JSON fail closed to an empty scope set. Shared
+// with the OAuth consent path so credential and membership scope parsing cannot
+// drift.
+export function parseScopeJson(value: string): Set<Scope> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);

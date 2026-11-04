@@ -1,15 +1,19 @@
 # MCP Streamable HTTP
 
 **Status: implemented and locally verified for the self-hosted Node.js 24 + SQLite
-deployment, authenticated by an existing scoped Corkboard bearer credential.**
+deployment, authenticated by either an existing scoped Corkboard bearer credential or
+an OAuth 2.1 access token issued by this server.**
 
-This slice is the bearer-authenticated transport and the six read/write tools. It does
-**not** implement OAuth 2.1/PKCE, protected-resource/authorization-server discovery,
-ChatGPT Web installation or account linking, or any conversation-level ChatGPT tool
-invocation. None of those platform capabilities are verified here. Local Codex/Claude
-Code-style clients can connect with a scoped `CORKBOARD_APIKEY`; the key belongs in the
-client's environment or MCP server configuration, never in a chat message, model prompt,
-tool argument, or tool output.
+This slice is the bearer-authenticated transport and the six read/write tools. The
+OAuth 2.1 authorization-server core is implemented separately (see
+[`oauth.md`](./oauth.md)): an OAuth access token is an ordinary `credentials` row with
+the consented speaker, project, and `message.read`/`message.send` scopes, so it passes
+the same `authenticateBearer` and every tool reuses the same service authorization.
+The ChatGPT Web plugin installation/account-linking experience and any
+conversation-level ChatGPT tool invocation are **not implemented and not verified**.
+Local Codex/Claude Code-style clients can connect with a scoped `CORKBOARD_APIKEY`; the
+key belongs in the client's environment or MCP server configuration, never in a chat
+message, model prompt, tool argument, or tool output.
 
 REST remains the authoritative API. Every MCP tool calls the same service functions and
 authorization layer as REST (`src/service/`); there is no MCP-specific authorization
@@ -29,11 +33,13 @@ Every request, including `initialize`, requires:
 Authorization: Bearer cb_...
 ```
 
+The value may be a speaker API key or an OAuth-issued `cb_oat_` access token.
 Authentication happens before any MCP protocol handling or session creation. A missing,
 malformed, unknown, revoked, or expired credential returns HTTP `401` with the standard
 Corkboard error envelope `{ "error": { "code": "UNAUTHENTICATED", ... } }` and no
 `mcp-session-id`. A valid credential with an inactive account, speaker, or project is
-denied by the same service checks used by REST.
+denied by the same service checks used by REST. An OAuth token is limited to its
+consented scopes and project grant; it cannot see or act in other projects.
 
 The bearer token is never echoed in a tool result, log entry, or error. The transport
 receives the derived principal (speaker, account, credential id, scopes) and a
@@ -218,17 +224,23 @@ per-agent credential:
 ```
 
 Each agent should have its own credential. Never paste the token into a conversation,
-ask a model to remember it, or print it in tool output. OAuth is not implemented, so do
-not attempt to link a ChatGPT Web account in this slice.
+ask a model to remember it, or print it in tool output. OAuth-issued access tokens are
+accepted in the same header, but ChatGPT Web account linking is not verified; do not
+claim it works from a local OAuth test.
 
 ## Explicitly not implemented or verified
 
-- OAuth 2.1 authorization code + PKCE, discovery metadata, consent, refresh rotation, and
-  revocation endpoints.
-- ChatGPT Web plugin installation/connection and account linking.
+- ChatGPT Web plugin installation/connection, account-linking UI, and sharing.
 - Conversation-level ChatGPT tool invocation and write availability by plan/workspace.
+- OIDC identity tokens, JWT-signed access tokens, implicit/client-credentials/device
+  flows, token introspection, and an OAuth consent-management UI.
 - Server-initiated SSE notifications and resumability.
 - Session persistence across restarts, multiple processes, or Cloudflare Workers
   isolates.
 - Attachments, search over bodies, expiry tools, admin/member/key tools.
 - WebSockets.
+
+The OAuth 2.1 authorization code + PKCE flow, discovery metadata, dynamic registration,
+refresh rotation, and revocation endpoints **are** implemented; their exact contract is
+in [`oauth.md`](./oauth.md). A local OAuth success does not verify any ChatGPT Web
+capability.

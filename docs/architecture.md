@@ -47,11 +47,11 @@ backups and storage artifacts, not the operator.
 | --- | --- |
 | `src/domain/` | Validation, authorization decisions, message semantics |
 | `src/auth/` | Credential hashing, bearer authentication, portable password KDF, session/CSRF tokens |
-| `src/service/` | Session login/validation/revocation beside the bearer service layer |
+| `src/service/` | Session login/validation/revocation, OAuth client/code/token/consent logic beside the bearer service layer |
 | `src/storage/` | `SqlDatabase` port and SQLite/D1 adapters |
 | `src/storage/blobs/` | `BlobStore` port and local/R2 adapters |
 | `src/crypto/` | AES-256-GCM envelope, key provider, AAD |
-| `src/app/` | Platform-neutral HTTP handlers using Web `Request`/`Response` |
+| `src/app/` | Platform-neutral HTTP handlers and OAuth pages using Web `Request`/`Response` |
 | `src/platforms/node/` | `node:http` adapter, lifecycle, CLI |
 | `src/platforms/workers/` | Worker entrypoint (planned) |
 | `src/mcp/` | Streamable HTTP endpoint and six tools over the same service layer (bearer auth) |
@@ -140,12 +140,21 @@ Shared relational schema; no table-per-project.
 - `idempotency_keys` — `(speaker_id, project_id, key)` with payload digest and result.
 - `audit_events` — sanitized security events; the optional `detail` column carries
   identifier/scope JSON only (never tokens or message content).
+- `oauth_clients` — public dynamic-registration clients: opaque `client_id`, name,
+  registered redirect URI JSON, status. No client secret.
+- `oauth_authorization_codes` — client/account/speaker/project/scopes, code prefix +
+  keyed HMAC verifier binding the PKCE challenge, redirect/resource, expiry, and
+  one-time consumption time. No plaintext code or verifier.
+- `oauth_refresh_tokens` — family/client/credential, token prefix + keyed HMAC
+  verifier, created/expiry/revoked/rotated timestamps. Reuse of a rotated or revoked
+  row revokes the family and the underlying credential.
 - `service_settings` — non-secret deployment preferences only.
 
 Migrations are ordered `migrations/NNN_*.sql` files applied once each and recorded in
 `schema_migrations`; migration 002 adds credential-project grants, the slice-B expiry
 index for existing databases, and the audit `detail` column. Migration 003 adds
-`sessions` with `account_id` and `token_prefix` indexes.
+`sessions` with `account_id` and `token_prefix` indexes. Migration 004 adds the three
+OAuth tables and their lookup indexes.
 
 Indexes are listed in `migrations/001_init.sql` and `migrations/002_*.sql` when
 implemented. Every tenant-owned query filters on `project_id`; object access alone is
@@ -260,8 +269,57 @@ separate trust domain from speaker bearer credentials:
   the normalized email (10/minute, burst 5, injected clock), returned as `429` with
   `Retry-After`. It is process-local and not distributed.
 
-OAuth 2.1/PKCE, ChatGPT Web account linking, registration, email verification, and
-password reset remain unimplemented; no OAuth or session flow grants speaker scopes.
+ChatGPT Web account linking, registration, email verification, and
+password reset remain unimplemented. The OAuth authorization-server core is described
+below; a session is not an OAuth grant and an OAuth access token is not a session.
+
+## OAuth 2.1 authorization-server core
+
+`src/service/oauth.ts` implements the delegated-speaker grant; `src/app/oauth.ts`
+serves the public metadata, form handlers, and two escaped HTML pages.
+
+- **Client model.** RFC 7591 dynamic registration creates public clients only
+  (`token_endpoint_auth_method=none`) with an opaque `client_id`, a bounded name, and
+  1–10 exact-match HTTPS redirect URIs (loopback HTTP is allowed for local clients).
+  There is no client secret, no API key, and no shared credential in the flow.
+- **Authorization.** `GET /oauth/authorize` requires the human session cookie. Without
+  one, a CSP-constrained sign-in form posts to `/oauth/signin`, which calls the same
+  `loginAccount` service as `POST /api/v1/session` and sets the same session/CSRF
+  cookies. The consent page lists only speakers owned by the signed-in account with an
+  active membership whose capabilities contain the requested `message.read` /
+  `message.send` scopes. `POST /oauth/consent` requires the session and
+  `X-CSRF-Token`, then re-reads client, redirect, speaker ownership, account/speaker/
+  project status, membership, and capabilities from storage. The form is never
+  authoritative. OAuth can never request or grant `project.edit`, member scopes, or
+  `receipt.write`.
+- **Codes.** Random 256-bit, 5-minute, one-time. The row stores a prefix and a keyed
+  HMAC over the code plus the S256 verifier output; consumption is one conditional
+  `UPDATE`. Exchange re-checks the exact client, redirect, resource, PKCE verifier,
+  code state, and current consent before minting.
+- **Access tokens.** `cb_oat_` + 256 bits, inserted into the existing `credentials`
+  table with the consented scopes and one `credential_project_grants` row, expiring in
+  1 hour. `authenticateBearer` and the service authorization layer are unchanged, so
+  there is no second authorization path and no membership/grant widening.
+- **Refresh tokens.** `cb_ort_` + 256 bits, one family per consent, 30 days. Each
+  refresh marks the old row rotated and replaces the underlying credential's prefix,
+  verifier, and expiry, which immediately retires the previous access token. Reuse of
+  a rotated/revoked row, or a refresh after membership/account/speaker/project
+  revocation, revokes the family and the credential.
+- **Revocation.** RFC 7009 form endpoint; well-formed requests always return `200`.
+  Unknown tokens, wrong clients, and ordinary speaker tokens are silent no-ops.
+- **Configuration.** `CORKBOARD_PUBLIC_BASE_URL` must be an `https` origin. Unset means
+  the feature is disabled with a fixed `503`; invalid fails startup before filesystem
+  work. Discovery derives every endpoint from that origin.
+- **HTML and headers.** Both pages escape all values, load no third-party resources,
+  and use no inline JavaScript; the consent form submits through the constant
+  same-origin `/oauth/client.js` with the CSRF header. CSP is
+  `default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self';
+  base-uri 'none'; frame-ancestors 'none'`. Every OAuth response is `no-store` and
+  `nosniff`.
+- **Limits.** Process-local registration and token-exchange buckets, 64 KiB body cap,
+  no CORS, no JWT/OIDC/implicit/client-credentials/device flows, no admin OAuth
+  management. ChatGPT Web installation, sharing, and conversation-level tool
+  invocation remain unimplemented and unverified.
 
 ## Deletion and expiry
 
@@ -339,9 +397,10 @@ so there is no second authorization path and no cached authorization state.
   message, stack, body, summary, or token. Invalid arguments are schema errors handled
   before the tool runs.
 
-OAuth 2.1/PKCE, ChatGPT Web installation/linking, conversation-level tool invocation,
-SSE notifications, resumability, and cross-process session storage are not implemented
-or verified.
+OAuth 2.1 access tokens are accepted by the same `/mcp` authentication path because
+they are ordinary scoped `credentials` rows (see the OAuth section). ChatGPT Web
+installation/linking, conversation-level tool invocation, SSE notifications,
+resumability, and cross-process session storage are not implemented or verified.
 
 ## Per-credential rate limiting
 

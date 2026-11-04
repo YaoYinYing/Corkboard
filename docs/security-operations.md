@@ -179,9 +179,51 @@ written) is not prevented; no stronger guarantee is claimed. See
   no-password failures are uniform `401`. Apply per-IP and volumetric limits at the
   reverse proxy; the application does not trust or read forwarding headers.
 
-OAuth 2.1/PKCE, ChatGPT Web account linking, registration, email verification, and
-password reset are not implemented. Do not describe a session as OAuth or as authority
-to act as a speaker.
+OAuth 2.1/PKCE is implemented as an authorization-server core in slice J (see
+[`oauth.md`](./oauth.md)); ChatGPT Web account linking, registration, email
+verification, and password reset are not implemented. Do not describe a session as OAuth
+or as authority to act as a speaker.
+
+## OAuth 2.1 authorization server
+
+- **Configuration.** `CORKBOARD_PUBLIC_BASE_URL` must be an `https` origin with no
+  path, query, fragment, username, or password. An invalid value fails startup
+  before the data directory is created, opened, or chmodded; the error never includes
+  the value. Unset/empty disables OAuth with a fixed `503`; existing bearer routes are
+  unaffected. The value is public configuration, not a secret.
+- **No API key or client secret.** Dynamic registration creates public clients only
+  (`token_endpoint_auth_method=none`). Do not add a client secret, shared API key, or
+  `CORKBOARD_APIKEY` to an OAuth request, consent page, token response, or prompt.
+- **Token storage.** Authorization codes and refresh tokens are random 256-bit values
+  stored as a public prefix plus a keyed HMAC-SHA-256 verifier under the existing
+  `CORKBOARD_CREDENTIAL_PEPPER` (no new secret). Access tokens are ordinary
+  `credentials` rows with `cb_oat_` tokens, consented scopes, and one project grant.
+  Raw codes, refresh tokens, and access tokens exist only in transit/responses; none
+  is logged.
+- **Lifetimes.** Authorization code 5 minutes and single-use; access token 1 hour;
+  refresh token 30 days per rotation. Refresh rotates both values and replaces the
+  access credential's prefix/verifier/expiry; a reused rotated/revoked refresh token
+  revokes the family and credential.
+- **Consent.** Only `message.read` and `message.send` can be delegated. The consent
+  endpoint requires the session cookie and `X-CSRF-Token` and re-reads ownership,
+  membership, project state, and capabilities. It can never grant `project.edit`,
+  member scopes, `receipt.write`, or another project's speaker.
+- **Revocation.** `POST /oauth/revoke` always returns `200` for a well-formed request.
+  Revoking a refresh token revokes its family and credential; revoking an OAuth access
+  token revokes the credential and its families. A normal speaker token is ignored.
+  Take effect on the next request; there is no authorization cache. To revoke every
+  session of a client, revoke each refresh token or the underlying credential by id,
+  or disable the account/speaker/membership.
+- **Rate limits.** Registration is 10/minute (burst 5, global process-local key) and
+  token exchange 60/minute (burst 20, keyed by `client_id`). These are additional
+  denial only, reset on restart, and are not distributed. Per-IP controls remain the
+  reverse proxy's job.
+- **Headers and pages.** Every OAuth response is `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`. HTML pages have no inline JavaScript, no
+  third-party resources, escaped values, and the CSP documented in `oauth.md`.
+- **Cleanup.** Expired/rotated OAuth rows are inert but are not purged automatically;
+  no command removes them. Deleting a refresh row invalidates that chain; deleting a
+  credential row makes its access token unauthenticated.
 
 ## MCP transport
 
@@ -218,9 +260,11 @@ to act as a speaker.
   service messages, stacks, bodies, summaries, or tokens.
 - `POST /mcp` uses the 64 KiB request cap. `GET` returns `405` (no server-initiated
   SSE); `DELETE` terminates a session. No WebSocket transport exists.
-- OAuth 2.1/PKCE, ChatGPT Web installation/linking, and conversation-level tool
-  invocation are not implemented. Do not place a token in a model prompt or chat
-  message; local clients read it from their own environment/configuration.
+- OAuth 2.1 access tokens are ordinary scoped `credentials` rows, so `/mcp` accepts
+  them through the same authentication path. ChatGPT Web installation/linking and
+  conversation-level tool invocation are not implemented. Do not place a token in a
+  model prompt or chat message; local clients read it from their own
+  environment/configuration.
 
 ## Database and blobs
 
@@ -429,7 +473,9 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
 - Metrics are per-process in-memory counters with no persistence, aggregation, or
   per-project views; the latency histogram is request duration, not queue-to-commit.
 - Human sessions are implemented as server-side rows with 12-hour absolute / 30-minute
-  idle expiry and per-session revocation. There is no browser UI, registration, email
-  verification, password reset, OAuth 2.1/PKCE, or ChatGPT Web linking. Login rate
-  limiting and outcome uniformity are bounded but not perfectly timing-equivalent
-  across PBKDF2 and the Node-only legacy scrypt path.
+  idle expiry and per-session revocation. The OAuth 2.1 authorization-server core is
+  implemented (dynamic public clients, PKCE, rotating refresh tokens, revocation), but
+  the ChatGPT Web plugin experience is not implemented or verified. There is no browser
+  UI beyond the OAuth sign-in/consent pages, registration, email verification, or
+  password reset. Login rate limiting and outcome uniformity are bounded but not
+  perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.

@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–I implemented and pushed |
+| Phase | 0 complete; vertical slices A–I implemented and pushed; slice J candidate |
 | Last pushed checkpoint | `9a4f6c5` (human account sessions, audited tree `cc8df35`) on `origin/main`; CI pending |
-| Branch | `main`, clean; the `slice-i-session` two-commit candidate was fast-forwarded |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS |
-| Next milestone | OAuth 2.1/PKCE authorization server (human session prerequisite now exists), ChatGPT Web integration, D1/R2 parity, attachments, per-project observability |
+| Branch | `slice-j-oauth` candidate (based on `8401ae3`); not audited, pushed, or merged |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: independent review PENDING |
+| Next milestone | Independent review of slice J, then ChatGPT Web acceptance (separate), D1/R2 parity, attachments, per-project observability |
 
 ## Checkpoint history
 
@@ -266,10 +266,11 @@ pushed.
   `{"error":{"code":"<stable code>"}}` only; service messages, stacks, bodies, summaries,
   and tokens are not disclosed. Unexpected errors become `UNAVAILABLE`.
 - **Docs.** New `docs/mcp.md`; `docs/api.md`, `docs/architecture.md`,
-  `docs/security-operations.md`, and `docs/deployments.md` updated. They state that
-  OAuth 2.1/PKCE, ChatGPT Web installation/linking, and conversation-level ChatGPT tool
-  invocation are not implemented or verified, and that local clients must supply a
-  scoped bearer token outside prompts.
+  `docs/security-operations.md`, and `docs/deployments.md` updated. At slice E they
+  stated that OAuth 2.1/PKCE, ChatGPT Web installation/linking, and conversation-level
+  ChatGPT tool invocation were not implemented or verified; slice J later adds the
+  OAuth authorization-server core. ChatGPT Web remains unimplemented. Local clients
+  must supply a scoped bearer token outside prompts.
 - **Tests.** `tests/integration/mcp.test.ts` uses the official SDK
   `Client` + `StreamableHTTPClientTransport` against the real Web handler (initialize,
   tools/list, tools/call, session header, DELETE). It covers exact six-tool exposure and
@@ -509,10 +510,10 @@ pushed.
 
 - **Scope.** An owner account with a password can sign in, read its session, use the
   session on the session routes, and sign out. Registration, email verification,
-  password reset, OAuth 2.1/PKCE, ChatGPT integration, a web UI, speaker impersonation,
-  and dashboard endpoints are not implemented. A session authenticates an account and
-  never a speaker: bearer routes and `/mcp` do not consult it, and the session token is
-  not a bearer credential.
+  password reset, OAuth 2.1/PKCE (added later by slice J), ChatGPT integration, a
+  web UI, speaker impersonation, and dashboard endpoints are not part of this slice. A
+  session authenticates an account and never a speaker: bearer routes and `/mcp` do not
+  consult it, and the session token is not a bearer credential.
 - **Migration 003.** `sessions(id, account_id REFERENCES accounts, token_prefix,
   token_verifier, csrf_verifier, created_at, last_seen_at, expires_at, revoked_at)` with
   `account_id` and `token_prefix` indexes. Applies on a fresh database and on a
@@ -566,6 +567,86 @@ pushed.
   is not claimed (especially vs. the Node-only scrypt path). Session rows are not
   automatically purged and there is no cleanup command. No browser UI, registration,
   recovery, OAuth, or speaker delegation exists.
+
+## Vertical slice J — OAuth 2.1 authorization-server core (candidate; review pending)
+
+- **Scope.** A signed-in human account can authorize a dynamically registered public
+  client to act as one selected speaker in one selected project with only
+  `message.read` and/or `message.send`. The client completes authorization code + PKCE
+  (S256), exchanges the code for a short-lived `cb_oat_` access token, uses it on the
+  existing REST/MCP APIs, refreshes with rotation, and revokes. No API key or client
+  secret exists in the flow. The ChatGPT Web plugin installation/sharing experience and
+  conversation-level ChatGPT invocation are not implemented or verified.
+- **Migration 004.** `oauth_clients`, `oauth_authorization_codes`, and
+  `oauth_refresh_tokens` with foreign keys and lookup indexes. Codes and refresh tokens
+  are stored only as a public prefix plus a keyed HMAC verifier; no plaintext token,
+  code, verifier, or client secret is stored. Applies on a fresh database and on a
+  migration-003 database.
+- **Client registration.** `POST /oauth/register` accepts bounded JSON, public clients
+  only (`token_endpoint_auth_method=none`), 1–10 exact absolute HTTPS redirect URIs
+  (loopback HTTP allowed for `127.0.0.1`/`localhost`), bounded `client_name`, and
+  consistent `grant_types`/`response_types`. It returns snake_case registered metadata
+  and an opaque `client_id`; unknown metadata is ignored. Registration is limited to
+  10/minute (burst 5, process-local global key).
+- **Authorization and consent.** `GET /oauth/authorize` requires the session cookie and
+  validates client, exact redirect, `response_type=code`, S256 PKCE, resource = the
+  configured base URL, bounded state, and a subset of `message.read`/`message.send`.
+  Invalid redirects render HTML `400` and never redirect. Signed-out browsers get an
+  escaped, strict-CSP sign-in form (no inline script) that posts to `/oauth/signin`; a
+  double-submit `HttpOnly; Secure; SameSite=Lax` cookie plus hidden field blocks login
+  CSRF, and the handler uses the same `loginAccount` service and cookies as
+  `POST /api/v1/session`. The consent page lists only speakers owned by the signed-in
+  account with an active membership whose capabilities contain every requested scope.
+  `POST /oauth/consent` requires the session and `X-CSRF-Token`, re-reads client,
+  redirect, ownership, account/speaker/project status, membership, and capabilities,
+  and issues a 5-minute single-use code. Deny redirects `access_denied` with no code.
+  OAuth can never grant `project.edit`, member scopes, or `receipt.write`.
+- **Token endpoint.** Form-encoded only. Authorization code exchange verifies the exact
+  client, registered redirect, resource, PKCE S256 (keyed HMAC over code + challenge at
+  fixed length), code expiry, and single use via a conditional `UPDATE`, then
+  re-checks consent and re-reads all status/membership state. Success returns a
+  1-hour `cb_oat_` access token and a 30-day `cb_ort_` refresh token with
+  `token_type=Bearer`, `expires_in`, and `scope`. Refresh rotates the refresh row and
+  replaces the underlying credential's prefix/verifier/expiry, retiring the previous
+  access token immediately; reuse of a rotated/revoked row revokes the family and
+  credential. Scope cannot widen. Token exchange is limited to 60/minute (burst 20,
+  process-local, keyed by `client_id`).
+- **No second authorization path.** Access tokens are ordinary `credentials` rows with
+  one `credential_project_grants` row, so `authenticateBearer` and the service
+  authorization layer are unchanged. Revocation, expiry, membership/grant removal, and
+  scope checks take effect on the next REST/MCP request.
+- **Revocation.** `POST /oauth/revoke` is RFC 7009 form-encoded and always returns
+  `200` for a well-formed request: unknown tokens, wrong clients, and ordinary speaker
+  tokens are no-ops. A refresh token revokes its family and credential; an OAuth access
+  token revokes the credential and families for the matching client.
+- **Configuration.** `CORKBOARD_PUBLIC_BASE_URL` must be a plain `https` origin. Unset
+  disables every OAuth route with a fixed `503`; invalid fails startup before the data
+  directory is created/opened/chmodded. Discovery, issuer, and `resource` all derive
+  from that origin.
+- **Pages/headers.** Both HTML pages fully escape values, have no inline JavaScript and
+  no third-party resources, and use
+  `default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self';
+  base-uri 'none'; frame-ancestors 'none'`. The consent form submits through the
+  constant same-origin `/oauth/client.js` to add the CSRF header. Every OAuth response
+  is `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+- **Metrics/logging.** Fixed route labels for the OAuth paths; no client IDs, scopes,
+  codes, tokens, cookies, CSRF values, or form bodies are logged or used as labels.
+- **Tests.** New `tests/security/oauth.test.ts` (19 tests) and
+  `tests/integration/oauth.test.ts` (3 tests through real `startServer()`), plus
+  migration 004 contract coverage for fresh and 003→004 databases. Coverage includes
+  redirect mismatch/open redirect, PKCE wrong/missing/replay, code expiry/replay and
+  binding to client/redirect/resource/account/speaker/project/membership, consent
+  without session/CSRF, scope escalation (`project.edit`/member scopes), another
+  account's speaker/project, invalid DCR metadata and oversized/duplicate redirects,
+  discovery secrecy, access-token use on REST and MCP with exact scopes, refresh
+  rotation and reuse revocation, RFC 7009 no-oracle behavior, injected-clock rate
+  limits, DB-only verifier storage, log secrecy, HTML escaping/CSP, content-type
+  enforcement, and an end-to-end HTTP flow.
+- **Limitations.** Process-local OAuth registration/token buckets. Concurrent refresh
+  with the same token races and may revoke the family. Codes/refresh rows are not
+  automatically purged. No CORS, JWT/OIDC, implicit/client-credentials/device flows,
+  consent management UI, or admin OAuth endpoints. ChatGPT Web, D1/Workers, and real
+  browser verification remain external/unverified. Independent review is pending.
 
 ## Implemented and verified at this tree
 
@@ -804,10 +885,21 @@ Do not infer any of these from local MCP behavior or from another plan.
   metadata-only reads remain request-start-only by design; a bounded `..` filesystem
   test variant is still missing.
 - Bearer-authenticated MCP is implemented locally. Human account sessions are
-  implemented and pushed as slice I: sign-in, session read, and sign-out only. No
-  browser UI, registration, email verification, password reset, OAuth 2.1/PKCE, ChatGPT
-  Web installation/linking, or conversation-level ChatGPT tool invocation is
-  implemented or verified. A session cannot act as a speaker credential.
+  implemented and pushed as slice I: sign-in, session read, and sign-out only. Slice J
+  adds the OAuth 2.1 authorization-server core (public dynamic clients, PKCE, consent,
+  rotating refresh, revocation); the ChatGPT Web installation/linking experience and
+  conversation-level ChatGPT tool invocation remain unimplemented and unverified. A
+  session cannot act as a speaker credential; an OAuth access token is a speaker
+  credential, not a session.
+- Slice-J audit debt (candidate, non-blocking): OAuth registration and token-exchange
+  limits are process-local and reset on restart; concurrent refresh with the same token
+  can revoke a family; expired/rotated OAuth rows are never purged; the consent form
+  requires JavaScript to send the CSRF header (a `<noscript>` notice is shown); no
+  CORS, JWT/OIDC, introspection, consent-management UI, or admin OAuth endpoints; the
+  sign-in handler is a second HTTP entry to `loginAccount` (the `/api/v1/session`
+  JSON/content-type rule itself is unchanged); OAuth consent/code/token/revocation
+  events are not written to `audit_events` in this slice; D1/Workers and real
+  ChatGPT/browser behavior are unverified.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
   unauthenticated uploads still add memory pressure. A reverse-proxy body limit remains
@@ -822,7 +914,8 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Project listing uses `instr` over app-written capability JSON for pagination.
 - Engineered for D1 but only SQLite is executed; D1 trigger/RETURNING/error behavior is
   unverified.
-- Human account sessions are implemented without a browser UI (slice I). OAuth is not
+- Human account sessions are implemented without a general browser UI (slice I). The
+  OAuth core (slice J) adds only the minimal sign-in/consent pages; ChatGPT Web is not
   implemented.
 - Slice-G audit debt: idle/LRU eviction resets a bucket to full burst, which can exceed
   the configured sustained rate when `burst > 2 * perMinute` (non-default config);

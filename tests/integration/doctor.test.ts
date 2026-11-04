@@ -419,8 +419,8 @@ test("doctor reports a clean instance with a sent/read message", (t) => {
     assert.equal(result.status, 0, result.stderr);
     const report = parseJson(result);
 
-    assert.deepEqual(report.schema_versions.applied, [1, 2, 3]);
-    assert.deepEqual(report.schema_versions.expected, [1, 2, 3]);
+    assert.deepEqual(report.schema_versions.applied, [1, 2, 3, 4]);
+    assert.deepEqual(report.schema_versions.expected, [1, 2, 3, 4]);
     assert.deepEqual(report.schema_versions.missing, []);
     assert.equal(report.schema_versions.complete, true);
     assert.equal(report.key_presence.root_key, true);
@@ -459,7 +459,7 @@ test("doctor reports a clean instance with a sent/read message", (t) => {
     assert.equal(human.status, 0, human.stderr);
     assert.match(
       human.stdout,
-      /schema: applied 1,2,3; expected 1,2,3; missing none; unexpected none; complete/,
+      /schema: applied 1,2,3,4; expected 1,2,3,4; missing none; unexpected none; complete/,
     );
     assert.match(human.stdout, /counts: messages 1 \(ready 1/);
     assert.match(human.stdout, /issues: none/);
@@ -850,7 +850,7 @@ test("doctor does not apply migration 002 to a v1 database", (t) => {
     assert.equal(result.status, 1, result.stderr);
     const report = parseJson(result);
     assert.deepEqual(report.schema_versions.applied, [1]);
-    assert.deepEqual(report.schema_versions.missing, [2, 3]);
+    assert.deepEqual(report.schema_versions.missing, [2, 3, 4]);
     assert.equal(report.schema_versions.complete, false);
     assert.ok(report.issues.some((issue) => issue.code === "SCHEMA_INCOMPLETE"));
 
@@ -900,7 +900,7 @@ test("doctor reports SCHEMA_AHEAD when the database has a newer version", (t) =>
     );
     assert.equal(result.status, 1, result.stderr);
     const report = parseJson(result);
-    assert.deepEqual(report.schema_versions.applied, [1, 2, 3, 99]);
+    assert.deepEqual(report.schema_versions.applied, [1, 2, 3, 4, 99]);
     assert.deepEqual(report.schema_versions.unexpected, [99]);
     assert.deepEqual(report.schema_versions.missing, []);
     assert.equal(report.schema_versions.complete, false);
@@ -1090,8 +1090,8 @@ test("doctor sanitizes control characters in DB-derived human output", (t) => {
     // Formatter-level: an integrity message with controls is sanitized too.
     const report: DoctorReport = {
       schema_versions: {
-        applied: [1, 2, 3],
-        expected: [1, 2, 3],
+        applied: [1, 2, 3, 4],
+        expected: [1, 2, 3, 4],
         missing: [],
         unexpected: [],
         complete: true,

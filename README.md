@@ -18,12 +18,14 @@ Pre-alpha. This repository is built docs-first under the campaign contract in
 [`docs/campaign.md`](docs/campaign.md). Vertical slices A–D (Node.js + SQLite: scoped
 speaker credentials and project grants, encrypted bodies, ordered replay, receipts,
 expiry, HTTP API, bootstrap CLI), a **bearer-authenticated MCP Streamable HTTP**
-endpoint at `/mcp`, and **human account sessions** (password sign-in, session read,
-sign-out; no web UI) are implemented and tested locally. Cloudflare Workers/D1/R2,
-OAuth 2.1/PKCE, ChatGPT Web installation/linking, and the dashboard remain
-planned. Only capabilities marked *implemented* in
-[`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; MCP OAuth/ChatGPT integration
-is not implemented or verified.
+endpoint at `/mcp`, **human account sessions** (password sign-in, session read,
+sign-out; no general web UI), and an **OAuth 2.1 authorization-server core** (dynamic
+public clients, PKCE, consent, rotating refresh tokens, revocation) are implemented and
+tested locally. Cloudflare Workers/D1/R2, the ChatGPT Web plugin
+installation/linking experience, and the dashboard remain planned. Only capabilities
+marked *implemented* in
+[`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; the OAuth core does not
+verify ChatGPT Web integration.
 
 ## Repository map
 

@@ -134,7 +134,7 @@ export async function loginAccount(
 // Revoked, expired (absolute), idle-expired, unknown, and inactive-account
 // sessions all return the same UNAUTHENTICATED error. This read has no side
 // effects so a failed CSRF check cannot touch the row.
-async function loadSession(
+export async function validateSession(
   deps: ServiceDeps,
   token: string | undefined,
 ): Promise<SessionPrincipal> {
@@ -182,16 +182,36 @@ async function loadSession(
 }
 
 // Accepted requests refresh last_seen lazily; there is no authorization cache.
-export async function authenticateSession(
+// State-changing cookie routes validate first, check CSRF, then touch.
+export async function touchSession(
   deps: ServiceDeps,
-  token: string | undefined,
-): Promise<SessionPrincipal> {
-  const principal = await loadSession(deps, token);
+  principal: SessionPrincipal,
+): Promise<void> {
   await deps.db.run(
     "UPDATE sessions SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL",
     [deps.now().toISOString(), principal.sessionId],
   );
+}
+
+export async function authenticateSession(
+  deps: ServiceDeps,
+  token: string | undefined,
+): Promise<SessionPrincipal> {
+  const principal = await validateSession(deps, token);
+  await touchSession(deps, principal);
   return principal;
+}
+
+// Shared by sign-out and the OAuth consent form. A missing or wrong value is
+// FORBIDDEN and has no side effect; the raw CSRF value is never stored.
+export async function verifySessionCsrf(
+  deps: ServiceDeps,
+  principal: SessionPrincipal,
+  csrfToken: string | undefined,
+): Promise<void> {
+  if (csrfToken === undefined || csrfToken === "") throw new AppError("FORBIDDEN");
+  const presented = await hashSecret(csrfToken, deps.pepper);
+  if (!digestsEqual(presented, principal.csrfVerifier)) throw new AppError("FORBIDDEN");
 }
 
 // The CSRF header is compared as a keyed digest at fixed length. A missing or
@@ -201,10 +221,8 @@ export async function revokeSession(
   token: string | undefined,
   csrfToken: string | undefined,
 ): Promise<void> {
-  const principal = await loadSession(deps, token);
-  if (csrfToken === undefined || csrfToken === "") throw new AppError("FORBIDDEN");
-  const presented = await hashSecret(csrfToken, deps.pepper);
-  if (!digestsEqual(presented, principal.csrfVerifier)) throw new AppError("FORBIDDEN");
+  const principal = await validateSession(deps, token);
+  await verifySessionCsrf(deps, principal, csrfToken);
 
   await deps.db.run(
     "UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
