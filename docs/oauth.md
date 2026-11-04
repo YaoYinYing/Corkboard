@@ -34,9 +34,10 @@ registration are out of scope.
   route returns HTTP `503` with
   `{"error":{"code":"UNAVAILABLE","message":"OAuth is not configured"}}`. Existing
   bearer REST/MCP behavior is unchanged.
-- The configured origin is the discovery `issuer`, the protected-resource
-  `resource`, and the required `resource` value for authorization/token requests. It
-  must match how clients reach the service; a TLS reverse proxy supplies the origin.
+- The configured origin is the discovery `issuer` and the protected-resource
+  `resource`. It is also the value that an authorization or token request's
+  `resource` parameter must equal when that parameter is supplied. It must match how
+  clients reach the service; a TLS reverse proxy supplies the origin.
 
 ## Discovery
 
@@ -97,12 +98,15 @@ Rules:
 - `client_name`: 1–100 printable characters.
 - `token_endpoint_auth_method`, when present, must be `none`.
 - `grant_types`, when present, must contain `authorization_code` and may contain
-  `refresh_token`.
+  `refresh_token`. A client registered without `refresh_token` receives no refresh
+  token and cannot use the refresh grant.
 - `response_types`, when present, must be exactly `["code"]`.
 - Unknown metadata fields are ignored. Invalid metadata returns `400`
   `{"error":"invalid_client_metadata"}`.
 - Body cap: 64 KiB. Process-local registration limiter: **10 requests/minute, burst
-  5**, keyed globally (registration is unauthenticated). Not distributed.
+  5**, keyed globally (registration is unauthenticated). It remains a single bucket,
+  so endpoint availability under sustained abuse is a reverse-proxy concern. Not
+  distributed.
 
 Success is `201` and returns only registered metadata:
 
@@ -160,7 +164,9 @@ JSON/content-type rule of `/api/v1/session` is unchanged) and issues the same
   `HttpOnly; Secure; SameSite=Lax; Path=/oauth` cookie. A cross-site form POST cannot
   read the value and does not send the Lax cookie, so it fails.
 - `return_to` is accepted only as a relative `/oauth/authorize?...` path on the
-  configured origin; other values are rejected.
+  configured origin, at most 8192 characters, with no control characters. The
+  response redirects to the parsed, normalized path and query, never the raw supplied
+  string; invalid values are `400` and create no session.
 - Failed sign-in is uniform (`401`) and does not reveal whether the account exists.
   The sign-in attempt uses the same per-email login limiter as the session endpoint.
 - The page has no inline JavaScript and no third-party resources.
@@ -193,24 +199,31 @@ with the required CSRF header. Without JavaScript the consent cannot be submitte
 
 It re-reads the client, exact redirect URI, S256 challenge, resource, speaker
 ownership, active speaker/account/project, and the active membership's capabilities
-from storage. The submitted form is never trusted for authorization. Selecting an
-unowned speaker, a project without an active membership, or a scope the membership
-does not hold returns `403` and issues no code.
+from storage. The submitted form is never trusted for authorization. The form also
+carries a server-issued HMAC over the client, redirect, state, challenge, resource,
+and requested scope set; `requested_scope` and `request_signature` are mandatory and
+must verify before a code is issued. A consent submission that omits or forges either
+field, or selects/claims a scope outside the signed request, is rejected with `400`.
+Selecting an unowned speaker, a project without an active membership, or a scope the
+membership does not hold returns `403` and issues no code.
 
 - Allow returns `200` `{"redirect_to":"<registered redirect with code and state>"}`.
   The served script navigates there. The code is random 256-bit and single-use.
 - Deny returns `200` with `redirect_to` carrying `error=access_denied` and `state`,
   and issues no code.
 - Authorization codes live for **5 minutes**, are consumed by one conditional
-  `UPDATE`, and are bound to the client, account, speaker, project, scopes, redirect
-  URI, resource, and PKCE verifier.
+  `UPDATE`, and are bound to the client, account, the issuing session, speaker,
+  project, scopes, redirect URI, resource, and PKCE verifier. If that session is
+  revoked, expired, or idle-expired before exchange, the code fails `invalid_grant`.
 
 ## Token endpoint
 
 `POST /oauth/token` — `Content-Type: application/x-www-form-urlencoded` only; other
 media types are `400 {"error":"invalid_request"}`. Body cap 64 KiB. Process-local
-token-exchange limiter: **60 requests/minute, burst 20**, keyed by submitted
-`client_id` (bounded map). Not distributed.
+token-exchange limiters: **60 requests/minute, burst 20** keyed by submitted
+`client_id` (bounded map), plus a global **300 requests/minute, burst 60** bucket for
+the endpoint, so rotating an unauthenticated `client_id` cannot bypass limiting. Not
+distributed.
 
 ### `grant_type=authorization_code`
 
@@ -240,6 +253,9 @@ Fields: `client_id`, `code`, `redirect_uri`, `code_verifier`, optional `resource
 
 Fields: `client_id`, `refresh_token`, optional `scope`.
 
+- Refresh is available only to a client registered with the `refresh_token` grant. A
+  code-only client's exchange omits `refresh_token`, and presenting a refresh grant
+  for such a client returns `unauthorized_client`.
 - Every refresh **rotates** both the refresh token and the access token. A new row is
   inserted in the same refresh family; the previous row is marked `rotated_at`; the
   single underlying access credential's prefix, HMAC verifier, and expiry are
@@ -259,10 +275,10 @@ Fields: `client_id`, `refresh_token`, optional `scope`.
 
 Token failures are uniform JSON objects with no secrets:
 `{"error":"invalid_request" | "invalid_grant" | "invalid_scope" |
-"unsupported_grant_type"}`. Unknown clients, unknown codes, wrong redirects, wrong
-PKCE verifiers, replayed codes, and revoked consent all return the same
-`invalid_grant`, so codes and tokens cannot be enumerated. Codes and tokens are never
-logged.
+"unsupported_grant_type" | "unauthorized_client"}`. Unknown clients, unknown codes,
+wrong redirects, wrong PKCE verifiers, replayed codes, and revoked consent all return
+the same `invalid_grant`, so codes and tokens cannot be enumerated. Codes and tokens
+are never logged.
 
 ## Revocation
 
@@ -288,8 +304,9 @@ They authenticate through the existing `authenticateBearer`, so:
 
 - every REST and MCP authorization rule is unchanged;
 - OAuth can never widen membership, capabilities, or grants;
-- `project.read` is not granted, so `/api/v1/me` returns no projects and project
-  listing is empty; message read/send work only for the consented project;
+- `project.read` is not granted, so `/api/v1/me` returns no projects and
+  `GET /api/v1/projects` returns `403`; message read/send work only for the consented
+  project;
 - revocation, expiry, membership removal, capability downgrade, and grant removal
   take effect on the next request (no authorization cache);
 - the MCP tools exposed to the token are the same six tools, limited by the
@@ -302,9 +319,9 @@ They authenticate through the existing `authenticateBearer`, so:
   `Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self';
   form-action 'self'; base-uri 'none'; frame-ancestors 'none'` and
   `Referrer-Policy: no-referrer`.
-- Request logs retain method, path, status, duration, and actor IDs only. OAuth query
-  strings, form bodies, codes, tokens, cookies, CSRF values, client IDs, and scopes
-  are never logged.
+- Request logs retain method, path, status, duration, `request_id`, `error_code`, and
+  actor IDs only. OAuth query strings, form bodies, codes, tokens, cookies, CSRF
+  values, client IDs, and scopes are never logged.
 - Metrics use fixed route labels (`/.well-known/oauth-*`, `/oauth/register`,
   `/oauth/authorize`, `/oauth/signin`, `/oauth/consent`, `/oauth/token`,
   `/oauth/revoke`, `/oauth/client.js`). No client IDs or scopes appear in labels.
@@ -313,12 +330,14 @@ They authenticate through the existing `authenticateBearer`, so:
 
 Migration `004_oauth.sql` adds:
 
-- `oauth_clients(id, client_id UNIQUE, client_name, redirect_uris_json, created_at,
-  status)` — public clients; no client secret.
+- `oauth_clients(id, client_id UNIQUE, client_name, redirect_uris_json,
+  grant_types_json, response_types_json, created_at, status)` — public clients; no
+  client secret.
 - `oauth_authorization_codes(id, client_id, account_id, speaker_id, project_id,
-  scopes_json, code_prefix, code_verifier_hash, redirect_uri, resource, expires_at,
-  consumed_at, created_at)` — only the prefix and a keyed HMAC verifier of the code
-  (binding PKCE) are stored.
+  session_id, scopes_json, code_prefix, code_verifier_hash, redirect_uri, resource,
+  expires_at, consumed_at, created_at)` — only the prefix and a keyed HMAC verifier of
+  the code (binding PKCE) are stored; `session_id` binds the code to the human session
+  that approved it.
 - `oauth_refresh_tokens(id, family_id, client_id, credential_id, token_prefix,
   token_verifier, created_at, expires_at, revoked_at, rotated_at)` — prefix + keyed
   HMAC verifier only; rotation and reuse detection columns.

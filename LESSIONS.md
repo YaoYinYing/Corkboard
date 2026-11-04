@@ -342,6 +342,30 @@ prevented regression; when to remove the advice.
 - **Prevents:** Revoked-access bypass.
 - **Remove when:** Membership rows are physically deleted on removal (not the design).
 
+## 2026-11-04 — A consent form must carry a signed authorization request
+
+- **Failure:** The consent endpoint checked the selected scopes against
+  `requested_scope` only when that form field was present. A CSRF-valid consent POST
+  that omitted it could select a scope the authorization request never asked for.
+- **Reproducer:** Authorize `message.read`, then POST consent with `message.send` and
+  no `requested_scope`.
+- **Fix:** The consent page carries `requested_scope` plus a keyed HMAC over the
+  client, redirect, state, challenge, resource, and requested scope set. Consent
+  requires both, verifies them, and only then checks the selection as a subset.
+- **Prevents:** Scope escalation through a form the server cannot correlate with the
+  original authorization request.
+- **Remove when:** Authorization requests are persisted server-side with their scope.
+
+## 2026-11-04 — An authorization code outlives the session that approved it
+
+- **Failure:** Codes bound the account but not the issuing session, so an exchange
+  still succeeded after the human signed out.
+- **Reproducer:** Obtain a code, sign out with `DELETE /api/v1/session`, exchange it.
+- **Fix:** `oauth_authorization_codes.session_id` records the approving session and
+  exchange rejects a revoked/expired/idle-expired session before consuming the code.
+- **Prevents:** A stolen code remaining usable after the user revokes their session.
+- **Remove when:** Codes have an independent, equally strong approval lifetime bound.
+
 ## 2026-11-04 — Compiled server could not find its migrations
 
 - **Failure:** `db.ts` resolved the migration SQL relative to its module, so the built

@@ -133,6 +133,27 @@ export async function loginAccount(
 
 // Revoked, expired (absolute), idle-expired, unknown, and inactive-account
 // sessions all return the same UNAUTHENTICATED error. This read has no side
+interface SessionValidityRow {
+  revoked_at: string | null;
+  account_status: string;
+  last_seen_at: string;
+  expires_at: string;
+}
+
+function sessionRowIsActive(row: SessionValidityRow, now: Date): boolean {
+  const nowMs = now.getTime();
+  const expiresMs = new Date(row.expires_at).getTime();
+  const lastSeenMs = new Date(row.last_seen_at).getTime();
+  return (
+    row.revoked_at === null &&
+    row.account_status === "active" &&
+    Number.isFinite(expiresMs) &&
+    Number.isFinite(lastSeenMs) &&
+    expiresMs > nowMs &&
+    lastSeenMs + SESSION_IDLE_MS > nowMs
+  );
+}
+
 // effects so a failed CSRF check cannot touch the row.
 export async function validateSession(
   deps: ServiceDeps,
@@ -161,17 +182,7 @@ export async function validateSession(
   if (session === undefined) throw new AppError("UNAUTHENTICATED");
 
   const now = deps.now();
-  const nowMs = now.getTime();
-  const expiresMs = new Date(session.expires_at).getTime();
-  const lastSeenMs = new Date(session.last_seen_at).getTime();
-  const valid =
-    session.revoked_at === null &&
-    session.account_status === "active" &&
-    Number.isFinite(expiresMs) &&
-    Number.isFinite(lastSeenMs) &&
-    expiresMs > nowMs &&
-    lastSeenMs + SESSION_IDLE_MS > nowMs;
-  if (!valid) throw new AppError("UNAUTHENTICATED");
+  if (!sessionRowIsActive(session, now)) throw new AppError("UNAUTHENTICATED");
 
   return {
     sessionId: session.id,
@@ -179,6 +190,29 @@ export async function validateSession(
     email: session.email,
     csrfVerifier: session.csrf_verifier,
   };
+}
+
+// OAuth authorization codes are bound to the issuing session id. This check is
+// read-only and does not extend the session.
+export async function sessionIsActiveById(
+  deps: ServiceDeps,
+  sessionId: string,
+): Promise<boolean> {
+  if (
+    typeof sessionId !== "string" ||
+    sessionId.length < 1 ||
+    sessionId.length > 128
+  ) {
+    return false;
+  }
+  const row = await deps.db.first<SessionValidityRow>(
+    `SELECT s.revoked_at, s.last_seen_at, s.expires_at, a.status AS account_status
+       FROM sessions s
+       JOIN accounts a ON a.id = s.account_id
+      WHERE s.id = ?`,
+    [sessionId],
+  );
+  return row !== undefined && sessionRowIsActive(row, deps.now());
 }
 
 // Accepted requests refresh last_seen lazily; there is no authorization cache.

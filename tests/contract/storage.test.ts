@@ -308,6 +308,7 @@ test("an existing v3 database receives migration 004 OAuth tables", async (t) =>
       "account_id",
       "speaker_id",
       "project_id",
+      "session_id",
       "scopes_json",
       "code_prefix",
       "code_verifier_hash",
@@ -318,6 +319,22 @@ test("an existing v3 database receives migration 004 OAuth tables", async (t) =>
     ]) {
       assert.ok(codeColumns.includes(column), `missing column ${column}`);
     }
+    const clientColumns = (await db.all<{ name: string }>(
+      "PRAGMA table_info(oauth_clients)",
+    )).map((column) => column.name);
+    for (const column of [
+      "client_id",
+      "redirect_uris_json",
+      "grant_types_json",
+      "response_types_json",
+    ]) {
+      assert.ok(clientColumns.includes(column), `missing column ${column}`);
+    }
+    const sessionIndex = await db.first<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+      ["idx_oauth_authorization_codes_session"],
+    );
+    assert.equal(sessionIndex?.name, "idx_oauth_authorization_codes_session");
   } finally {
     db.close();
   }

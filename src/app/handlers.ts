@@ -13,6 +13,7 @@ import {
 import { json, noContent, randomRequestId } from "./responses.ts";
 import {
   DEFAULT_OAUTH_REGISTER_RATE_LIMIT,
+  DEFAULT_OAUTH_TOKEN_GLOBAL_RATE_LIMIT,
   DEFAULT_OAUTH_TOKEN_RATE_LIMIT,
   handleOAuthRoute,
   isOAuthPath,
@@ -115,6 +116,8 @@ export interface CreateAppOptions {
   publicBaseUrl?: string;
   oauthRegisterRateLimit?: RateLimitConfig;
   oauthTokenRateLimit?: RateLimitConfig;
+  /** Endpoint-wide token bucket; bounds rotating unauthenticated client_id. */
+  oauthTokenGlobalRateLimit?: RateLimitConfig;
   /** Injectable clock (milliseconds) for deterministic OAuth limit tests. */
   oauthRateLimitNow?: () => number;
   oauthRateLimitMaxKeys?: number;
@@ -678,6 +681,18 @@ export function createApp(
     ),
     tokenLimiter: new RateLimiter(
       options.oauthTokenRateLimit ?? DEFAULT_OAUTH_TOKEN_RATE_LIMIT,
+      {
+        ...(options.oauthRateLimitNow === undefined ? {} : { now: options.oauthRateLimitNow }),
+        ...(options.oauthRateLimitMaxKeys === undefined
+          ? {}
+          : { maxKeys: options.oauthRateLimitMaxKeys }),
+        ...(options.oauthRateLimitIdleMs === undefined
+          ? {}
+          : { idleMs: options.oauthRateLimitIdleMs }),
+      },
+    ),
+    tokenGlobalLimiter: new RateLimiter(
+      options.oauthTokenGlobalRateLimit ?? DEFAULT_OAUTH_TOKEN_GLOBAL_RATE_LIMIT,
       {
         ...(options.oauthRateLimitNow === undefined ? {} : { now: options.oauthRateLimitNow }),
         ...(options.oauthRateLimitMaxKeys === undefined

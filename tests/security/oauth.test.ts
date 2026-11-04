@@ -189,6 +189,13 @@ async function getAuthorize(app: App, url: string, cookies?: readonly string[]):
   });
 }
 
+function hiddenValue(html: string, name: string): string | null {
+  const match = new RegExp(
+    `<input type="hidden" name="${name}" value="([^"]*)">`,
+  ).exec(html);
+  return match === null ? null : (match[1] ?? "");
+}
+
 function consentForm(input: {
   clientId: string;
   state: string;
@@ -200,6 +207,7 @@ function consentForm(input: {
   redirectUri?: string;
   resource?: string;
   requestedScope?: string;
+  requestSignature?: string;
 }): URLSearchParams {
   const form = new URLSearchParams({
     client_id: input.clientId,
@@ -213,6 +221,9 @@ function consentForm(input: {
     project_id: input.projectId ?? "proj_1",
     decision: input.decision ?? "allow",
   });
+  if (input.requestSignature !== undefined) {
+    form.set("request_signature", input.requestSignature);
+  }
   for (const scope of input.scopes ?? ["message.read", "message.send"]) {
     form.append("scope", scope);
   }
@@ -240,22 +251,32 @@ async function obtainCode(
     projectId?: string;
     redirectUri?: string;
     resource?: string;
+    clientId?: string;
   } = {},
 ): Promise<{ code: string; verifier: string; state: string; clientId: string }> {
+  const clientId = options.clientId ?? setup.clientId;
   const auth = await authorization({
-    clientId: setup.clientId,
+    clientId,
     ...(options.scope === undefined ? {} : { scope: options.scope }),
     ...(options.redirectUri === undefined ? {} : { redirectUri: options.redirectUri }),
     ...(options.resource === undefined ? {} : { resource: options.resource }),
   });
   const page = await getAuthorize(setup.app, auth.url, setup.cookies);
   assert.equal(page.status, 200);
+  // Use the server-rendered hidden fields so the request signature matches the
+  // authorization request actually shown in the consent page.
+  const html = await page.text();
+  const requestSignature = hiddenValue(html, "request_signature");
+  const requestedScope = hiddenValue(html, "requested_scope");
+  assert.ok(requestSignature);
   const response = await consent(
     setup,
     consentForm({
-      clientId: setup.clientId,
+      clientId,
       state: auth.state,
       challenge: auth.challenge,
+      ...(requestedScope === null ? {} : { requestedScope }),
+      requestSignature,
       ...(options.scopes === undefined ? {} : { scopes: options.scopes }),
       ...(options.speakerId === undefined ? {} : { speakerId: options.speakerId }),
       ...(options.projectId === undefined ? {} : { projectId: options.projectId }),
@@ -268,7 +289,7 @@ async function obtainCode(
   const redirect = new URL(body.redirect_to);
   const code = redirect.searchParams.get("code");
   assert.ok(code);
-  return { code, verifier: auth.verifier, state: auth.state, clientId: setup.clientId };
+  return { code, verifier: auth.verifier, state: auth.state, clientId };
 }
 
 async function token(
@@ -576,6 +597,11 @@ test("consent cannot escalate scope or select another account's speaker or proje
     "message.send",
   ]);
   const auth = await authorization({ clientId: setupValue.clientId });
+  const page = await getAuthorize(setupValue.app, auth.url, setupValue.cookies);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  const requestSignature = hiddenValue(html, "request_signature");
+  assert.ok(requestSignature);
 
   const escalation = await consent(
     setupValue,
@@ -583,6 +609,7 @@ test("consent cannot escalate scope or select another account's speaker or proje
       clientId: setupValue.clientId,
       state: auth.state,
       challenge: auth.challenge,
+      requestSignature,
       scopes: ["message.read", "project.edit"],
     }),
   );
@@ -595,6 +622,7 @@ test("consent cannot escalate scope or select another account's speaker or proje
       clientId: setupValue.clientId,
       state: auth.state,
       challenge: auth.challenge,
+      requestSignature,
       speakerId: "spk_other",
       projectId: "proj_other",
     }),
@@ -608,6 +636,7 @@ test("consent cannot escalate scope or select another account's speaker or proje
       clientId: setupValue.clientId,
       state: auth.state,
       challenge: auth.challenge,
+      requestSignature,
       speakerId: "spk_owner",
       projectId: "proj_other",
     }),
@@ -736,6 +765,8 @@ test("access tokens use REST and MCP with exactly the consented scopes", async (
   const meBody = await jsonBody(me);
   assert.deepEqual(meBody.scopes, ["message.read"]);
   assert.deepEqual(meBody.projects, []);
+  // OAuth tokens only hold message.* scopes, so project listing is forbidden.
+  assert.equal((await rest(readSetup.app, "/api/v1/projects", readToken)).status, 403);
 
   // Send-only consent.
   const sendSetup = await setup(t);
@@ -983,6 +1014,236 @@ test("consent HTML escapes project and speaker names and sets a strict CSP", asy
   const scriptTags = [...html.matchAll(/<script\b[^>]*>/g)].map((match) => match[0]);
   assert.equal(scriptTags.length, 1);
   assert.match(scriptTags[0] ?? "", /src="\/oauth\/client\.js"/);
+});
+
+test("consent requires a signed requested scope and rejects an added scope", async (t) => {
+  const setupValue = await setup(t);
+  const auth = await authorization({ clientId: setupValue.clientId, scope: "message.read" });
+  const page = await getAuthorize(setupValue.app, auth.url, setupValue.cookies);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  const signature = hiddenValue(html, "request_signature");
+  assert.ok(signature);
+  assert.equal(hiddenValue(html, "requested_scope"), "message.read");
+
+  const fields = {
+    client_id: setupValue.clientId,
+    redirect_uri: REDIRECT,
+    state: auth.state,
+    code_challenge: auth.challenge,
+    code_challenge_method: "S256",
+    resource: BASE,
+    speaker_id: "spk_owner",
+    project_id: "proj_1",
+    decision: "allow",
+  };
+
+  // No requested_scope at all: cannot infer the request from client input.
+  const missing = new URLSearchParams(fields);
+  missing.set("request_signature", signature);
+  missing.append("scope", "message.read");
+  missing.append("scope", "message.send");
+  assert.equal((await consent(setupValue, missing)).status, 400);
+
+  // Forged requested_scope without a matching signature.
+  const forged = new URLSearchParams(fields);
+  forged.set("requested_scope", "message.read message.send");
+  forged.set("request_signature", signature);
+  forged.append("scope", "message.read");
+  forged.append("scope", "message.send");
+  assert.equal((await consent(setupValue, forged)).status, 400);
+
+  // A wholly fabricated signature over the broadened set is also rejected.
+  const fabricated = new URLSearchParams(fields);
+  fabricated.set("requested_scope", "message.read message.send");
+  fabricated.set("request_signature", "0".repeat(64));
+  fabricated.append("scope", "message.read");
+  fabricated.append("scope", "message.send");
+  assert.equal((await consent(setupValue, fabricated)).status, 400);
+
+  assert.equal(
+    (await setupValue.fx.db.all("SELECT id FROM oauth_authorization_codes")).length,
+    0,
+  );
+});
+
+test("a code-only client receives and can use no refresh token", async (t) => {
+  const setupValue = await setup(t);
+  const codeOnly = await registerClient(setupValue.app, {
+    client_name: "Code only",
+    grant_types: ["authorization_code"],
+  });
+  assert.equal(codeOnly.status, 201);
+  const clientId = codeOnly.body.client_id as string;
+
+  const code = await obtainCode(setupValue, { clientId });
+  const exchanged = await exchange(setupValue, code, { client_id: clientId });
+  assert.equal(exchanged.status, 200, JSON.stringify(exchanged.body));
+  assert.equal("refresh_token" in exchanged.body, false);
+
+  const attempted = await token(setupValue.app, {
+    grant_type: "refresh_token",
+    client_id: clientId,
+    refresh_token: "cb_ort_unknown",
+  });
+  assert.equal(attempted.status, 400);
+  assert.deepEqual(attempted.body, { error: "unauthorized_client" });
+});
+
+test("an authorization code dies with the session that issued it", async (t) => {
+  const setupValue = await setup(t);
+  const code = await obtainCode(setupValue);
+
+  const logout = await call(setupValue.app, "/api/v1/session", {
+    method: "DELETE",
+    headers: {
+      cookie: cookieHeader(setupValue.cookies),
+      [CSRF_HEADER_NAME]: cookieValue(setupValue.cookies, CSRF_COOKIE_NAME) ?? "",
+    },
+  });
+  assert.equal(logout.status, 204);
+  assert.equal((await exchange(setupValue, code)).status, 400);
+  assert.deepEqual((await exchange(setupValue, code)).body, { error: "invalid_grant" });
+});
+
+test("sign-in return_to rejects control characters without creating a session", async (t) => {
+  const setupValue = await setup(t);
+  const auth = await authorization({ clientId: setupValue.clientId });
+  const page = await getAuthorize(setupValue.app, auth.url);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  const loginCsrf = hiddenValue(html, "login_csrf");
+  assert.ok(loginCsrf);
+  const loginCookies = cookieHeader(page.headers.getSetCookie());
+  const sessionsBefore = (
+    await setupValue.fx.db.all("SELECT id FROM sessions")
+  ).length;
+
+  const response = await formCall(
+    setupValue.app,
+    "/oauth/signin",
+    new URLSearchParams({
+      return_to: "/oauth/authorize?x=\r\nSet-Cookie: cb_sess_evil",
+      login_csrf: loginCsrf,
+      email: EMAIL,
+      password: PASSWORD,
+    }),
+    { cookie: loginCookies },
+  );
+  assert.equal(response.status, 400);
+  assert.notEqual(response.status, 503);
+  assert.equal(
+    (await setupValue.fx.db.all("SELECT id FROM sessions")).length,
+    sessionsBefore,
+  );
+});
+
+test("the token endpoint has a global bucket that rotating client_id cannot bypass", async (t) => {
+  let now = 0;
+  const setupValue = await setup(t, {
+    oauthTokenRateLimit: { perMinute: 600, burst: 100 },
+    oauthTokenGlobalRateLimit: { perMinute: 1, burst: 2 },
+    oauthRateLimitNow: () => now,
+  });
+
+  const attempt = (clientId: string) =>
+    token(setupValue.app, {
+      grant_type: "authorization_code",
+      client_id: clientId,
+      code: "cb_oac_unknown",
+      redirect_uri: REDIRECT,
+      code_verifier: randomBase64url(32),
+    });
+
+  assert.equal((await attempt("cb_cli_rotating_1")).status, 400);
+  assert.equal((await attempt("cb_cli_rotating_2")).status, 400);
+  assert.equal((await attempt("cb_cli_rotating_3")).status, 429);
+
+  now += 61_000;
+  assert.equal((await attempt("cb_cli_rotating_4")).status, 400);
+});
+
+test("revocation ignores a speaker token without revoking it", async (t) => {
+  const setupValue = await setup(t);
+  const credential = await setupValue.fx.addCredential({
+    speakerId: "spk_owner",
+    scopes: ["message.read"],
+    autoGrantMemberships: true,
+  });
+
+  const revoked = await formCall(
+    setupValue.app,
+    "/oauth/revoke",
+    new URLSearchParams({ token: credential.token, client_id: setupValue.clientId }),
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal(
+    (await rest(setupValue.app, "/api/v1/projects/proj_1/messages", credential.token)).status,
+    200,
+  );
+});
+
+test("OAuth routes record fixed metric labels", async (t) => {
+  const { MetricsRegistry } = await import("../../src/app/metrics.ts");
+  const metrics = new MetricsRegistry();
+  const setupValue = await setup(t, { metrics });
+
+  for (const path of [
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+    "/oauth/client.js",
+  ]) {
+    assert.ok((await call(setupValue.app, path)).status > 0);
+  }
+  for (const path of [
+    "/oauth/register",
+    "/oauth/signin",
+    "/oauth/consent",
+    "/oauth/token",
+    "/oauth/revoke",
+  ]) {
+    assert.ok((await formCall(setupValue.app, path, new URLSearchParams())).status > 0);
+  }
+  assert.ok((await call(setupValue.app, "/oauth/authorize")).status > 0);
+
+  const labels = new Set(metrics.snapshot().routes.map((entry) => entry.route));
+  for (const label of [
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+    "/oauth/register",
+    "/oauth/authorize",
+    "/oauth/signin",
+    "/oauth/consent",
+    "/oauth/token",
+    "/oauth/revoke",
+    "/oauth/client.js",
+  ]) {
+    assert.ok(labels.has(label as never), `missing metric label ${label}`);
+  }
+});
+
+test("redirect URI count and length boundaries are enforced", async (t) => {
+  const setupValue = await setup(t);
+  const uriAt = (length: number): string => {
+    const prefix = "https://client.example/";
+    return prefix + "a".repeat(length - prefix.length);
+  };
+
+  const ten = Array.from({ length: 10 }, (_, index) => uriAt(100 + index));
+  assert.equal((await registerClient(setupValue.app, { redirect_uris: ten })).status, 201);
+
+  const eleven = Array.from({ length: 11 }, (_, index) => uriAt(100 + index));
+  assert.equal((await registerClient(setupValue.app, { redirect_uris: eleven })).status, 400);
+
+  assert.equal(uriAt(2048).length, 2048);
+  assert.equal(
+    (await registerClient(setupValue.app, { redirect_uris: [uriAt(2048)] })).status,
+    201,
+  );
+  assert.equal(
+    (await registerClient(setupValue.app, { redirect_uris: [uriAt(2049)] })).status,
+    400,
+  );
 });
 
 test("OAuth endpoints enforce their content types", async (t) => {

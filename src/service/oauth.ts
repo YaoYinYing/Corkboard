@@ -9,6 +9,7 @@ import { hashSecret, randomBase64url, verifySecret } from "../auth/credentials.t
 import { digestsEqual } from "../domain/digest.ts";
 import { AppError } from "../domain/errors.ts";
 import { parseScopeJson, type ServiceDeps } from "./auth.ts";
+import { sessionIsActiveById } from "./sessions.ts";
 
 export const OAUTH_ACCESS_PREFIX = "cb_oat_";
 export const OAUTH_CODE_PREFIX = "cb_oac_";
@@ -30,6 +31,9 @@ const UTF8_ENCODER = new TextEncoder();
 
 export const DEFAULT_OAUTH_REGISTER_RATE_LIMIT = { perMinute: 10, burst: 5 };
 export const DEFAULT_OAUTH_TOKEN_RATE_LIMIT = { perMinute: 60, burst: 20 };
+// A second, global token bucket prevents rotating client_id from bypassing the
+// per-client limit. Registration remains one global bucket.
+export const DEFAULT_OAUTH_TOKEN_GLOBAL_RATE_LIMIT = { perMinute: 300, burst: 60 };
 
 export class OAuthAuthorizeError extends Error {
   readonly oauthError: string;
@@ -190,6 +194,8 @@ export interface OAuthClient {
   clientId: string;
   clientName: string;
   redirectUris: string[];
+  grantTypes: string[];
+  responseTypes: string[];
   status: string;
 }
 
@@ -285,13 +291,16 @@ export async function registerClient(
   const clientId = `cb_cli_${randomBase64url(24)}`;
   await deps.db.run(
     `INSERT INTO oauth_clients
-       (id, client_id, client_name, redirect_uris_json, created_at, status)
-     VALUES (?, ?, ?, ?, ?, 'active')`,
+       (id, client_id, client_name, redirect_uris_json, grant_types_json,
+        response_types_json, created_at, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
     [
       `oac_${randomBase64url(16)}`,
       clientId,
       input.clientName,
       JSON.stringify(input.redirectUris),
+      JSON.stringify(input.grantTypes),
+      JSON.stringify(input.responseTypes),
       now.toISOString(),
     ],
   );
@@ -310,7 +319,22 @@ interface ClientRow {
   client_id: string;
   client_name: string;
   redirect_uris_json: string;
+  grant_types_json: string;
+  response_types_json: string;
   status: string;
+}
+
+function parseStringArray(value: string): string[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
+    return undefined;
+  }
+  return parsed as string[];
 }
 
 export async function findActiveClient(
@@ -326,24 +350,24 @@ export async function findActiveClient(
     return undefined;
   }
   const row = await deps.db.first<ClientRow>(
-    `SELECT client_id, client_name, redirect_uris_json, status
+    `SELECT client_id, client_name, redirect_uris_json, grant_types_json,
+            response_types_json, status
        FROM oauth_clients WHERE client_id = ? AND status = 'active'`,
     [clientId],
   );
   if (row === undefined) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(row.redirect_uris_json);
-  } catch {
-    return undefined;
-  }
-  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
+  const redirectUris = parseStringArray(row.redirect_uris_json);
+  const grantTypes = parseStringArray(row.grant_types_json);
+  const responseTypes = parseStringArray(row.response_types_json);
+  if (redirectUris === undefined || grantTypes === undefined || responseTypes === undefined) {
     return undefined;
   }
   return {
     clientId: row.client_id,
     clientName: row.client_name,
-    redirectUris: parsed as string[],
+    redirectUris,
+    grantTypes,
+    responseTypes,
     status: row.status,
   };
 }
@@ -409,6 +433,48 @@ export function appendOAuthQuery(
   return url.toString();
 }
 
+export interface AuthorizationRequestSignatureInput {
+  clientId: string;
+  redirectUri: string;
+  state: string | null;
+  codeChallenge: string;
+  resource: string;
+  scopes: readonly OAuthScope[];
+}
+
+// The consent form is stateless. This HMAC binds every authorization-request
+// field rendered into it (including the requested scope set), so a consent POST
+// cannot silently add a scope or change the client/redirect/challenge between
+// the rendered request and the decision.
+function authorizationRequestMaterial(input: AuthorizationRequestSignatureInput): string {
+  return (
+    "corkboard-oauth-request/v1\n" +
+    JSON.stringify([
+      input.clientId,
+      input.redirectUri,
+      input.state ?? "",
+      input.codeChallenge,
+      input.resource,
+      scopeString(input.scopes),
+    ])
+  );
+}
+
+export async function signAuthorizationRequest(
+  pepper: Uint8Array,
+  input: AuthorizationRequestSignatureInput,
+): Promise<string> {
+  return hashSecret(authorizationRequestMaterial(input), pepper);
+}
+
+export async function verifyAuthorizationRequestSignature(
+  pepper: Uint8Array,
+  input: AuthorizationRequestSignatureInput,
+  signature: string,
+): Promise<boolean> {
+  return digestsEqual(await signAuthorizationRequest(pepper, input), signature);
+}
+
 export interface ConsentCandidate {
   speakerId: string;
   speakerName: string;
@@ -456,6 +522,7 @@ export async function listConsentCandidates(
 }
 
 export interface ConsentSelection {
+  sessionId: string;
   accountId: string;
   clientId: string;
   redirectUri: string;
@@ -541,16 +608,17 @@ export async function issueAuthorizationCode(
   const prefix = tokenPrefix(code);
   await deps.db.run(
     `INSERT INTO oauth_authorization_codes
-       (id, client_id, account_id, speaker_id, project_id, scopes_json,
+       (id, client_id, account_id, speaker_id, project_id, session_id, scopes_json,
         code_prefix, code_verifier_hash, redirect_uri, resource, expires_at,
         consumed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
     [
       `oac_${randomBase64url(16)}`,
       selection.clientId,
       selection.accountId,
       selection.speakerId,
       selection.projectId,
+      selection.sessionId,
       JSON.stringify(selection.scopes),
       prefix,
       await pkceHash(code, selection.codeChallenge, deps.pepper),
@@ -573,20 +641,21 @@ export interface TokenResponse {
   access_token: string;
   token_type: "Bearer";
   expires_in: number;
-  refresh_token: string;
+  /** Absent when the registered client did not request the refresh_token grant. */
+  refresh_token?: string;
   scope: string;
 }
 
 function tokenResponse(
   accessToken: string,
-  refreshToken: string,
+  refreshToken: string | undefined,
   scopes: readonly OAuthScope[],
 ): TokenResponse {
   return {
     access_token: accessToken,
     token_type: "Bearer",
     expires_in: ACCESS_TOKEN_TTL_SECONDS,
-    refresh_token: refreshToken,
+    ...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
     scope: scopeString(scopes),
   };
 }
@@ -597,6 +666,7 @@ interface CodeRow {
   account_id: string;
   speaker_id: string;
   project_id: string;
+  session_id: string;
   scopes_json: string;
   code_verifier_hash: string;
   redirect_uri: string;
@@ -620,6 +690,7 @@ async function mintTokens(
     speakerId: string;
     projectId: string;
     scopes: readonly OAuthScope[];
+    issueRefresh: boolean;
   },
 ): Promise<TokenResponse> {
   const now = deps.now();
@@ -641,6 +712,20 @@ async function mintTokens(
       now.toISOString(),
     ],
   );
+
+  if (!input.issueRefresh) {
+    try {
+      await deps.db.run(
+        `INSERT INTO credential_project_grants (credential_id, project_id, granted_at)
+         VALUES (?, ?, ?)`,
+        [credentialId, input.projectId, now.toISOString()],
+      );
+    } catch (error) {
+      await deleteMintedCredential(deps, credentialId);
+      throw error;
+    }
+    return tokenResponse(accessToken, undefined, input.scopes);
+  }
 
   const refreshToken = newOAuthToken(OAUTH_REFRESH_PREFIX);
   const refreshPrefix = tokenPrefix(refreshToken);
@@ -694,8 +779,9 @@ export async function exchangeAuthorizationCode(
   }
   const prefix = tokenPrefix(input.code);
   const rows = await deps.db.all<CodeRow>(
-    `SELECT id, client_id, account_id, speaker_id, project_id, scopes_json,
-            code_verifier_hash, redirect_uri, resource, expires_at, consumed_at
+    `SELECT id, client_id, account_id, speaker_id, project_id, session_id,
+            scopes_json, code_verifier_hash, redirect_uri, resource, expires_at,
+            consumed_at
        FROM oauth_authorization_codes WHERE code_prefix = ?`,
     [prefix],
   );
@@ -723,6 +809,10 @@ export async function exchangeAuthorizationCode(
   const scopes = oauthScopesFromJson(code.scopes_json);
   if (scopes.length === 0) throw invalidGrant();
 
+  // A code is bound to the browser session that consented. Sign-out, session
+  // expiry, idle expiry, or account suspension before exchange fails closed.
+  if (!(await sessionIsActiveById(deps, code.session_id))) throw invalidGrant();
+
   // Single use: only the winner of this conditional update may mint tokens.
   const consumed = await deps.db.run(
     `UPDATE oauth_authorization_codes SET consumed_at = ?
@@ -741,6 +831,8 @@ export async function exchangeAuthorizationCode(
     speakerId: code.speaker_id,
     projectId: code.project_id,
     scopes,
+    // Only a client registered for the refresh grant receives a refresh token.
+    issueRefresh: client.grantTypes.includes("refresh_token"),
   });
 }
 
@@ -850,6 +942,16 @@ export async function rotateRefreshToken(
   ) {
     throw invalidGrant();
   }
+
+  // The client must still be active and registered for the refresh grant before
+  // any token row is consulted. A client registered only for authorization_code
+  // cannot use refresh_token.
+  const client = await findActiveClient(deps, input.clientId);
+  if (client === undefined) throw invalidGrant();
+  if (!client.grantTypes.includes("refresh_token")) {
+    throw new OAuthTokenError("unauthorized_client");
+  }
+
   const prefix = tokenPrefix(input.refreshToken);
   const rows = await deps.db.all<RefreshRow>(
     `SELECT id, family_id, client_id, credential_id, token_verifier,
@@ -865,10 +967,8 @@ export async function rotateRefreshToken(
     }
   }
   if (token === undefined) throw invalidGrant();
-
-  const client = await findActiveClient(deps, input.clientId);
   // A wrong client never revokes someone else's family.
-  if (client === undefined || client.clientId !== token.client_id) throw invalidGrant();
+  if (client.clientId !== token.client_id) throw invalidGrant();
 
   const now = deps.now();
   if (token.revoked_at !== null || token.rotated_at !== null) {

@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   client_id TEXT NOT NULL UNIQUE,
   client_name TEXT NOT NULL,
   redirect_uris_json TEXT NOT NULL,
+  grant_types_json TEXT NOT NULL,
+  response_types_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active'
 );
@@ -20,6 +22,7 @@ CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
   account_id TEXT NOT NULL REFERENCES accounts (id),
   speaker_id TEXT NOT NULL REFERENCES speakers (id),
   project_id TEXT NOT NULL REFERENCES projects (id),
+  session_id TEXT NOT NULL REFERENCES sessions (id),
   scopes_json TEXT NOT NULL,
   code_prefix TEXT NOT NULL,
   code_verifier_hash TEXT NOT NULL,
@@ -49,6 +52,8 @@ CREATE INDEX IF NOT EXISTS idx_oauth_authorization_codes_prefix
   ON oauth_authorization_codes (code_prefix);
 CREATE INDEX IF NOT EXISTS idx_oauth_authorization_codes_client
   ON oauth_authorization_codes (client_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_authorization_codes_session
+  ON oauth_authorization_codes (session_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_prefix
   ON oauth_refresh_tokens (token_prefix);
 CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family

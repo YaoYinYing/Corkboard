@@ -18,13 +18,17 @@ import {
   listConsentCandidates,
   OAUTH_SCOPES,
   parseAuthorizationRequest,
+  parseOAuthScopeString,
   registerClient,
   revokeOAuthToken,
   rotateRefreshToken,
   scopeString,
+  signAuthorizationRequest,
   validateClientRegistration,
+  verifyAuthorizationRequestSignature,
   OAuthAuthorizeError,
   OAuthTokenError,
+  type AuthorizationRequestSignatureInput,
   type ConsentCandidate,
   type OAuthScope,
 } from "../service/oauth.ts";
@@ -60,6 +64,8 @@ export interface OAuthRouteOptions {
   publicBaseUrl: string | undefined;
   registerLimiter: RateLimiter;
   tokenLimiter: RateLimiter;
+  /** Global token-endpoint bucket so rotating client_id cannot bypass limits. */
+  tokenGlobalLimiter: RateLimiter;
 }
 
 export function isOAuthPath(segments: readonly string[]): boolean {
@@ -264,6 +270,7 @@ function consentPage(
     state: string | null;
     speakerId: string | null;
     projectId: string | null;
+    requestSignature: string;
   },
   candidates: readonly ConsentCandidate[],
   accountEmail: string,
@@ -298,6 +305,7 @@ function consentPage(
     code_challenge_method: "S256",
     resource: request.resource,
     requested_scope: scopeString(request.scopes),
+    request_signature: request.requestSignature,
   };
   const body = page(
     "Authorize Corkboard access",
@@ -461,11 +469,20 @@ async function handleAuthorize(
     );
   }
   // client_id and redirect_uri are hidden fields above, already validated here.
+  // The signature binds every request field to the rendered consent form.
+  const requestSignature = await signAuthorizationRequest(deps.pepper, {
+    clientId,
+    redirectUri,
+    state: parsed.state,
+    codeChallenge: parsed.codeChallenge,
+    resource: parsed.resource,
+    scopes: parsed.scopes,
+  });
   return consentPage(
     clientId,
     redirectUri,
     client.clientName,
-    parsed,
+    { ...parsed, requestSignature },
     candidates,
     session.email,
   );
@@ -491,7 +508,14 @@ async function handleSignIn(
     throw error;
   }
   const returnTo = singleFormParam(form, "return_to");
-  if (returnTo === null || !returnTo.startsWith("/oauth/authorize")) {
+  if (
+    returnTo === null ||
+    returnTo.length > 8192 ||
+    // CR/LF and other control characters would either be stripped by URL
+    // parsing or produce an invalid Location header. Reject before parsing.
+    /[\u0000-\u001f\u007f]/.test(returnTo) ||
+    !returnTo.startsWith("/oauth/authorize")
+  ) {
     return htmlError(400, "Invalid sign-in request");
   }
   let target: URL;
@@ -503,6 +527,8 @@ async function handleSignIn(
   if (target.origin !== new URL(base).origin || target.pathname !== "/oauth/authorize") {
     return htmlError(400, "Invalid sign-in request");
   }
+  // Emit the parsed/normalized form, never the raw client-supplied string.
+  const normalizedReturnTo = target.pathname + target.search;
 
   const cookieCsrf = cookieValue(request.headers.get("cookie"), LOGIN_CSRF_COOKIE);
   const formCsrf = singleFormParam(form, "login_csrf");
@@ -523,7 +549,7 @@ async function handleSignIn(
     email = normalizeEmail(form.get("email"));
     password = validateLoginPassword(form.get("password"));
   } catch {
-    return signInPage(401, returnTo, "Invalid email or password.").response;
+    return signInPage(401, normalizedReturnTo, "Invalid email or password.").response;
   }
   const decision = loginLimiter.check(await sha256Hex(ENCODER.encode(email)));
   if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
@@ -533,7 +559,7 @@ async function handleSignIn(
     login = await loginAccount(deps, { email, password });
   } catch (error) {
     if (error instanceof AppError && error.code === "UNAUTHENTICATED") {
-      return signInPage(401, returnTo, "Invalid email or password.").response;
+      return signInPage(401, normalizedReturnTo, "Invalid email or password.").response;
     }
     throw error;
   }
@@ -542,7 +568,7 @@ async function handleSignIn(
     status: 303,
     headers: (() => {
       const headers = new Headers({
-        location: returnTo,
+        location: normalizedReturnTo,
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
         "referrer-policy": "no-referrer",
@@ -640,17 +666,37 @@ async function handleConsent(
     throw new AppError("VALIDATION_ERROR", "Select at least one supported scope");
   }
   const requestedRaw = singleFormParam(form, "requested_scope");
-  if (requestedRaw !== null) {
-    const requested = new Set(requestedRaw.split(" ").filter((scope) => scope !== ""));
-    if (!selected.every((scope) => requested.has(scope))) {
-      // The form is CSRF-protected; membership capabilities remain the
-      // authoritative bound. This keeps the response within the original ask.
-      throw new AppError("VALIDATION_ERROR", "Scope was not requested");
-    }
+  const signature = singleFormParam(form, "request_signature");
+  if (requestedRaw === null || signature === null || signature === "") {
+    throw new AppError("VALIDATION_ERROR", "Invalid consent request");
+  }
+  let requested: OAuthScope[];
+  try {
+    requested = parseOAuthScopeString(requestedRaw);
+  } catch {
+    throw new AppError("VALIDATION_ERROR", "Invalid consent request");
+  }
+  const signed: AuthorizationRequestSignatureInput = {
+    clientId,
+    redirectUri,
+    state,
+    codeChallenge,
+    resource,
+    scopes: requested,
+  };
+  if (
+    !(await verifyAuthorizationRequestSignature(deps.pepper, signed, signature))
+  ) {
+    throw new AppError("VALIDATION_ERROR", "Invalid consent request");
+  }
+  const requestedSet = new Set(requested);
+  if (!selected.every((scope) => requestedSet.has(scope as OAuthScope))) {
+    throw new AppError("VALIDATION_ERROR", "Scope was not requested");
   }
 
   const issued = await issueAuthorizationCode(deps, {
     accountId: session.accountId,
+    sessionId: session.sessionId,
     clientId,
     redirectUri,
     state,
@@ -677,8 +723,15 @@ async function handleToken(
   if (clientId === null || clientId === "" || clientId.length > 128) {
     throw new OAuthTokenError("invalid_request");
   }
-  const decision = options.tokenLimiter.check(clientId);
-  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
+  // client_id is unauthenticated at this point, so a per-client bucket alone
+  // can be bypassed by rotating it. The global bucket bounds the endpoint.
+  const perClient = options.tokenLimiter.check(clientId);
+  const global = options.tokenGlobalLimiter.check("oauth:token");
+  if (!perClient.allowed || !global.allowed) {
+    throw new RateLimitError(
+      Math.max(perClient.retryAfterSeconds, global.retryAfterSeconds),
+    );
+  }
   if (grantType === null) throw new OAuthTokenError("invalid_request");
 
   if (grantType === "authorization_code") {
@@ -840,6 +893,7 @@ export async function handleOAuthRoute(
 // Re-exported for the Node adapter's startup validation and tests.
 export {
   DEFAULT_OAUTH_REGISTER_RATE_LIMIT,
+  DEFAULT_OAUTH_TOKEN_GLOBAL_RATE_LIMIT,
   DEFAULT_OAUTH_TOKEN_RATE_LIMIT,
   isValidRedirectUri,
   normalizeOAuthBaseUrl,

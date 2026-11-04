@@ -239,6 +239,8 @@ test("register → sign in → consent → token → REST → refresh → revoke
   const consentHtml = await consentPage.text();
   assert.match(consentHtml, new RegExp(`value="${server.speakerId}"`));
   assert.match(consentHtml, new RegExp(`value="${server.projectId}"`));
+  const requestSignature = /name="request_signature" value="([^"]*)"/.exec(consentHtml)?.[1];
+  assert.ok(requestSignature);
 
   const consent = await fetch(`${server.base}/oauth/consent`, {
     method: "POST",
@@ -256,6 +258,7 @@ test("register → sign in → consent → token → REST → refresh → revoke
       code_challenge_method: "S256",
       resource: BASE,
       requested_scope: "message.read message.send",
+      request_signature: requestSignature,
       speaker_id: server.speakerId,
       project_id: server.projectId,
       decision: "allow",
