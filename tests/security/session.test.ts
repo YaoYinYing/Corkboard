@@ -31,13 +31,19 @@ interface CallOptions {
   method?: string;
   headers?: Record<string, string>;
   body?: unknown;
+  /** Pre-serialized body; avoids the helper's default JSON content type. */
+  rawBody?: string;
 }
 
 function call(app: App, path: string, options: CallOptions = {}): Promise<Response> {
   const headers = new Headers(options.headers ?? {});
   let body: string | undefined;
-  if (options.body !== undefined) {
+  if (options.rawBody !== undefined) {
+    body = options.rawBody;
+  } else if (options.body !== undefined) {
     body = JSON.stringify(options.body);
+  }
+  if (options.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
   return app(
@@ -194,6 +200,18 @@ test("login issues exactly two hardened cookies and no secret in the body", asyn
   assert.ok(hasAttribute(sessionCookie, "HttpOnly"));
   assert.equal(hasAttribute(csrfCookie, "HttpOnly"), false);
 
+  // __Host- requires Secure, Path=/, and no Domain attribute.
+  const sessionName = (sessionCookie.split(";")[0] ?? "").split("=")[0] ?? "";
+  assert.equal(sessionName, SESSION_COOKIE_NAME);
+  assert.ok(sessionName.startsWith("__Host-"));
+  assert.equal(
+    sessionCookie
+      .split(";")
+      .slice(1)
+      .some((part) => part.trim().toLowerCase().startsWith("domain=")),
+    false,
+  );
+
   const token = sessionToken(cookies);
   assert.match(token, /^cb_sess_[A-Za-z0-9_-]{43}$/);
   assert.match(csrfToken(cookies), /^[A-Za-z0-9_-]{43}$/);
@@ -244,11 +262,109 @@ test("unknown email, wrong password, inactive account and no-password account ar
     const response = await login(app, email, password);
     assert.equal(response.status, 401);
     assert.equal(response.headers.get("set-cookie"), null);
+    // Cookie routes do not issue a Bearer challenge.
+    assert.equal(response.headers.get("www-authenticate"), null);
     const body = await jsonBody(response);
     assert.equal(body.error.code, "UNAUTHENTICATED");
     assert.equal(body.error.message, "Authentication required");
   }
   assert.equal((await fx.db.all("SELECT id FROM sessions")).length, 0);
+});
+
+test("login requires application/json and validates its fields", async (t) => {
+  const { fx, app } = await withApp(t);
+  await addPasswordAccount(fx, "acct_shape", "shape@example.test", "shape password");
+  const credentials = JSON.stringify({ email: "shape@example.test", password: "shape password" });
+
+  // Missing, form/text, and lookalike media types are rejected before parsing.
+  const rejectedContentTypes: Array<string | undefined> = [
+    undefined,
+    "text/plain",
+    "application/x-www-form-urlencoded",
+    "application/jsonx",
+  ];
+  for (const contentType of rejectedContentTypes) {
+    const response = await call(app, "/api/v1/session", {
+      method: "POST",
+      rawBody: credentials,
+      ...(contentType === undefined ? {} : { headers: { "content-type": contentType } }),
+    });
+    assert.equal(response.status, 400, String(contentType));
+    assert.equal(response.headers.get("set-cookie"), null);
+    const body = await jsonBody(response);
+    assert.equal(body.error.code, "VALIDATION_ERROR");
+    assert.equal(body.error.message, "Content-Type must be application/json");
+  }
+
+  // A cross-site Origin cannot bypass the media-type requirement.
+  const crossSite = await call(app, "/api/v1/session", {
+    method: "POST",
+    rawBody: credentials,
+    headers: { "content-type": "text/plain", origin: "https://evil.example" },
+  });
+  assert.equal(crossSite.status, 400);
+  assert.equal((await jsonBody(crossSite)).error.code, "VALIDATION_ERROR");
+
+  // Shape validation stays a stable 400 and reveals no account state.
+  for (const body of [
+    { email: "not-an-email", password: "shape password" },
+    { email: 42, password: "shape password" },
+    { email: "shape@example.test", password: 42 },
+    { email: null, password: null },
+  ]) {
+    const response = await call(app, "/api/v1/session", { method: "POST", body });
+    assert.equal(response.status, 400);
+    assert.equal(response.headers.get("set-cookie"), null);
+    assert.equal((await jsonBody(response)).error.code, "VALIDATION_ERROR");
+  }
+
+  // The request-body cap still applies before authentication.
+  const oversized = await call(app, "/api/v1/session", {
+    method: "POST",
+    rawBody: JSON.stringify({
+      email: "shape@example.test",
+      password: "x".repeat(70 * 1024),
+    }),
+    headers: { "content-type": "application/json" },
+  });
+  assert.equal(oversized.status, 413);
+  assert.equal((await jsonBody(oversized)).error.code, "REQUEST_TOO_LARGE");
+
+  assert.equal((await fx.db.all("SELECT id FROM sessions")).length, 0);
+});
+
+test("session routes ignore a valid bearer credential", async (t) => {
+  const { fx, app } = await withApp(t);
+  await fx.addAccount("acct_bearer");
+  await fx.addSpeaker("spk_bearer", "acct_bearer");
+  const { token } = await fx.addCredential({ id: "cred_bearer", speakerId: "spk_bearer" });
+
+  const read = await call(app, "/api/v1/session", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(read.status, 401);
+  assert.equal(read.headers.get("set-cookie"), null);
+
+  const loginAttempt = await call(app, "/api/v1/session", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+    body: { email: "nobody@example.test", password: "anything" },
+  });
+  assert.equal(loginAttempt.status, 401);
+  assert.equal(loginAttempt.headers.get("set-cookie"), null);
+});
+
+test("a suspended account invalidates an existing session", async (t) => {
+  const { fx, app } = await withApp(t);
+  await addPasswordAccount(fx, "acct_suspend", "suspend@example.test", "suspend password");
+  const cookies = await loginCookies(app, "suspend@example.test", "suspend password");
+  const headers = { cookie: cookieHeader(cookies) };
+  assert.equal((await call(app, "/api/v1/session", { headers })).status, 200);
+
+  await fx.db.run("UPDATE accounts SET status = 'suspended' WHERE id = ?", ["acct_suspend"]);
+  const response = await call(app, "/api/v1/session", { headers });
+  assert.equal(response.status, 401);
+  assert.equal((await jsonBody(response)).error.code, "UNAUTHENTICATED");
 });
 
 test("unknown and no-password accounts still run the verifier against the dummy hash", async (t) => {

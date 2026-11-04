@@ -100,6 +100,8 @@ export interface CreateAppOptions {
 
 interface RequestContext {
   principal?: Principal;
+  /** Cookie routes do not issue a Bearer challenge on 401. */
+  suppressBearerChallenge?: boolean;
 }
 
 interface ProjectRow {
@@ -173,9 +175,15 @@ function errorBody(code: ErrorCode, message: string, requestId: string): unknown
   return { error: { code, message, request_id: requestId } };
 }
 
-function errorResponse(error: AppError, requestId: string): Response {
+function errorResponse(
+  error: AppError,
+  requestId: string,
+  bearerChallenge = true,
+): Response {
   const extra: Record<string, string> = {};
-  if (error.code === "UNAUTHENTICATED") extra["www-authenticate"] = "Bearer";
+  if (error.code === "UNAUTHENTICATED" && bearerChallenge) {
+    extra["www-authenticate"] = "Bearer";
+  }
   if (error instanceof RateLimitError) {
     extra["retry-after"] = String(error.retryAfterSeconds);
   }
@@ -215,8 +223,18 @@ async function authenticate(
   return principal;
 }
 
-async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
-  const declared = request.headers.get("content-length");
+// Login is the only unauthenticated state-changing route. Requiring a JSON
+// media type blocks simple cross-site form/text posts; without CORS a browser
+// cannot send application/json cross-origin without a preflight.
+function requireJsonContentType(request: Request): void {
+  const raw = request.headers.get("content-type");
+  const mediaType = raw === null ? "" : (raw.split(";")[0] ?? "").trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    throw new AppError("VALIDATION_ERROR", "Content-Type must be application/json");
+  }
+}
+
+async function readJsonObject(request: Request): Promise<Record<string, unknown>> {  const declared = request.headers.get("content-length");
   if (declared !== null) {
     const length = Number(declared);
     if (!Number.isSafeInteger(length) || length < 0) {
@@ -330,6 +348,7 @@ async function handleSessionLogin(
   request: Request,
   limiter: RateLimiter,
 ): Promise<Response> {
+  requireJsonContentType(request);
   const body = await readJsonObject(request);
   const email = normalizeEmail(body.email);
   const password = validateLoginPassword(body.password);
@@ -526,6 +545,7 @@ async function route(
   // Human session routes consult the session cookie only. They never fall back
   // to a bearer credential, and bearer routes never accept a session cookie.
   if (segments.length === 3 && segments[2] === "session") {
+    context.suppressBearerChallenge = true;
     if (method === "POST") return handleSessionLogin(deps, request, loginLimiter);
     if (method === "GET") return handleSessionGet(deps, request);
     if (method === "DELETE") return handleSessionDelete(deps, request);
@@ -686,7 +706,11 @@ export function createApp(
       );
     } catch (error) {
       if (error instanceof AppError) {
-        response = errorResponse(error, requestId);
+        response = errorResponse(
+          error,
+          requestId,
+          context.suppressBearerChallenge !== true,
+        );
       } else {
         // Unexpected failures never echo internals or content.
         response = errorResponse(new AppError("UNAVAILABLE"), requestId);

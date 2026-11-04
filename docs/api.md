@@ -174,10 +174,15 @@ refills continuously.
 
 ### `POST /api/v1/session`
 
-Signs in an account with `{ "email": "...", "password": "..." }`. The email is trimmed,
-lowercased, and shape-validated (at most 254 characters); the password must be a string
-of at most 1024 UTF-8 bytes. Other fields are ignored. Invalid JSON, a non-string field,
-or an over-limit body is `VALIDATION_ERROR` / `REQUEST_TOO_LARGE`.
+Signs in an account with `{ "email": "...", "password": "..." }`. The request must use
+`Content-Type: application/json` (a media type with parameters, such as
+`application/json; charset=utf-8`, is accepted). A missing or other media type returns
+`400 VALIDATION_ERROR` with message `Content-Type must be application/json` before the
+body is parsed. This blocks simple cross-site form/text login posts; no CORS is enabled,
+so an `application/json` cross-origin fetch cannot avoid a preflight. The email is
+trimmed, lowercased, and shape-validated (at most 254 characters); the password must be
+a string of at most 1024 UTF-8 bytes. Other fields are ignored. Invalid JSON, a
+non-string field, or an over-limit body is `VALIDATION_ERROR` / `REQUEST_TOO_LARGE`.
 
 All credential failures are deliberately uniform: unknown email, wrong password,
 inactive/suspended account, and an account with no password hash return the same
@@ -209,11 +214,16 @@ value is stored or logged. Every sign-in creates a new session row (no client-su
 session id), so a pre-login session value cannot be fixed by an attacker.
 
 **Lifetime.** A session has an absolute lifetime of **12 hours** from creation and an
-idle lifetime of **30 minutes** since its last accepted use. Each accepted
-`GET`/`DELETE /api/v1/session` request refreshes `last_seen_at`; expired, idle-expired,
-revoked, unknown, or inactive-account sessions return the same `401 UNAUTHENTICATED`.
-There is no authorization cache and no sliding extension of the absolute lifetime.
-Cookie `Max-Age` matches the absolute lifetime; server-side idle expiry is stricter.
+idle lifetime of **30 minutes** since its last accepted use. An accepted
+`GET /api/v1/session` refreshes `last_seen_at`; `DELETE` validates the session and CSRF
+value but does not refresh it before revoking. Expired, idle-expired, revoked, unknown,
+or inactive-account sessions return the same `401 UNAUTHENTICATED`. There is no
+authorization cache and no sliding extension of the absolute lifetime. Cookie `Max-Age`
+matches the absolute lifetime; server-side idle expiry is stricter.
+
+Session-route `401` responses do **not** carry a `WWW-Authenticate` header, because the
+route uses cookies rather than a Bearer credential. Bearer-authenticated routes retain
+`WWW-Authenticate: Bearer`.
 
 ### `GET /api/v1/session`
 
@@ -551,6 +561,7 @@ implemented or verified**.
 | `Idempotency-Key` | 1–128 non-space printable ASCII (0x21–0x7E) |
 | List `limit` | 1–100 |
 | Login `email` | trimmed, lowercased, ≤254 characters, non-empty local/domain around one `@` |
+| Login `Content-Type` | `application/json` (parameters allowed); anything else is `VALIDATION_ERROR` |
 | Login `password` | string, ≤1024 UTF-8 bytes (credential failures are uniform `401`) |
 | Request body | 64 KiB (first slice; attachments separate and not implemented) |
 

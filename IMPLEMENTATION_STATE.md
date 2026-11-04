@@ -534,10 +534,13 @@ pushed.
   refreshed lazily on accepted session requests. Revoked, expired, idle-expired,
   unknown, or inactive-account sessions are uniform `401 UNAUTHENTICATED`. No
   authorization cache.
-- **Endpoints.** `POST /api/v1/session` (uniform 401 for unknown email, wrong password,
-  inactive account, and no-password account; unknown/no-password verify a dummy PBKDF2
-  hash), `GET /api/v1/session` (account only), `DELETE /api/v1/session` (revokes one
-  row, clears cookies, `204`). `Set-Cookie` is emitted only on success.
+- **Endpoints.** `POST /api/v1/session` requires `Content-Type: application/json`
+  (parameters allowed) before parsing; other media types are `VALIDATION_ERROR`.
+  Credential failures are uniform `401` for unknown email, wrong password, inactive
+  account, and no-password account; unknown/no-password verify a dummy PBKDF2 hash.
+  `GET /api/v1/session` returns the account only. `DELETE /api/v1/session` revokes one
+  row, clears cookies, and returns `204`. `Set-Cookie` is emitted only on success.
+  Session-route `401`s carry no `WWW-Authenticate` header (bearer routes keep `Bearer`).
 - **Login abuse control.** Separate process-local token bucket keyed by the SHA-256 of
   the normalized email: 10/minute with burst 5, injected clock, `429 RATE_LIMITED` with
   `Retry-After`. The address is never retained in the limiter. Not distributed.
@@ -545,15 +548,23 @@ pushed.
   `X-CSRF-Token`, passwords, tokens, CSRF values, and emails are not logged.
 - **Docs.** `api.md`, `architecture.md`, `threat-model.md`, `security-operations.md`,
   `deployments.md`, `TODO.md` (completed Phase 3 subset only), and `LESSIONS.md` updated.
+- **Post-audit adapter fixes.** The Node adapter includes `POST /api/v1/session` in
+  `needsBody`, so the JSON login body reaches the core. Response writing reads
+  `Headers.getSetCookie()` and passes the array to `setHeader("set-cookie", ...)`, so
+  login emits two raw `Set-Cookie` lines and logout clears both instead of one
+  comma-joined value. Login also requires `application/json` to block simple cross-site
+  form/text posts (no CORS is enabled).
 - **Tests.** New `tests/security/session.test.ts` and
-  `tests/integration/sessions.test.ts`; migration expectations in the storage contract,
-  doctor, built-adapter, and CLI tests updated. Full-suite counts are recorded in the
-  checkpoint commit trailer.
+  `tests/integration/sessions.test.ts`; the latter starts a real `startServer()` and
+  drives login → read → logout → replay, asserting two raw `Set-Cookie` lines at the
+  Node HTTP layer. Migration expectations in the storage contract, doctor,
+  built-adapter, and CLI tests updated. Login-shape/content-type, bearer-header-ignored,
+  suspended-after-login, `__Host-`, and bootstrap password-cap tests added. Full-suite
+  counts are recorded in the checkpoint commit trailer.
 - **Limitations.** Login limiting is process-local; absolute timing indistinguishability
   is not claimed (especially vs. the Node-only scrypt path). Session rows are not
   automatically purged and there is no cleanup command. No browser UI, registration,
-  recovery, OAuth, or speaker delegation exists. `WWW-Authenticate: Bearer` is emitted
-  by the shared 401 envelope on session routes even though those routes use cookies.
+  recovery, OAuth, or speaker delegation exists.
 
 ## Implemented and verified at this tree
 
@@ -845,8 +856,10 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Slice-I audit debt (P2, non-blocking): login rate limiting is process-local and keyed
   by email digest (an attacker who knows an address can consume that bucket); failure
   timing is comparable but not identical across PBKDF2 and the Node-only legacy scrypt
-  path; session rows are never purged automatically and no cleanup command exists; the
-  shared 401 envelope includes `WWW-Authenticate: Bearer` on cookie routes; there is no
-  UI, registration, email verification, password reset, OAuth, or speaker delegation.
+  path; session rows are never purged automatically and no cleanup command exists; there
+  is no UI, registration, email verification, password reset, OAuth, or speaker
+  delegation. The adapter body-buffering and multi-`Set-Cookie` defects found by the
+  audit are fixed in the follow-up commit, and session 401s no longer send a Bearer
+  challenge.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.

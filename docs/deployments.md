@@ -45,9 +45,11 @@ session cookie uses the `__Host-` prefix, so a conforming browser will not send 
 over plaintext HTTP. Terminate TLS at the reverse proxy (Caddy, nginx, or the platform)
 and do not expose the application directly beyond localhost.
 
-Human sign-in is `POST /api/v1/session` with `{email,password}`. The owner password set
+Human sign-in is `POST /api/v1/session` with `Content-Type: application/json` and
+`{email,password}`; other media types are rejected. The owner password set
 through `CORKBOARD_BOOTSTRAP_PASSWORD` is stored as PBKDF2-HMAC-SHA-256
-(600,000 iterations, random 16-byte salt). The Node server also accepts legacy
+(600,000 iterations, random 16-byte salt) and is capped at 1024 UTF-8 bytes, matching
+the login limit. The Node server also accepts legacy
 `scrypt$` hashes from earlier bootstrap builds; new hashes are never scrypt. Sessions
 expire after 30 idle minutes and 12 hours absolute, and sign-out revokes only the
 presented session. There is no session-cleanup command: expired/revoked rows are inert

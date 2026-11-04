@@ -10,7 +10,7 @@ import { parseArgs } from "node:util";
 import { generateSpeakerToken, hashSecret } from "../src/auth/credentials.ts";
 import { hashPassword } from "../src/auth/password.ts";
 import { SCOPES, type Scope } from "../src/domain/authz.ts";
-import { normalizeEmail } from "../src/domain/validation.ts";
+import { normalizeEmail, validateLoginPassword } from "../src/domain/validation.ts";
 import { startServer } from "../src/platforms/node/main.ts";
 import { DoctorError, formatDoctorReport, runDoctor } from "../src/service/doctor.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
@@ -282,8 +282,11 @@ async function bootstrapOwnerCommand(values: Values): Promise<void> {
   const accountId = randomId("acct_");
   // Never accept the password in argv; only the environment is read.
   const password = process.env.CORKBOARD_BOOTSTRAP_PASSWORD;
+  // Same cap as login: a longer password could never be submitted at sign-in.
   const passwordHash =
-    password === undefined || password === "" ? null : await hashPassword(password);
+    password === undefined || password === ""
+      ? null
+      : await hashPassword(validateLoginPassword(password));
   await withDb((db) =>
     db.run(
       `INSERT INTO accounts (id, email, password_hash, status, created_at)

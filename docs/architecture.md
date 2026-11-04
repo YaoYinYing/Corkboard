@@ -244,8 +244,11 @@ separate trust domain from speaker bearer credentials:
   browser (`corkboard_csrf`) so a same-origin client can echo it in `X-CSRF-Token`.
 - **Validation.** Every session request selects candidate rows by prefix, verifies the
   keyed verifier, then requires `revoked_at IS NULL`, an active account,
-  `expires_at > now`, and `last_seen_at + 30 minutes > now`. Accepted requests refresh
-  `last_seen_at`; the absolute lifetime is 12 hours. There is no cache.
+  `expires_at > now`, and `last_seen_at + 30 minutes > now`. Accepted `GET` requests
+  refresh `last_seen_at`; `DELETE` validates and revokes without refreshing. The
+  absolute lifetime is 12 hours. There is no cache. Login accepts only
+  `Content-Type: application/json` (parameters allowed) before parsing the body, so a
+  simple cross-site form/text post cannot attempt a session; no CORS is enabled.
 - **Authorization boundary.** A session authenticates an account, not a speaker. Only
   the three `/api/v1/session` routes read the cookie. Bearer routes and `/mcp` never
   consult it, and the session token is not a bearer credential. Account-owned speaker

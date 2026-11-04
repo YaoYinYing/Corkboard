@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createApp } from "../../src/app/handlers.ts";
@@ -351,6 +352,32 @@ test("bootstrap commands produce usable ids and a token that authenticates", asy
     assert.equal(JSON.parse(ownerMembership?.capabilities ?? "[]").length, 7);
   } finally {
     db2.close();
+  }
+});
+
+test("bootstrap-owner rejects a password longer than the login cap", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const env = {
+    CORKBOARD_DATA_DIR: dataDir,
+    CORKBOARD_BOOTSTRAP_PASSWORD: "x".repeat(1025),
+  };
+
+  const rejected = run(["bootstrap-owner", "--email", "long@example.test"], env);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /1024/);
+  assert.equal(rejected.stdout.includes("acct_"), false);
+
+  // Validation happens before the account insert; if the DB exists it is empty.
+  const dbPath = join(dataDir, "corkboard.sqlite");
+  if (existsSync(dbPath)) {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS n FROM accounts").get() as { n: number };
+      assert.equal(row.n, 0);
+    } finally {
+      db.close();
+    }
   }
 });
 

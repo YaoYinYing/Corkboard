@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { scryptSync } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,10 @@ import {
   hashPassword,
 } from "../../src/auth/password.ts";
 import { inMemoryKeyProvider } from "../../src/crypto/keys.ts";
+import {
+  startServer,
+  type RunningServer,
+} from "../../src/platforms/node/main.ts";
 import { nodePasswordVerifier } from "../../src/platforms/node/password.ts";
 import {
   CSRF_COOKIE_NAME,
@@ -139,6 +144,81 @@ function run(args: string[], env: Record<string, string>): void {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, ...env },
   });
+}
+
+interface RawResult {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  rawHeaders: string[];
+  body: string;
+}
+
+function rawRequest(
+  base: string,
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<RawResult> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      new URL(path, base),
+      {
+        method: options.method ?? "GET",
+        headers: { connection: "close", ...options.headers },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers as RawResult["headers"],
+            rawHeaders: response.rawHeaders,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    if (options.body !== undefined) request.write(options.body);
+    request.end();
+  });
+}
+
+async function startSessionServer(
+  t: { after(fn: () => void | Promise<void>): void },
+  password: string,
+): Promise<{ base: string; running: RunningServer }> {
+  const root = mkdtempSync(join(tmpdir(), "corkboard-session-http-"));
+  const dataDir = join(root, "data");
+  run(["bootstrap-owner", "--email", "owner@example.test"], {
+    CORKBOARD_DATA_DIR: dataDir,
+    CORKBOARD_BOOTSTRAP_PASSWORD: password,
+  });
+  const running = await startServer({
+    env: {
+      CORKBOARD_DATA_DIR: dataDir,
+      CORKBOARD_ROOT_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
+        "base64",
+      ),
+      CORKBOARD_CREDENTIAL_PEPPER: Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64"),
+      PORT: "0",
+    },
+  });
+  t.after(async () => {
+    await running.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  const address = running.server.address();
+  assert.ok(address !== null && typeof address === "object");
+  return { base: `http://127.0.0.1:${address.port}`, running };
+}
+
+function rawSetCookieLines(result: RawResult): string[] {
+  const value = result.headers["set-cookie"];
+  if (Array.isArray(value)) return value;
+  return value === undefined ? [] : [value];
 }
 
 async function openDeps(dataDir: string): Promise<{ db: Awaited<ReturnType<typeof openSqliteDatabase>>; deps: ServiceDeps }> {
@@ -307,4 +387,70 @@ test("legacy scrypt hashes verify only through the Node adapter", async (t) => {
     "acct_legacy",
   ]);
   assert.equal((await login(app, "legacy@example.test", password)).status, 401);
+});
+
+test("node adapter reads the login body and forwards both Set-Cookie lines end to end", async (t) => {
+  const password = "adapter password";
+  const { base } = await startSessionServer(t, password);
+  const email = "owner@example.test";
+
+  // The login body must survive the adapter's needsBody gate; otherwise this
+  // returns a malformed-JSON validation error instead of a session.
+  const loginResponse = await fetch(`${base}/api/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json", connection: "close" },
+    body: JSON.stringify({ email, password }),
+  });
+  assert.equal(loginResponse.status, 200);
+  const cookies = loginResponse.headers.getSetCookie();
+  assert.equal(cookies.length, 2);
+  assert.ok(cookieValue(cookies, SESSION_COOKIE_NAME));
+  const csrf = csrfToken(cookies);
+  const headers = { cookie: cookieHeader(cookies), connection: "close" };
+
+  const read = await fetch(`${base}/api/v1/session`, { headers });
+  assert.equal(read.status, 200);
+  const account = (await read.json()) as JsonObject;
+  assert.equal(account.account.email, email);
+  assert.equal(typeof account.account.id, "string");
+
+  const logout = await fetch(`${base}/api/v1/session`, {
+    method: "DELETE",
+    headers: { ...headers, [CSRF_HEADER_NAME]: csrf },
+  });
+  assert.equal(logout.status, 204);
+  const cleared = logout.headers.getSetCookie();
+  assert.equal(cleared.length, 2);
+  for (const cookie of cleared) {
+    assert.match(cookie, /Max-Age=0/);
+  }
+  assert.equal((await fetch(`${base}/api/v1/session`, { headers })).status, 401);
+
+  // Raw Node HTTP view: the adapter must emit two distinct Set-Cookie lines,
+  // not one comma-joined value, for both login and logout.
+  const rawLogin = await rawRequest(base, "/api/v1/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  assert.equal(rawLogin.status, 200);
+  const rawCookies = rawSetCookieLines(rawLogin);
+  assert.equal(rawCookies.length, 2);
+  const rawHeaderNames: string[] = [];
+  for (let index = 0; index < rawLogin.rawHeaders.length; index += 2) {
+    rawHeaderNames.push((rawLogin.rawHeaders[index] ?? "").toLowerCase());
+  }
+  assert.equal(rawHeaderNames.filter((name) => name === "set-cookie").length, 2);
+  assert.ok(cookieValue(rawCookies, SESSION_COOKIE_NAME));
+  assert.ok(cookieValue(rawCookies, CSRF_COOKIE_NAME));
+
+  const rawLogout = await rawRequest(base, "/api/v1/session", {
+    method: "DELETE",
+    headers: {
+      cookie: cookieHeader(rawCookies),
+      [CSRF_HEADER_NAME]: csrfToken(rawCookies),
+    },
+  });
+  assert.equal(rawLogout.status, 204);
+  assert.equal(rawSetCookieLines(rawLogout).length, 2);
 });

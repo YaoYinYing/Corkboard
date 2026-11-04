@@ -6,6 +6,20 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — The Node adapter must mirror core body and header behavior
+
+- **Failure pattern:** Tests called `createApp` directly, so they stayed green while the
+  Node adapter (a) never read `POST /api/v1/session` bodies and (b) collapsed two
+  `Set-Cookie` values into one comma-joined header. Login was unusable through
+  `serve`, and a browser received a corrupted cookie pair.
+- **Fix:** `needsBody` lists every core POST route that parses JSON; response writing
+  uses `Headers.getSetCookie()` and passes the array to `setHeader("set-cookie", ...)`
+  while skipping `set-cookie` in `forEach`. An end-to-end `startServer` + `fetch` test
+  covers login → session read → CSRF logout → replay, and a raw `node:http` assertion
+  counts two `Set-Cookie` lines for login and logout.
+- **Prevents:** Adapter/core drift that direct-handler tests cannot see.
+- **Remove when:** A shared route manifest drives both routing and body buffering.
+
 ## 2026-11-04 — A human session is not a speaker credential
 
 - **Failure pattern:** Reusing the bearer principal for browser cookies would let a

@@ -57,12 +57,20 @@ export async function readCappedBody(
   return Buffer.concat(chunks);
 }
 
-// Only the message-send route reads a body. Rejected methods/routes never
+// Only routes that read a body are buffered. Rejected methods/routes never
 // consume the request stream, so an oversized POST to /healthz is not buffered.
 function needsBody(method: string, pathname: string): boolean {
   if (method !== "POST") return false;
   const segments = pathname.split("/").filter((segment) => segment !== "");
   if (segments.length === 1 && segments[0] === "mcp") return true;
+  if (
+    segments.length === 3 &&
+    segments[0] === "api" &&
+    segments[1] === "v1" &&
+    segments[2] === "session"
+  ) {
+    return true;
+  }
   return (
     segments.length === 5 &&
     segments[0] === "api" &&
@@ -132,7 +140,14 @@ function decodePepper(raw: string | undefined): Uint8Array {
 
 async function writeWebResponse(response: ServerResponse, body: Response): Promise<void> {
   response.statusCode = body.status;
-  body.headers.forEach((value, name) => response.setHeader(name, value));
+  // Node collapses a repeated header set into one comma-joined value. Set-Cookie
+  // is special: emit each cookie as its own header line.
+  const setCookies = body.headers.getSetCookie();
+  body.headers.forEach((value, name) => {
+    if (name.toLowerCase() === "set-cookie") return;
+    response.setHeader(name, value);
+  });
+  if (setCookies.length > 0) response.setHeader("set-cookie", setCookies);
   if (response.req.method === "HEAD") {
     response.end();
     return;

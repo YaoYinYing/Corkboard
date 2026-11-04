@@ -149,12 +149,18 @@ written) is not prevented; no stronger guarantee is claimed. See
   intentionally readable by same-origin script so the client can send its value in the
   `X-CSRF-Token` header for `DELETE /api/v1/session`. Do not make the session cookie
   script-readable or relax `SameSite` without a new threat review.
+- **Login CSRF.** `POST /api/v1/session` requires `Content-Type: application/json`
+  (parameters allowed) and rejects other media types before parsing. A simple
+  cross-site form or `text/plain` post cannot satisfy this, and no CORS is enabled, so a
+  browser cannot send `application/json` cross-origin without a preflight. There is no
+  Origin allowlist; the session cookie's `SameSite=Strict` covers subsequent requests.
 - **What a session can do.** Read the signed-in account (`GET /api/v1/session`) and sign
   out (`DELETE`). It cannot read projects or messages, send, mark read, expire, or call
   MCP, and it is not accepted as a bearer token. Speaker operations still require a
   separately issued scoped credential.
 - **Lifetime and revocation.** A session expires after **12 hours absolute** and after
-  **30 minutes idle** (refreshed lazily on accepted session requests). Sign-out sets
+  **30 minutes idle** (refreshed lazily by accepted `GET /api/v1/session` requests;
+  `DELETE` validates and revokes without refreshing). Sign-out sets
   `revoked_at` for that row only and clears the cookies; other sessions stay valid.
   Revoking an account/session directly in SQL takes effect on the next request because
   no authorization cache exists.

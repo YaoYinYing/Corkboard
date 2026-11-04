@@ -77,9 +77,12 @@ credential and grants no project, message, MCP, or administrative authority.
   (`DELETE /api/v1/session`) additionally requires `X-CSRF-Token` matching an
   independent random value delivered in the `corkboard_csrf` cookie. The header is
   compared as a keyed HMAC digest at fixed length; a cross-origin client that cannot
-  read the CSRF cookie cannot construct the header. There are no other cookie-
-  authenticated state-changing routes. A missing/wrong session is `401` before the
-  CSRF check, so the two failures are distinguishable (`401` vs `403`) but neither
+  read the CSRF cookie cannot construct the header. Login (the only unauthenticated
+  state-changing route) requires `Content-Type: application/json`, which a simple
+  cross-site form or `text/plain` post cannot send; no CORS is enabled, so an
+  `application/json` cross-origin request cannot skip a preflight. There are no other
+  cookie-authenticated state-changing routes. A missing/wrong session is `401` before
+  the CSRF check, so the two failures are distinguishable (`401` vs `403`) but neither
   reveals account data.
 - **Enumeration and timing.** Unknown email, wrong password, inactive account, and an
   account without a password hash all return the same `401 UNAUTHENTICATED`. When there
@@ -91,9 +94,10 @@ credential and grants no project, message, MCP, or administrative authority.
 - **Cookie theft.** The session cookie is `HttpOnly`, so page script cannot read it;
   `Secure` prevents transmission over plaintext HTTP; the `__Host-` name prefix forbids
   `Domain` scope and requires `Path=/`. The CSRF cookie is intentionally readable by
-  same-origin script. Neither raw value is written to the database, responses, logs, or
-  audit rows; only keyed verifiers are stored. TLS termination is a deployment
-  requirement.
+  same-origin script. Neither raw value is written to the database, response bodies,
+  non-`Set-Cookie` headers, logs, or audit rows; only keyed verifiers are stored. The
+  login response necessarily carries both raw values in `Set-Cookie` headers, which is
+  how the browser receives them. TLS termination is a deployment requirement.
 - **Revocation and expiry limits.** Sign-out revokes only the presented row, so other
   devices stay signed in (the operator can revoke all rows directly). Sessions have a
   30-minute idle timeout and a 12-hour absolute lifetime, and an inactive account is
