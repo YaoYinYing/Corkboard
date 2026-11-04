@@ -30,7 +30,7 @@ parsed by the page and passed unchanged to `listMessages`.
 | --- | --- |
 | `type` | Exact message type identifier (`^[a-z][a-z0-9_.-]{0,31}$`). |
 | `sender` | Exact **speaker ID**, not a display name; the speaker must be a project member. |
-| `q` | Case-insensitive substring over **summary metadata only**, at most 100 characters. Wildcards are escaped. Message bodies are never searched. |
+| `q` | Case-insensitive substring over **summary metadata only**, at most 100 characters. Wildcards are escaped. Case folding is the SQLite `LIKE` behavior, which is ASCII-only for this deployment. Message bodies are never searched. |
 | `unread` | Literal `true` or `false`, relative to the deterministic session viewer speaker (see below). |
 | `limit` | 1–100, default 50, matching the API. |
 | `after_seq` / `before_seq` | Non-negative integer cursors; at most one may be present. They are mutually exclusive. |
@@ -64,8 +64,11 @@ the service interprets as the latest page.
 row exists; `hasMore` is never serialized by REST or MCP, whose responses are
 unchanged. A page reached with `before_seq` always offers "newer" unless it is
 already the jump-to-latest page; an `after_seq` page offers "older" when the
-cursor is above zero. All navigation is bounded by the validated `limit`; there
-is no unbounded loop, recursive fetch, or client polling.
+cursor is above zero. The latter is an inference, not a probe: with an active
+metadata filter that matched no earlier row, that "older" link can lead to one
+empty page. It is bounded to a single page and keeps the filter state. All
+navigation is bounded by the validated `limit`; there is no unbounded loop,
+recursive fetch, or client polling.
 
 ### Active filter state
 
