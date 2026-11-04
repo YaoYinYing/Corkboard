@@ -167,6 +167,42 @@ async function send(
   });
 }
 
+async function sendTyped(
+  fx: ServiceFixture,
+  token: string,
+  projectId: string,
+  key: string,
+  summary: string,
+  text: string,
+  type: string,
+): Promise<{ messageId: string; seq: number }> {
+  const principal = await fx.authenticate(token);
+  const bodyDigest = `sha256:${await sha256Hex(new TextEncoder().encode(text))}`;
+  return sendMessage(fx.deps, principal, projectId, key, {
+    summary,
+    type,
+    language: "en",
+    text,
+    bodyDigest,
+  });
+}
+
+// A second owned speaker in the same project, used for the sender filter.
+async function addProjectSpeaker(
+  fx: ServiceFixture,
+  projectId: string,
+  speakerId: string,
+  accountId = "acct_a",
+): Promise<{ token: string; credentialId: string }> {
+  await fx.addSpeaker(speakerId, accountId);
+  await fx.addMembership(projectId, speakerId, ALL_SCOPES);
+  return fx.addCredential({ speakerId });
+}
+
+function messageSeqs(html: string): number[] {
+  return [...html.matchAll(/class="seq">#(\d+)</g)].map((match) => Number(match[1]));
+}
+
 async function basicProject(
   fx: ServiceFixture,
   accountId = "acct_a",
@@ -253,6 +289,15 @@ test("no eligible speaker, removed membership, and another account's project are
   const otherTimeline = await getPage(app, "/projects/proj_a", other.cookie);
   assert.equal(otherTimeline.status, 404);
   assert.equal(otherTimeline.html.includes("SECRET PROJECT TITLE"), false);
+  // Filters, including malformed ones, never change a uniform unreadable 404.
+  for (const query of [
+    "?type=note&sender=spk_a&q=secret&unread=true",
+    "?limit=0",
+  ]) {
+    const filtered = await getPage(app, `/projects/proj_a${query}`, other.cookie);
+    assert.equal(filtered.status, 404, query);
+    assert.equal(filtered.html.includes("SECRET PROJECT TITLE"), false, query);
+  }
   const otherDashboard = await getPage(app, "/", other.cookie);
   assert.ok(otherDashboard.html.includes("proj_d"));
   assert.equal(otherDashboard.html.includes("SECRET PROJECT TITLE"), false);
@@ -423,6 +468,262 @@ test("timeline pagination reuses the API bounds and keeps ascending order", asyn
     const bad = await getPage(app, `/projects/proj_a?${query}`, cookie);
     assert.equal(bad.status, 400, query);
   }
+});
+
+test("timeline filters by type, sender, summary substring, and unread with reflected state", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  const otherSpeaker = await addProjectSpeaker(fx, "proj_a", "spk_b");
+  const first = await sendTyped(
+    fx,
+    credential.token,
+    "proj_a",
+    "f1",
+    "Alpha release note",
+    "body one",
+    "note",
+  );
+  const second = await sendTyped(
+    fx,
+    otherSpeaker.token,
+    "proj_a",
+    "f2",
+    "Beta request",
+    "body two",
+    "request",
+  );
+  const third = await sendTyped(
+    fx,
+    credential.token,
+    "proj_a",
+    "f3",
+    "Gamma ALPHA follow-up",
+    "body three",
+    "note",
+  );
+  await markRead(fx.deps, await fx.authenticate(credential.token), "proj_a", first.messageId);
+
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+
+  const notes = await getPage(app, "/projects/proj_a?type=note", cookie);
+  assert.equal(notes.status, 200);
+  assert.deepEqual(messageSeqs(notes.html), [first.seq, third.seq]);
+  assert.ok(notes.html.includes("Alpha release note"));
+  assert.equal(notes.html.includes("Beta request"), false);
+  assert.ok(notes.html.includes("Active filters"));
+  assert.ok(notes.html.includes("<code>note</code>"));
+  assert.ok(notes.html.includes("Clear filters"));
+
+  const bySender = await getPage(app, "/projects/proj_a?sender=spk_b", cookie);
+  assert.deepEqual(messageSeqs(bySender.html), [second.seq]);
+  assert.ok(bySender.html.includes("Beta request"));
+  assert.ok(bySender.html.includes("<code>spk_b</code>"));
+
+  // SQLite LIKE is ASCII case-insensitive, matching the REST contract.
+  for (const query of ["alpha", "ALPHA"]) {
+    const search = await getPage(app, `/projects/proj_a?q=${query}`, cookie);
+    assert.deepEqual(messageSeqs(search.html), [first.seq, third.seq], query);
+    assert.ok(search.html.includes(`name="q" type="search" maxlength="100" value="${query}"`));
+  }
+
+  const unread = await getPage(app, "/projects/proj_a?unread=true", cookie);
+  assert.deepEqual(messageSeqs(unread.html), [second.seq, third.seq]);
+  assert.equal(unread.html.includes("Alpha release note"), false);
+  // The REST meaning of unread=false is "has a receipt for this viewer", so
+  // only the message marked read is returned.
+  const readToo = await getPage(app, "/projects/proj_a?unread=false", cookie);
+  assert.deepEqual(messageSeqs(readToo.html), [first.seq]);
+
+  const combined = await getPage(
+    app,
+    "/projects/proj_a?type=note&q=alpha&unread=true",
+    cookie,
+  );
+  assert.deepEqual(messageSeqs(combined.html), [third.seq]);
+
+  // The body-only term must never match: q is a summary search.
+  const bodyOnly = await getPage(app, "/projects/proj_a?q=body%20two", cookie);
+  assert.equal(bodyOnly.status, 200);
+  assert.deepEqual(messageSeqs(bodyOnly.html), []);
+  assert.ok(bodyOnly.html.includes("No messages match these filters."));
+
+  // A tombstone retains metadata and still matches metadata filters.
+  await fx.expireMessage(first.messageId);
+  const tombstone = await getPage(app, "/projects/proj_a?type=note&q=alpha", cookie);
+  assert.ok(tombstone.html.includes("Alpha release note"));
+  assert.ok(tombstone.html.includes("This message body has expired."));
+  assert.equal(tombstone.html.includes(`/messages/${first.messageId}/body`), false);
+});
+
+test("summary search ignores body text, escapes reflected input, and rejects malformed filters", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  await sendTyped(
+    fx,
+    credential.token,
+    "proj_a",
+    "s1",
+    "Visible summary",
+    "BODYONLYTERM secret",
+    "note",
+  );
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+
+  const bodyOnly = await getPage(app, "/projects/proj_a?q=BODYONLYTERM", cookie);
+  assert.equal(bodyOnly.status, 200);
+  assert.equal(bodyOnly.html.includes("Visible summary"), false);
+  assert.ok(bodyOnly.html.includes("No messages match these filters."));
+
+  const payload = `"><script>alert(1)</script>`;
+  const xss = await getPage(
+    app,
+    `/projects/proj_a?q=${encodeURIComponent(payload)}`,
+    cookie,
+  );
+  assert.equal(xss.status, 200);
+  assert.equal(xss.html.includes("<script>alert(1)</script>"), false);
+  assert.ok(xss.html.includes("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
+
+  for (const query of [
+    "limit=0",
+    "limit=101",
+    "limit=abc",
+    "after_seq=abc",
+    "after_seq=1&before_seq=2",
+    "unread=yes",
+    "type=NOTVALID",
+    `q=${"a".repeat(101)}`,
+    "sender=spk_missing",
+  ]) {
+    const bad = await getPage(app, `/projects/proj_a?${query}`, cookie);
+    assert.equal(bad.status, 400, query);
+    assert.equal(bad.html.includes("<script"), false, query);
+  }
+});
+
+test("cursor paging is bounded forward and backward with no duplicate or skipped rows", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  for (let index = 1; index <= 5; index += 1) {
+    await sendTyped(
+      fx,
+      credential.token,
+      "proj_a",
+      `p${index}`,
+      `page ${index}`,
+      `body ${index}`,
+      "note",
+    );
+  }
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+
+  const firstPage = await getPage(app, "/projects/proj_a?limit=2", cookie);
+  assert.deepEqual(messageSeqs(firstPage.html), [1, 2]);
+  assert.ok(firstPage.html.includes("after_seq=2"));
+  assert.equal(firstPage.html.includes("before_seq=3"), false);
+  assert.ok(firstPage.html.includes("Jump to latest"));
+  assert.ok(firstPage.html.includes("before_seq=9007199254740991"));
+
+  const secondPage = await getPage(app, "/projects/proj_a?limit=2&after_seq=2", cookie);
+  assert.deepEqual(messageSeqs(secondPage.html), [3, 4]);
+  assert.ok(secondPage.html.includes("before_seq=3"));
+  assert.ok(secondPage.html.includes("after_seq=4"));
+
+  const thirdPage = await getPage(app, "/projects/proj_a?limit=2&after_seq=4", cookie);
+  assert.deepEqual(messageSeqs(thirdPage.html), [5]);
+  assert.equal(thirdPage.html.includes("after_seq=5"), false);
+  assert.equal(thirdPage.html.includes("Jump to latest"), false);
+
+  const latest = await getPage(
+    app,
+    "/projects/proj_a?limit=2&before_seq=9007199254740991",
+    cookie,
+  );
+  assert.deepEqual(messageSeqs(latest.html), [4, 5]);
+  assert.equal(latest.html.includes("Jump to latest"), false);
+  assert.ok(latest.html.includes("before_seq=4"));
+
+  const backward = await getPage(app, "/projects/proj_a?limit=2&before_seq=5", cookie);
+  assert.deepEqual(messageSeqs(backward.html), [3, 4]);
+  const oldest = await getPage(app, "/projects/proj_a?limit=2&before_seq=3", cookie);
+  assert.deepEqual(messageSeqs(oldest.html), [1, 2]);
+
+  // Walk backward from the latest page using its own cursors, which must not
+  // repeat or skip rows.
+  const backFromLatest = await getPage(app, "/projects/proj_a?limit=2&before_seq=4", cookie);
+  assert.deepEqual(messageSeqs(backFromLatest.html), [2, 3]);
+  const backToStart = await getPage(app, "/projects/proj_a?limit=2&before_seq=2", cookie);
+  assert.deepEqual(messageSeqs(backToStart.html), [1]);
+
+  assert.deepEqual(
+    [
+      ...messageSeqs(firstPage.html),
+      ...messageSeqs(secondPage.html),
+      ...messageSeqs(thirdPage.html),
+    ],
+    [1, 2, 3, 4, 5],
+  );
+  assert.deepEqual(
+    [
+      ...messageSeqs(backToStart.html),
+      ...messageSeqs(backFromLatest.html),
+      ...messageSeqs(latest.html),
+    ],
+    [1, 2, 3, 4, 5],
+  );
+});
+
+test("filters preserve the locale and the page stays CSS-only and responsive", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  await sendTyped(fx, credential.token, "proj_a", "l1", "locale one", "body", "note");
+  await sendTyped(fx, credential.token, "proj_a", "l2", "locale two", "body", "note");
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+
+  const zh = await getPage(app, "/projects/proj_a?lang=zh&type=note&limit=1", cookie);
+  assert.equal(zh.status, 200);
+  assertHardened(zh.response);
+  assert.match(zh.html, /<html lang="zh-Hans" dir="ltr">/);
+  assert.ok(zh.html.includes("筛选"));
+  assert.ok(zh.html.includes("当前筛选"));
+  assert.ok(zh.html.includes("时间线"));
+  assert.ok(zh.html.includes('name="lang" value="zh"'));
+  const nextHref = /<a rel="next" href="([^"]+)"/.exec(zh.html)?.[1] ?? "";
+  assert.ok(nextHref.includes("lang=zh"));
+  assert.ok(nextHref.includes("after_seq=1"));
+
+  const fallback = await getPage(app, "/projects/proj_a?lang=fr&q=locale", cookie);
+  assert.match(fallback.html, /<html lang="en" dir="ltr">/);
+  assert.ok(fallback.html.includes("Filters"));
+
+  for (const html of [zh.html, fallback.html]) {
+    assert.ok(
+      html.includes('<meta name="viewport" content="width=device-width, initial-scale=1">'),
+    );
+    assert.ok(html.includes('<link rel="stylesheet" href="/static/app.css">'));
+    assert.equal(html.includes("<script"), false);
+    assert.equal(html.includes("<style"), false);
+    assert.equal(/ style=/.test(html), false);
+    assert.equal(/ on[a-z]+=/.test(html), false);
+  }
+  for (const label of [
+    "filter-type",
+    "filter-sender",
+    "filter-q",
+    "filter-unread",
+    "filter-limit",
+  ]) {
+    assert.ok(zh.html.includes(`<label for="${label}">`), label);
+    assert.ok(zh.html.includes(`id="${label}"`), label);
+  }
+
+  const cssResponse = await call(app, "/static/app.css");
+  assert.equal(cssResponse.status, 200);
+  const css = await cssResponse.text();
+  assert.ok(css.includes("@media (max-width: 40rem)"));
+  assert.ok(css.includes("@media (min-width: 48rem)"));
+  assert.equal(css.includes("@import"), false);
+  assert.equal(css.includes("url("), false);
 });
 
 test("body reveal returns escaped plaintext in a pre element and safe failures", async (t) => {
@@ -768,6 +1069,16 @@ test("timeline and body GETs create no receipts and mutate no message tables", a
 
   const { cookie } = await loginAs(app, "a@example.test", "correct horse");
   assert.equal((await getPage(app, "/projects/proj_a", cookie)).status, 200);
+  assert.equal(
+    (
+      await getPage(
+        app,
+        "/projects/proj_a?type=note&q=read-only&unread=true&limit=10",
+        cookie,
+      )
+    ).status,
+    200,
+  );
   assert.equal(
     (
       await getPage(

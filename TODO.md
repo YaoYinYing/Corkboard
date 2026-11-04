@@ -386,7 +386,7 @@ recorded there.
 
 - [ ] Build login/account pages, project list/create/edit, speaker directory/credential management, per-project membership editor and fine-grained policy matrix.
 - [x] Implement project timeline: message summary bubbles in ascending **server sequence**, sender and timestamp, reply jump, tombstone state and read receipts, body reveal on authorized click only.
-- [ ] Provide metadata filters, search, past replay, cursor pagination and accessible mobile/desktop layout; no active HTML/JS from messages or file previews.
+- [x] Provide metadata filters, search, past replay, cursor pagination and accessible mobile/desktop layout; no active HTML/JS from messages or file previews.
 - [ ] Add service overview: authorized counts/traffic, error summaries, storage pressure and auditable administrative operations without disclosing project-private data across tenants.
 - [x] Add English and Simplified Chinese translations, locale switching, date formatting, semantic labels, keyboard navigation and accessibility checks.
 - [x] Test visual/UI claims in an actual browser; motion references are not acceptance criteria. Check XSS, CSRF and stored-injection behavior.

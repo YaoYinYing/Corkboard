@@ -206,17 +206,26 @@ or as authority to act as a speaker.
   headers at the proxy. The only static asset is the constant same-origin
   `/static/app.css`; there are no third-party resources.
 - **Content rendering.** All stored metadata and decrypted bodies are escaped
-  server-side. Bodies appear only on explicit body requests inside `<pre>`. Never
-  add a Markdown renderer, HTML preview, inline event handler, or third-party
-  script to these pages without a new threat review.
+  server-side. Reflected timeline filter values (`type`, `sender`, `q`, `unread`,
+  `limit`, and cursor links) are escaped in text and attribute positions. `q`
+  searches summaries only; no filter or page path searches, decrypts, or returns
+  a message body. Bodies appear only on explicit body requests inside `<pre>`.
+  Never add a Markdown renderer, HTML preview, inline event handler, or
+  third-party script to these pages without a new threat review.
+- **Query handling.** Timeline `type`, `sender`, `unread`, `q`, `limit`,
+  `after_seq`, and `before_seq` reuse the REST list identifiers, bounds, and
+  parameterized query. Invalid values are a safe `400`; an unreadable project is
+  a uniform `404` before parsing. Paging is bounded and link-driven with no
+  unbounded fetch.
 - **Sign-in CSRF and redirects.** `POST /login` is form-encoded, requires the
   double-submit `login_csrf` value, and accepts only a same-origin path in
   `return_to` (absolute/scheme-relative URLs, backslashes, control characters, and
   over-long values are rejected). The login form shares the per-email-digest rate
   limiter and returns an HTML `429` with `Retry-After`.
 - **Logging.** Dashboard requests never log bodies, summaries, tokens, cookies,
-  CSRF values, email addresses, or full IPs. Project/message identifiers in the path
-  are not written into metrics labels; see `docs/web-ui.md`.
+  CSRF values, email addresses, full IPs, or query strings (including filter and
+  search values). Project/message identifiers in the path are not written into
+  metrics labels; see `docs/web-ui.md`.
 - **Trust domain.** The dashboard derives a viewer only from active, non-removed
   memberships of speakers owned by the account and calls the existing read service
   functions. A project without a qualifying membership is a uniform `404`. The

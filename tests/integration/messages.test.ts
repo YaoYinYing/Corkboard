@@ -703,6 +703,15 @@ test("pagination limits and cursors are bounded and ordered", async (t) => {
   });
   assert.deepEqual(after.messages.map((message) => message.seq), [51, 52, 53, 54, 55]);
   assert.equal(after.nextCursor, 55);
+  assert.equal(after.hasMore, false);
+
+  // Exactly `limit` remaining rows must not report another page.
+  const exact = await listMessages(fx.deps, alice.principal, "proj_1", {
+    afterSeq: 50,
+    limit: 5,
+  });
+  assert.deepEqual(exact.messages.map((message) => message.seq), [51, 52, 53, 54, 55]);
+  assert.equal(exact.hasMore, false);
 
   const before = await listMessages(fx.deps, alice.principal, "proj_1", {
     beforeSeq: 6,
@@ -710,9 +719,10 @@ test("pagination limits and cursors are bounded and ordered", async (t) => {
   });
   assert.deepEqual(before.messages.map((message) => message.seq), [3, 4, 5]);
   assert.equal(before.nextCursor, 5);
+  assert.equal(before.hasMore, true);
 
   const empty = await listMessages(fx.deps, alice.principal, "proj_1", { afterSeq: 55 });
-  assert.deepEqual(empty, { messages: [], nextCursor: null });
+  assert.deepEqual(empty, { messages: [], nextCursor: null, hasMore: false });
 });
 
 test("reply_to_id must exist in the same project", async (t) => {

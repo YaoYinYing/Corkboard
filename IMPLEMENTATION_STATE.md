@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–L implemented and pushed |
+| Phase | 0 complete; vertical slices A–L implemented and pushed; slice M implemented as an unpushed candidate |
 | Last pushed checkpoint | `45e5637` (read-only dashboard, audited code tree `5ea2439`) on `origin/main`; CI pending |
-| Branch | `main`, clean; the `slice-l-dashboard` four-commit candidate was fast-forwarded |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here |
+| Branch | Worktree branch `slice-m-dashboard-filters` from `0d3f34b`; slice-M candidate is unpushed; `main` remains clean at `0d3f34b` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice M: candidate under implementation on branch `slice-m-dashboard-filters`; independent review and security audit PENDING |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
@@ -823,6 +823,70 @@ pushed.
   rendering; no project/speaker/membership/credential management or registration/
   recovery; no Workers/D1 UI parity; no client-side navigation. Independent review
   is PENDING.
+
+## Vertical slice M — dashboard filters, summary search, replay, responsive layout (candidate)
+
+- **Scope.** Extends only the existing read-only `/projects/:projectId` timeline
+  with server-rendered, no-JavaScript metadata filters (`type`, `sender`,
+  `unread`), summary-only search (`q`), bounded cursors (`after_seq`,
+  `before_seq`, `limit`), previous/next and "jump to latest" links, an active
+  filter state with a clear link, and a CSS-only responsive layout. No new route,
+  mutation, receipt write, admin action, frontend dependency, client script, or
+  inline style.
+- **Query reuse.** The page parses the same identifiers and bounds as the REST
+  message list and passes them unchanged to the existing `listMessages`.
+  `sender` is an exact speaker ID validated against active project membership;
+  `q` is a case-insensitive summary substring capped at 100 characters with
+  escaped wildcards and never touches encrypted bodies; `unread` uses the same
+  receipt subquery and the deterministic session viewer speaker. Malformed or
+  out-of-range values return the safe `400`; an unreadable project returns the
+  uniform `404` before filter parsing. `lang` is preserved in the form and every
+  pager link.
+- **Replay.** `listMessages` now fetches one extra row and returns an internal
+  `hasMore` boolean; the pager uses it to omit links at the end while REST and
+  MCP continue to serialize only their existing fields. Previous/next clear the
+  opposite cursor; "jump to latest" uses `before_seq=Number.MAX_SAFE_INTEGER`.
+  All navigation is link-driven and bounded by the validated `limit`.
+- **Layout and i18n.** The stylesheet adds a wrapping filter grid, a
+  single-column stacked message layout below `40rem`, and a table-like metadata
+  grid at or above `48rem`, with a 1rem page gutter and `overflow-wrap` on long
+  values. New en/zh strings cover labels, hints, active state, empty results,
+  pagination, and reset. Labels use `for`/`id` pairs; focus indicators include
+  inputs and buttons.
+- **Security.** Reflected filter values are escaped in text and attribute
+  positions; a `"><script>` payload test confirms no executable markup. There is
+  no body search, no new SQL path, no new mutation, no change to CSP/headers, and
+  query values are not logged. Filtered GETs are asserted not to change message,
+  receipt, body, or audit counts.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (343 tests: 342 pass, 1
+  pre-existing skip for the live D1 marker); `npm run build` exit 0. New tests
+  cover every filter and combination, ASCII case-insensitivity, empty results,
+  invalid values and limit bounds, forward/backward cursor chains with no
+  duplicate or skipped rows, exact-limit `hasMore`, tombstones under filters,
+  summary-only search with a body-only term, reflected-XSS escaping, active
+  state/reset rendering, locale preservation and zh strings, unknown-locale
+  fallback, uniform 404 with filters and malformed filters, no receipt/table
+  mutation on filtered GETs, no inline style/script, viewport meta and
+  responsive stylesheet assertions, and the real `startServer()` HTTP flow.
+- **Browser evidence.** A temporary local headless Chrome/CDP run outside the
+  repository observed: `/login` in English with CSRF and labels; successful form
+  sign-in to `/`; the project list; the timeline with three summaries and the
+  labeled filter form; `?type=note` showing only the two notes with
+  "Active filters: Type: note" and a clear link; `?q=alpha` showing only the
+  matching summary with `alpha` reflected in the input; `?limit=1` followed by
+  next (`#2`), previous (`#1`), and jump-to-latest (`#3`) links; and
+  `?lang=zh&type=note` with `lang=zh-Hans`, `dir=ltr`, `筛选`, and the Chinese
+  active-filter line. At a 375px emulated viewport, `scrollWidth` equaled
+  `innerWidth` (no horizontal scroll), body padding was 16px, and the page had
+  zero `<script>`, zero `<style>`, and zero inline style attributes. This is
+  local Chrome evidence, not an exact-revision independent review.
+- **Limitations.** Search is summary-only; there is no body search, full-text
+  index, ranking, date filter, time scrubber, or cross-project search. The
+  sender filter requires an exact speaker ID and offers no member picker.
+  Unread is tied to the deterministic session viewer speaker. Replay is bounded
+  links, not infinite scroll. No Workers/D1 parity, automated axe/WCAG audit, or
+  touch-device matrix is claimed. Independent security and contract review is
+  PENDING.
 
 ## Implemented and verified at this tree
 

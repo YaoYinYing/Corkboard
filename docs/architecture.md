@@ -337,7 +337,14 @@ with the existing service functions.
   sets it. Bearer authorization is unchanged.
 - **Service reuse.** `listProjects` branches to a session listing that spans all
   owned speakers and reports the deterministic member display name; `listMessages`,
-  `getMessageBody`, and `listReadReceipts` are called unchanged. No dashboard route
+  `getMessageBody`, and `listReadReceipts` are called unchanged. Timeline filters
+  (`type`, `sender`, `unread`, `q`), `limit`, and `after_seq`/`before_seq` are
+  parsed by the HTML page and passed to `listMessages`; the service applies them
+  in its existing parameterized query after the same `message.read`
+  authorization, so there is no dashboard-only SQL path and no body search. To
+  make pager end conditions exact, `listMessages` fetches one row beyond `limit`
+  and returns an internal `hasMore` boolean; REST and MCP serialize only their
+  existing fields, so their list semantics are unchanged. No dashboard route
   performs a project, message, membership, credential, or receipt write. `POST
   /login` inserts the session row and authenticated page requests refresh
   `sessions.last_seen_at`; those are the only writes.

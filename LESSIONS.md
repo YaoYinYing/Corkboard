@@ -502,3 +502,21 @@ prevented regression; when to remove the advice.
   bypass.
 - **Remove when:** capabilities are stored in a parsed relational form rather than
   a JSON text column.
+
+## 2026-11-04 — A full page does not prove another page exists
+
+- **Failure:** The dashboard pager treated `rows.length === limit` as "there is
+  another page". With exactly `limit` matching rows, or at a filter boundary, it
+  rendered a Next link to an empty page, violating the bounded end-condition
+  requirement.
+- **Reproducer:** Seed exactly two matching messages, open
+  `/projects/:id?limit=2`, and follow the rendered Next link; it returns an empty
+  timeline.
+- **Fix:** `listMessages` fetches one extra row and returns an internal
+  `hasMore` flag while still returning exactly `limit` rows. The HTML pager uses
+  it to omit the link. REST and MCP continue to serialize only `messages` and
+  `next_cursor`, so their contract is unchanged; the service test asserts the
+  exact-boundary case.
+- **Prevents:** Dead-end pagination links and a misleading definition of "end".
+- **Remove when:** the service exposes a cursor that carries its own end state
+  and the pager no longer relies on a probe row.

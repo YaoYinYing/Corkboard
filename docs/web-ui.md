@@ -1,10 +1,11 @@
 # Read-only human web dashboard
 
-**Status: implemented locally for Node.js + SQLite (vertical slice L).** The
-dashboard is server-rendered HTML for a signed-in **account**. It is strictly
+**Status: implemented locally for Node.js + SQLite (vertical slices L and M).**
+The dashboard is server-rendered HTML for a signed-in **account**. It is strictly
 read-only: there is no send, edit, membership, credential, key, expiry,
 moderation, or administrative action. It is not a SPA and ships no frontend
-framework, build step, or client script.
+framework, build step, or client script. Slice M adds metadata filters, a
+summary-only search, bounded cursor replay, and a CSS-only responsive layout.
 
 Cloudflare Workers/D1 parity, account registration/recovery, and any write UI
 remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
@@ -16,13 +17,75 @@ remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/login` | `GET` | Sign-in form; issues a login CSRF cookie. |
 | `/login` | `POST` | Form-encoded sign-in with double-submit CSRF and normalized `return_to`. |
 | `/` | `GET` | Readable project list for the account. |
-| `/projects/:projectId` | `GET` | Message timeline in ascending server `seq`. |
+| `/projects/:projectId` | `GET` | Message timeline in ascending server `seq`, with filters, summary search, and cursor replay. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet; constant body, no user input. |
 
 `?lang=zh` selects Simplified Chinese. Unknown values fall back to English.
-`limit` (1–100), `after_seq`, and `before_seq` use the same bounds as the REST
-message list; the two sequence parameters are mutually exclusive.
+`lang` is preserved by the filter form and every pager link. The timeline query
+parameters are the same identifiers and bounds as the REST message list; they are
+parsed by the page and passed unchanged to `listMessages`.
+
+| Param | Meaning |
+| --- | --- |
+| `type` | Exact message type identifier (`^[a-z][a-z0-9_.-]{0,31}$`). |
+| `sender` | Exact **speaker ID**, not a display name; the speaker must be a project member. |
+| `q` | Case-insensitive substring over **summary metadata only**, at most 100 characters. Wildcards are escaped. Message bodies are never searched. |
+| `unread` | Literal `true` or `false`, relative to the deterministic session viewer speaker (see below). |
+| `limit` | 1–100, default 50, matching the API. |
+| `after_seq` / `before_seq` | Non-negative integer cursors; at most one may be present. They are mutually exclusive. |
+
+Malformed or out-of-range values (for example `limit=0`, `after_seq=abc`, both
+cursors, `unread=yes`, an invalid `type`, a summary query longer than 100
+characters, or a sender that is not a project member) return the safe `400`
+page. A project the account may not read returns the uniform `404` **before**
+filter parsing, so filters cannot probe project existence. An empty `q` is
+ignored, as in the API.
+
+The `unread` filter uses the same receipt-based meaning as
+`GET /api/v1/projects/:projectId/messages`: `true` selects messages without a
+`message_receipts` row for the calling viewer speaker and `false` selects those
+that have one. The dashboard's viewer speaker is the deterministic first
+qualifying owned speaker from `resolveSessionViewer`; it is displayed nowhere as
+a selectable identity. The filter only reads receipts and never marks a message
+read.
+
+### Pager semantics
+
+The service always returns ascending `seq`. Without a cursor the page starts at
+the oldest sequence. "Older messages" sets `before_seq` to the first returned
+sequence; "Newer messages" sets `after_seq` to the last returned sequence; each
+link preserves `lang`, `limit`, and every active filter and clears the other
+cursor. "Jump to latest" sets `before_seq` to `Number.MAX_SAFE_INTEGER`, which
+the service interprets as the latest page.
+
+`listMessages` internally fetches one row beyond `limit` and reports an internal
+`hasMore` boolean. The page uses it to omit a link when no older/newer matching
+row exists; `hasMore` is never serialized by REST or MCP, whose responses are
+unchanged. A page reached with `before_seq` always offers "newer" unless it is
+already the jump-to-latest page; an `after_seq` page offers "older" when the
+cursor is above zero. All navigation is bounded by the validated `limit`; there
+is no unbounded loop, recursive fetch, or client polling.
+
+### Active filter state
+
+The page renders the active `type`, `sender`, `q`, and `unread` values in an
+escaped "Active filters" line and pre-fills the labeled filter controls. A
+"Clear filters" link removes the filters and both cursors while preserving
+`lang` and `limit`. Filter state values are always escaped in text and
+attribute positions. The filter form submits with `GET` and resets the cursors,
+so applying a filter starts at the oldest matching page.
+
+### Responsive layout
+
+The layout is CSS-only; there is no inline style or script. Narrow screens use a
+single-column stacked card per message (the description list collapses to one
+column). Wide screens (`min-width: 48rem`) use a table-like two-pair-per-row
+metadata grid. The filter form uses an auto-fitting grid and all controls have
+bounded width. The page keeps a 1rem (16px) side gutter at phone width and
+wraps long summaries, identifiers, and dates, so it does not require horizontal
+page scrolling. Focus indicators are visible on links, buttons, inputs, and
+preformatted body text.
 
 ## Authorization model
 
@@ -56,6 +119,14 @@ or write capabilities, and it does not substitute a speaker credential or its
 scopes. The `sessionViewer` flag is set in code only and is
 never read from request input; a bearer principal never has it.
 
+Timeline filters, search, and cursors add no authorization decision. The viewer
+is resolved and the project is authorized before any query parameter is parsed;
+`listMessages` then authorizes `message.read` again and applies the filters in
+parameterized SQL under the same project scope. The sender filter's membership
+check runs only after that authorization, so it cannot reveal membership of an
+unreadable project. There is no second data path and no new SQL access to
+message bodies.
+
 Fail-closed behavior:
 
 - A project with no qualifying membership is a uniform `404`, never `403`, so
@@ -78,12 +149,19 @@ authenticated page requests. Read receipt identities are displayed only through
 
 - Every dynamic value passes through `escapeHtml` (`src/app/html.ts`). Project
   titles, summaries, speaker display names, message summaries, reply references,
-  identifiers, and dates are escaped in text and attribute positions.
+  identifiers, dates, and every reflected filter value (in input `value`
+  attributes and the active-filter line) are escaped in text and attribute
+  positions.
 - Message bodies are rendered as escaped text inside `<pre>`; message content is
   never interpreted as HTML, Markdown, or script. There is no message-driven
   markup, preview, or link.
+- Search is summary metadata only. The `q` value is passed to the existing
+  `listMessages` summary `LIKE` clause with escaped wildcards; encrypted bodies
+  are never queried, decrypted, indexed, or searched.
 - There is no inline script or style and no third-party resource. The only
-  stylesheet is `/static/app.css`, served from a constant string.
+  stylesheet is `/static/app.css`, served from a constant string. The filter form
+  is a plain `GET` form, so filtering, replay, and pagination work without
+  JavaScript.
 - Every HTML response carries `Cache-Control: no-store`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, and
@@ -141,9 +219,13 @@ share the existing per-email-digest rate limiter and return `429` with
 - Projects use a list of articles; messages use an ordered list of articles with
   description lists for sender, committed time, reply reference, and read
   receipts. A `<pre tabindex="0">` exposes the revealed body to the keyboard.
-- Every control has a visible label; focus indicators are always visible.
-- State is expressed with text (for example "expired", "Active"), never by color
-  alone.
+- Every control has a visible label: the filter form has labeled `type`,
+  `sender`, `q`, `unread`, and `limit` controls with `for`/`id` pairs and hints
+  for the sender and search fields. Pager links are ordinary anchors inside a
+  labeled navigation landmark, and a skip link targets `main`.
+- Focus indicators are always visible on links, buttons, inputs, and preformatted
+  body text. State is expressed with text (for example "expired", "Active",
+  "Active filters"), never by color alone.
 
 ## Limits
 
@@ -151,14 +233,25 @@ share the existing per-email-digest rate limiter and return `429` with
   expiry, or admin action.
 - The project list is bounded to the API maximum (100 per request) and has no UI
   pagination; the REST API still paginates.
-- No search, metadata filters, past-replay scrubber, attachments, file previews,
-  or image rendering.
-- No project create/edit, speaker directory, credential management, membership
-  editor, registration, email verification, password reset, or account settings.
+- Search covers message **summaries only**. There is no body search, full-text
+  index, ranking, highlighting, saved search, or search across projects.
+- `type` and `sender` are exact-match filters using the API identifiers. The
+  sender is a speaker ID and must be a project member; display names are not
+  accepted and the UI does not expose a member picker.
+- The `unread` filter reflects the deterministic session viewer speaker, not an
+  arbitrary chosen speaker. It never writes a receipt.
+- Replay offers bounded previous/next pages plus "jump to latest"; there is no
+  time scrubber, date filter, infinite scroll, or client-side history.
+- No attachments, file previews, or image rendering; no project create/edit,
+  speaker directory, credential management, membership editor, registration,
+  email verification, password reset, or account settings.
 - No client-side navigation or live updates; every action is a full page load.
+  Responsible JavaScript frameworks, bundlers, and frontend dependencies are not
+  used.
 - Server-side rendering only; there is no CSRF protection for state-changing
   dashboard actions because there are none (login is the only form and uses the
-  double-submit plus fetch-metadata checks).
+  double-submit plus fetch-metadata checks). The filter form is `GET` only.
 - Accessibility evidence consists of committed DOM assertions, semantic markup,
   and manual browser inspection. No automated axe audit has been run and no WCAG
-  conformance level is claimed.
+  conformance level is claimed. No exact-revision browser matrix or touch-device
+  test is claimed; responsiveness is asserted from the stylesheet and markup.

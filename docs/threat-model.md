@@ -180,6 +180,43 @@ write actions.
   status, duration, and other metadata; dynamic project/message identifiers are not
   written into metrics labels.
 
+## Dashboard filters, summary search, and replay (slice M)
+
+Slice M adds query input to the existing read-only timeline. It does not add an
+authorization path, a mutation, or body access.
+
+- **Reflected input (XSS).** Every filter value (`type`, `sender`, `q`, `unread`,
+  and the cursor/limit values) is taken from the parsed URL and passed through
+  `escapeHtml` in input `value` attributes and in the active-filter line. Tests
+  submit a `"><script>...` payload through `q` and assert the escaped form appears
+  and no executable markup does. The CSP still forbids scripts and inline
+  styles, and the filter form is a plain same-origin `GET`.
+- **No body search or body exposure.** `q` is bound to the existing parameterized
+  summary `LIKE` clause (wildcards escaped) and is capped at 100 characters.
+  Bodies are never queried, indexed, decrypted, or searched; a body-only term
+  returns no results. The timeline never renders body text.
+- **Authorization before parsing.** The session viewer and `message.read`
+  authorization run before filter parsing and again inside `listMessages`. A
+  foreign, missing, removed, or capability-insufficient project is the uniform
+  `404` even when the query is malformed; malformed values on a readable project
+  are the safe `400` page. The sender filter is an exact speaker ID checked
+  against active project membership only after authorization, so it cannot probe
+  membership of an unreadable project.
+- **Unread semantics.** `unread` is evaluated with the same receipt subquery as
+  the REST list, bound to the deterministic session viewer speaker. It reads
+  `message_receipts` and never inserts one; listing still cannot acknowledge a
+  message.
+- **Bounded replay.** `limit` is 1–100, cursors are non-negative safe integers,
+  and `after_seq`/`before_seq` are mutually exclusive. The pager derives links
+  from returned rows and an internal `hasMore` probe, never loops, and "jump to
+  latest" uses `Number.MAX_SAFE_INTEGER` as a bounded `before_seq`. No
+  unbounded fetch, recursive request, or client polling exists.
+- **No new writes or logging.** Filtered and paged GETs create no message,
+  receipt, body, membership, or credential row. The only write on an
+  authenticated page request remains the session `last_seen_at` refresh. Request
+  logs record the pathname only; query strings and filter values are never
+  logged, and summaries or bodies remain excluded.
+
 ## OAuth 2.1 delegated speaker grants (slice J)
 
 OAuth issues a speaker-scoped bearer credential for one project; it is not a second

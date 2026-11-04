@@ -15,6 +15,7 @@ import {
   getMessageBody,
   listMessages,
   listReadReceipts,
+  MAX_QUERY_CHARS,
   type ListMessagesQuery,
   type MessageMetadata,
   type ReadReceipt,
@@ -43,7 +44,17 @@ const MAX_WEB_BODY_BYTES = 64 * 1024;
 const MAX_RETURN_TO_LENGTH = 2048;
 const DEFAULT_TIMELINE_LIMIT = 50;
 const MAX_TIMELINE_LIMIT = 100;
+// before_seq above every committed sequence returns the latest page. Sequence
+// allocation starts at 1, so this bound is safe without knowing the max.
+const LATEST_SEQ = Number.MAX_SAFE_INTEGER;
 const FORM_MEDIA_TYPE = "application/x-www-form-urlencoded";
+
+interface TimelineFilters {
+  type?: string;
+  sender?: string;
+  q?: string;
+  unread?: boolean;
+}
 
 const LOCALES = ["en", "zh"] as const;
 type Locale = (typeof LOCALES)[number];
@@ -61,6 +72,21 @@ const EN = {
   timelineTitle: "Timeline",
   backToProjects: "Back to projects",
   timelineEmpty: "No messages yet.",
+  filtersTitle: "Filters",
+  filterTypeLabel: "Type",
+  filterSenderLabel: "Sender speaker ID",
+  filterSenderHint: "Exact project member speaker identifier.",
+  filterSearchLabel: "Search summaries",
+  filterSearchHint: "Matches summary text only; message bodies are never searched.",
+  filterUnreadLabel: "Unread only",
+  filterLimitLabel: "Messages per page",
+  applyFilters: "Apply filters",
+  resetFilters: "Clear filters",
+  activeFilters: "Active filters",
+  filterNone: "No filters applied.",
+  filteredEmpty: "No messages match these filters.",
+  jumpToLatest: "Jump to latest",
+  paginationLabel: "Timeline pages",
   senderLabel: "Sender",
   committedLabel: "Committed",
   replyToLabel: "Reply to",
@@ -106,6 +132,21 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   timelineTitle: "时间线",
   backToProjects: "返回项目列表",
   timelineEmpty: "暂无消息。",
+  filtersTitle: "筛选",
+  filterTypeLabel: "类型",
+  filterSenderLabel: "发送者 ID",
+  filterSenderHint: "项目成员的精确说话者标识符。",
+  filterSearchLabel: "搜索摘要",
+  filterSearchHint: "仅匹配摘要文本，不搜索消息正文。",
+  filterUnreadLabel: "仅未读",
+  filterLimitLabel: "每页消息数",
+  applyFilters: "应用筛选",
+  resetFilters: "清除筛选",
+  activeFilters: "当前筛选",
+  filterNone: "未应用筛选。",
+  filteredEmpty: "没有消息符合这些筛选条件。",
+  jumpToLatest: "跳到最新",
+  paginationLabel: "时间线分页",
   senderLabel: "发送者",
   committedLabel: "提交时间",
   replyToLabel: "回复",
@@ -160,7 +201,7 @@ const WEB_CSS = `:root { color-scheme: light dark; font-family: system-ui, sans-
 * { box-sizing: border-box; }
 body { margin: 0 auto; max-width: 60rem; padding: 1rem; background: Canvas; color: CanvasText; }
 a { color: LinkText; }
-a:focus-visible, button:focus-visible, pre:focus-visible { outline: 3px solid Highlight; outline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, pre:focus-visible { outline: 3px solid Highlight; outline-offset: 2px; }
 .skip-link { position: absolute; left: -9999px; top: 0; background: Canvas; padding: 0.5rem; }
 .skip-link:focus { left: 1rem; z-index: 1; }
 .site-header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; justify-content: space-between; border-bottom: 1px solid GrayText; padding-bottom: 0.5rem; }
@@ -168,7 +209,8 @@ a:focus-visible, button:focus-visible, pre:focus-visible { outline: 3px solid Hi
 nav[aria-label] a[aria-current="true"] { font-weight: 700; text-decoration: underline; }
 main { padding-block: 1rem; }
 .project-list, .timeline { list-style: none; padding: 0; display: grid; gap: 1rem; }
-.project-list article, .message { border: 1px solid GrayText; border-radius: 0.5rem; padding: 1rem; }
+.project-list article, .message { border: 1px solid GrayText; border-radius: 0.5rem; padding: 1rem; min-width: 0; }
+.project-list li, .message h3, .message dd, .project-list h2 { overflow-wrap: anywhere; }
 .message h3 { margin-top: 0.25rem; }
 .seq { font-variant-numeric: tabular-nums; color: GrayText; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0.5rem 0; }
@@ -178,8 +220,19 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .empty { font-style: italic; }
 .error { border: 1px solid GrayText; border-left: 4px solid Mark; padding: 0.5rem 0.75rem; }
 .body-text { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; border: 1px solid GrayText; border-radius: 0.5rem; }
-.pager { display: flex; gap: 1rem; }
-@media (max-width: 40rem) { body { padding: 0.75rem; } dl { grid-template-columns: 1fr; } }
+input, select, button { font: inherit; max-width: 100%; }
+.filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.75rem 1rem; border: 1px solid GrayText; border-radius: 0.5rem; padding: 1rem; margin-block: 0.5rem 1rem; }
+.filter-field { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; margin: 0; }
+.filter-field input { width: 100%; min-width: 0; padding: 0.35rem; }
+.filter-checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
+.filter-checkbox input { width: auto; }
+.filter-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin: 0; }
+.hint { color: GrayText; font-size: 0.875rem; }
+.filter-state { border-left: 4px solid GrayText; padding-left: 0.75rem; overflow-wrap: anywhere; }
+.filter-state code { overflow-wrap: anywhere; }
+.pager { display: flex; flex-wrap: wrap; gap: 1rem; margin-block: 1rem; }
+@media (min-width: 48rem) { .message dl { grid-template-columns: max-content 1fr max-content 1fr; } }
+@media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
 `;
 
 function t(locale: Locale, key: MessageKey): string {
@@ -321,6 +374,37 @@ function queryInt(
     throw new AppError("VALIDATION_ERROR");
   }
   return value;
+}
+
+// Same spelling as the REST list: only literal true/false are accepted.
+function queryBoolean(url: URL, name: string): boolean | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return undefined;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new AppError("VALIDATION_ERROR");
+}
+
+function timelineFiltersFrom(url: URL): TimelineFilters {
+  const filters: TimelineFilters = {};
+  const type = url.searchParams.get("type");
+  if (type !== null) filters.type = type;
+  const sender = url.searchParams.get("sender");
+  if (sender !== null) filters.sender = sender;
+  const q = url.searchParams.get("q");
+  if (q !== null) filters.q = q;
+  const unread = queryBoolean(url, "unread");
+  if (unread !== undefined) filters.unread = unread;
+  return filters;
+}
+
+function hasActiveFilters(filters: TimelineFilters): boolean {
+  return (
+    filters.type !== undefined ||
+    filters.sender !== undefined ||
+    (filters.q !== undefined && filters.q !== "") ||
+    filters.unread === true
+  );
 }
 
 // The login form validates return_to at the same bound. Dropping an over-long
@@ -543,16 +627,96 @@ ${projects}`;
   return htmlResponse(200, renderPage(locale, url, t(locale, "dashboardTitle"), content));
 }
 
+function renderFilterForm(
+  locale: Locale,
+  projectId: string,
+  url: URL,
+  filters: TimelineFilters,
+  limit: number,
+): string {
+  const langField = locale === "zh" ? `\n<input type="hidden" name="lang" value="zh">` : "";
+  const unreadChecked = filters.unread === true ? " checked" : "";
+  const resetHref = escapeHtml(
+    hrefWithParams(url, {
+      type: null,
+      sender: null,
+      q: null,
+      unread: null,
+      after_seq: null,
+      before_seq: null,
+    }),
+  );
+  const reset = hasActiveFilters(filters)
+    ? ` <a href="${resetHref}">${escapeHtml(t(locale, "resetFilters"))}</a>`
+    : "";
+  return `<h2 id="filters-heading">${escapeHtml(t(locale, "filtersTitle"))}</h2>
+<form class="filters" method="get" action="/projects/${escapeHtml(projectId)}" aria-labelledby="filters-heading">${langField}
+<p class="filter-field"><label for="filter-type">${escapeHtml(t(locale, "filterTypeLabel"))}</label>
+<input id="filter-type" name="type" type="text" maxlength="32" value="${escapeHtml(filters.type ?? "")}"></p>
+<p class="filter-field"><label for="filter-sender">${escapeHtml(t(locale, "filterSenderLabel"))}</label>
+<input id="filter-sender" name="sender" type="text" maxlength="128" value="${escapeHtml(filters.sender ?? "")}" aria-describedby="filter-sender-hint">
+<span class="hint" id="filter-sender-hint">${escapeHtml(t(locale, "filterSenderHint"))}</span></p>
+<p class="filter-field"><label for="filter-q">${escapeHtml(t(locale, "filterSearchLabel"))}</label>
+<input id="filter-q" name="q" type="search" maxlength="${MAX_QUERY_CHARS}" value="${escapeHtml(filters.q ?? "")}" aria-describedby="filter-q-hint">
+<span class="hint" id="filter-q-hint">${escapeHtml(t(locale, "filterSearchHint"))}</span></p>
+<p class="filter-field filter-checkbox"><input id="filter-unread" name="unread" type="checkbox" value="true"${unreadChecked}>
+<label for="filter-unread">${escapeHtml(t(locale, "filterUnreadLabel"))}</label></p>
+<p class="filter-field"><label for="filter-limit">${escapeHtml(t(locale, "filterLimitLabel"))}</label>
+<input id="filter-limit" name="limit" type="number" min="1" max="${MAX_TIMELINE_LIMIT}" step="1" inputmode="numeric" value="${limit}"></p>
+<p class="filter-actions"><button type="submit">${escapeHtml(t(locale, "applyFilters"))}</button>${reset}</p>
+</form>`;
+}
+
+function renderFilterState(locale: Locale, filters: TimelineFilters): string {
+  const parts: string[] = [];
+  if (filters.type !== undefined) {
+    parts.push(
+      `${escapeHtml(t(locale, "filterTypeLabel"))}: <code>${escapeHtml(filters.type)}</code>`,
+    );
+  }
+  if (filters.sender !== undefined) {
+    parts.push(
+      `${escapeHtml(t(locale, "filterSenderLabel"))}: <code>${escapeHtml(filters.sender)}</code>`,
+    );
+  }
+  if (filters.q !== undefined && filters.q !== "") {
+    parts.push(
+      `${escapeHtml(t(locale, "filterSearchLabel"))}: <code>${escapeHtml(filters.q)}</code>`,
+    );
+  }
+  if (filters.unread === true) parts.push(escapeHtml(t(locale, "filterUnreadLabel")));
+  const body =
+    parts.length === 0
+      ? escapeHtml(t(locale, "filterNone"))
+      : parts.join(' <span aria-hidden="true">·</span> ');
+  return `<p class="filter-state"><strong>${escapeHtml(t(locale, "activeFilters"))}:</strong> ${body}</p>`;
+}
+
 function renderTimeline(
   locale: Locale,
   projectId: string,
   url: URL,
   messages: readonly MessageMetadata[],
   receipts: ReadonlyMap<string, ReadReceipt[]>,
+  hasMore: boolean,
+  filters: TimelineFilters,
 ): string {
+  const afterRaw = url.searchParams.get("after_seq");
+  const beforeRaw = url.searchParams.get("before_seq");
+  const afterSeq = afterRaw === null ? undefined : Number(afterRaw);
+  const beforeSeq = beforeRaw === null ? undefined : Number(beforeRaw);
+  const pagerLabel = escapeHtml(t(locale, "paginationLabel"));
+  const jump = `<a href="${escapeHtml(hrefWithParams(url, { before_seq: String(LATEST_SEQ), after_seq: null }))}">${escapeHtml(t(locale, "jumpToLatest"))}</a>`;
+
   if (messages.length === 0) {
-    return `<p class="empty">${escapeHtml(t(locale, "timelineEmpty"))}</p>`;
+    const empty = `<p class="empty">${escapeHtml(t(locale, hasActiveFilters(filters) ? "filteredEmpty" : "timelineEmpty"))}</p>`;
+    const awayFromStart =
+      afterSeq !== undefined || (beforeSeq !== undefined && beforeSeq !== LATEST_SEQ);
+    return awayFromStart
+      ? `${empty}\n<nav class="pager" aria-label="${pagerLabel}">${jump}</nav>`
+      : empty;
   }
+
   const seqById = new Map(messages.map((message) => [message.messageId, message.seq]));
   const items = messages
     .map((message) => {
@@ -596,21 +760,39 @@ ${state}
 
   const first = messages[0];
   const last = messages[messages.length - 1];
-  const pager: string[] = [];
-  if (last !== undefined) {
-    pager.push(
-      `<a href="${escapeHtml(hrefWithParams(url, { before_seq: String(first?.seq ?? last.seq), after_seq: null }))}">${escapeHtml(t(locale, "olderMessages"))}</a>`,
-    );
-    if (url.searchParams.has("before_seq") || url.searchParams.has("after_seq")) {
-      pager.push(
-        `<a href="${escapeHtml(hrefWithParams(url, { after_seq: String(last.seq), before_seq: null }))}">${escapeHtml(t(locale, "newerMessages"))}</a>`,
+  const links: string[] = [];
+  if (first !== undefined && last !== undefined) {
+    // Without a cursor the page starts at the oldest sequence, so there is no
+    // older page. A before_seq page has older rows only when the service
+    // reported another row; an after_seq page may still have earlier rows.
+    const hasOlder =
+      afterSeq !== undefined
+        ? afterSeq > 0
+        : beforeSeq !== undefined
+          ? hasMore
+          : false;
+    // A short page consumed every remaining matching row, so it is the newest.
+    const hasNewer =
+      beforeSeq !== undefined ? beforeSeq !== LATEST_SEQ : hasMore;
+    if (hasOlder) {
+      links.push(
+        `<a rel="prev" href="${escapeHtml(hrefWithParams(url, { before_seq: String(first.seq), after_seq: null }))}">${escapeHtml(t(locale, "olderMessages"))}</a>`,
       );
     }
+    if (hasNewer) {
+      links.push(
+        `<a rel="next" href="${escapeHtml(hrefWithParams(url, { after_seq: String(last.seq), before_seq: null }))}">${escapeHtml(t(locale, "newerMessages"))}</a>`,
+      );
+      if (beforeSeq !== LATEST_SEQ) links.push(jump);
+    }
   }
+  const pager =
+    links.length === 0
+      ? ""
+      : `\n<nav class="pager" aria-label="${pagerLabel}">${links.join(" ")}</nav>`;
   return `<ol class="timeline">
 ${items}
-</ol>
-<nav class="pager" aria-label="${escapeHtml(t(locale, "timelineTitle"))}">${pager.join(" ")}</nav>`;
+</ol>${pager}`;
 }
 
 async function handleTimeline(
@@ -631,14 +813,17 @@ async function handleTimeline(
   );
   if (project === undefined) throw new AppError("NOT_FOUND");
 
-  const limit = queryInt(url, "limit", 1, MAX_TIMELINE_LIMIT);
+  const limit = queryInt(url, "limit", 1, MAX_TIMELINE_LIMIT) ?? DEFAULT_TIMELINE_LIMIT;
   const afterSeq = queryInt(url, "after_seq", 0, Number.MAX_SAFE_INTEGER);
   const beforeSeq = queryInt(url, "before_seq", 0, Number.MAX_SAFE_INTEGER);
-  const query: ListMessagesQuery = {};
-  if (limit !== undefined) query.limit = limit;
-  else query.limit = DEFAULT_TIMELINE_LIMIT;
+  const filters = timelineFiltersFrom(url);
+  const query: ListMessagesQuery = { limit };
   if (afterSeq !== undefined) query.afterSeq = afterSeq;
   if (beforeSeq !== undefined) query.beforeSeq = beforeSeq;
+  if (filters.type !== undefined) query.type = filters.type;
+  if (filters.sender !== undefined) query.sender = filters.sender;
+  if (filters.q !== undefined) query.q = filters.q;
+  if (filters.unread !== undefined) query.unread = filters.unread;
 
   const result = await listMessages(deps, viewer, projectId, query);
   const receipts = await listReadReceipts(
@@ -650,8 +835,10 @@ async function handleTimeline(
 
   const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a></p>
 <h1>${escapeHtml(project.title)}</h1>
+${renderFilterForm(locale, projectId, url, filters, limit)}
 <h2>${escapeHtml(t(locale, "timelineTitle"))}</h2>
-${renderTimeline(locale, projectId, url, result.messages, receipts)}`;
+${renderFilterState(locale, filters)}
+${renderTimeline(locale, projectId, url, result.messages, receipts, result.hasMore, filters)}`;
   return htmlResponse(200, renderPage(locale, url, project.title, content));
 }
 

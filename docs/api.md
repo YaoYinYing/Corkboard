@@ -3,7 +3,8 @@
 **Status: implemented for the Node.js + SQLite vertical slices A–D, the
 bearer-authenticated MCP slice, human account sessions (slice I), the OAuth 2.1
 authorization-server core (slice J), and the read-only human web dashboard (slice L,
-English and Simplified Chinese).** Cloudflare Workers/D1, the ChatGPT Web plugin
+with metadata filters, summary search, and bounded replay in slice M; English and
+Simplified Chinese).** Cloudflare Workers/D1, the ChatGPT Web plugin
 experience, dashboard write actions, and the "Planned, not implemented" section below
 are not implemented. See `IMPLEMENTATION_STATE.md` for the current evidence,
 [`oauth.md`](./oauth.md) for the OAuth flows, and [`web-ui.md`](./web-ui.md) for the
@@ -190,16 +191,22 @@ Server-rendered HTML beside the JSON API. It is not part of `/api/v1`, is
 | --- | --- | --- |
 | `/login` | `GET`, `POST` | Form sign-in. `POST` requires `application/x-www-form-urlencoded` and a matching `login_csrf` hidden field plus `corkboard_web_login` cookie. `return_to` must be a same-origin path. |
 | `/` | `GET` | Projects readable by the account. |
-| `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`. |
+| `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`, `type`, `sender`, `unread`, and `q` use the same identifiers, bounds, and semantics as the REST message list below. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet. |
 
 Authorization derives a viewer from active, non-removed memberships of speakers
 owned by the session account, intersects them with `project.read` or `message.read`,
-and then calls the same service functions as the REST API. A project the account
-cannot read is a uniform `404`. Every page is `no-store` with a strict CSP and no
-inline script or style. `?lang=zh` selects Simplified Chinese; unknown locales fall
-back to English. No write, member, credential, key, expiry, or admin action exists.
+and then calls the same service functions as the REST API. Filters and cursors are
+parsed only after that authorization and are passed unchanged to `listMessages`;
+the page adds no SQL and never searches message bodies. A project the account
+cannot read is a uniform `404` even when filters are malformed. Every page is
+`no-store` with a strict CSP and no inline script or style. `?lang=zh` selects
+Simplified Chinese; unknown locales fall back to English and `lang` is preserved
+across filters and pager links. Filter, search, and replay behavior, including
+the summary-only `q` limit and pager end conditions, is specified in
+[`web-ui.md`](./web-ui.md). No write, member, credential, key, expiry, or admin
+action exists.
 
 ## Endpoints
 
@@ -484,7 +491,9 @@ never returned and a cursor never advances past an unpublished lower sequence.
 `next_cursor` is the greatest returned `seq`; pass it as `after_seq` for the next
 forward page. For older history, pass the smallest returned `seq` as `before_seq`.
 `next_cursor` is `null` for an empty page. Expired bodies remain as rows with
-`body_state: "expired"`.
+`body_state: "expired"`. The service also computes an internal `hasMore` flag
+for the HTML pager's end conditions; it is not part of this response and does not
+change REST or MCP list semantics.
 
 ### `GET /api/v1/projects/:projectId/messages/:messageId`
 
@@ -637,7 +646,8 @@ deferred: the ChatGPT Web plugin installation/linking experience,
 attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
 metadata), account registration/invite provisioning, email verification, password
 reset, and any dashboard write UI. Human sign-in/session read/sign-out is implemented as
-described above, and a read-only dashboard (login, project list, timeline, body reveal,
+described above, and a read-only dashboard (login, project list, timeline with
+metadata filters, summary-only search, and bounded cursor replay, body reveal,
 English/Simplified Chinese) is implemented per [`web-ui.md`](./web-ui.md); project
 create/edit, speaker/credential management, membership editing, and every state-changing
 dashboard action remain deferred. The bearer-authenticated `/mcp` surface is implemented

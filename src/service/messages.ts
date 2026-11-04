@@ -28,7 +28,7 @@ const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
-const MAX_QUERY_CHARS = 100;
+export const MAX_QUERY_CHARS = 100;
 
 export interface SendMessageInput {
   summary: string;
@@ -79,6 +79,12 @@ export interface MessageMetadata {
 export interface ListMessagesResult {
   messages: MessageMetadata[];
   nextCursor: number | null;
+  /**
+   * True when another matching row exists beyond this page in the scanned
+   * direction. Internal to the HTML pager; REST/MCP serialize only the fields
+   * they already exposed.
+   */
+  hasMore: boolean;
 }
 
 export interface MessageBody {
@@ -654,9 +660,10 @@ export async function listMessages(
   }
 
   // before_seq pages backwards to the rows nearest the cursor, then is reversed
-  // so every response is ascending.
+  // so every response is ascending. Fetch one extra row only to report whether
+  // another page exists; the response keeps exactly `limit` rows.
   const direction = beforeSeq === undefined ? "ASC" : "DESC";
-  params.push(limit);
+  params.push(limit + 1);
   const rows = await deps.db.all<MessageListRow>(
     `SELECT m.id, m.project_id, m.seq, m.sender_speaker_id, s.display_name,
             m.summary, m.type, m.language, m.reply_to_id, m.body_state, m.body_expires_at,
@@ -668,11 +675,13 @@ export async function listMessages(
       LIMIT ?`,
     params,
   );
-  if (beforeSeq !== undefined) rows.reverse();
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  if (beforeSeq !== undefined) page.reverse();
 
-  const messages = rows.map(listRowToMetadata);
+  const messages = page.map(listRowToMetadata);
   const last = messages[messages.length - 1];
-  return { messages, nextCursor: last === undefined ? null : last.seq };
+  return { messages, nextCursor: last === undefined ? null : last.seq, hasMore };
 }
 
 export async function getMessage(
