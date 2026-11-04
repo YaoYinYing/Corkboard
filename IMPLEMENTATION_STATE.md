@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–I implemented and pushed; slice J candidate |
-| Last pushed checkpoint | `9a4f6c5` (human account sessions, audited tree `cc8df35`) on `origin/main`; CI pending |
-| Branch | `slice-j-oauth` candidate (based on `8401ae3`); not audited, pushed, or merged |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: independent review PENDING |
-| Next milestone | Independent review of slice J, then ChatGPT Web acceptance (separate), D1/R2 parity, attachments, per-project observability |
+| Phase | 0 complete; vertical slices A–J implemented and pushed |
+| Last pushed checkpoint | `aac6f2e` (OAuth 2.1 core; audited code tree `a439df4`, docs-only tail) on `origin/main`; CI pending |
+| Branch | `main`, clean; the `slice-j-oauth` three-commit candidate was fast-forwarded |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), D1/R2 parity, attachments (blocked on Issue #5), operator retention/purge and per-project observability |
 
 ## Checkpoint history
 
@@ -29,6 +29,7 @@ as the work it describes.
 | `3d3dc25` | `52bf6b7` | Vertical slice G: per-credential REST/MCP rate limiting | security PASS; contract PASS |
 | `5d0ae9f` | `f45a3b4` | Vertical slice H: metrics token hardening, fixed-length comparison, adapter recording isolation | security PASS; contract PASS |
 | `9a4f6c5` | `cc8df35` | Vertical slice I: human account sessions (PBKDF2 login, cookie + CSRF, revocation) | security PASS; contract PASS |
+| `aac6f2e` | `4867ed0` | Vertical slice J: OAuth 2.1 authorization server (discovery, DCR, PKCE, consent, rotation, revocation) | security PASS; contract PASS on code tree `a439df4`; docs-only tail |
 
 ## GitHub Issue coordination
 
@@ -36,7 +37,7 @@ as the work it describes.
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
 | Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
-| Last pushed checkpoint | `9a4f6c5`; remote HEAD verified; CI run pending |
+| Last pushed checkpoint | `aac6f2e`; remote HEAD verified; CI run pending |
 | Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8); **not durable across process exit**, auto-expires after 7 days |
 | Status | No open Issue findings |
 
