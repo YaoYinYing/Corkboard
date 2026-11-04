@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A, B, and **C implemented at this tree (audit pending)** |
-| Last pushed checkpoint | `7b5a63b` (audited tree `2bfaa9b`) on `origin/main`; CI success |
-| Branch | `slice-c-authz-init` (candidate; not pushed) |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: audits pending on this tree |
-| Next milestone | Independent exact-tree security/contract audit of slice C, then D1/R2 parity and Phase 5 |
+| Phase | 0 complete; vertical slices A, B, and C implemented and pushed |
+| Last pushed checkpoint | `0052909` (audited tree `8ffff4a`) on `origin/main`; CI run 41825517323 |
+| Branch | `main` |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slice B: security PASS + contract PASS on tree `2bfaa9b`. Slice C: security PASS + contract PASS on tree `8ffff4a` |
+| Next milestone | Revocation-ordering hardening, independent-process persistence evidence, and fail-closed filesystem verification; then D1/R2 parity and Phase 5 |
 
 ## Checkpoint history
 
@@ -21,16 +21,17 @@ as the work it describes.
 | `df99e90` | `0459cfb` | Phase 0 docs, toolchain, secret hygiene | security PASS; contract PASS |
 | `b5c421d` | `048065f` | Vertical slice A: encrypted messaging, ordered replay, REST API, CLI | security PASS; contract PASS |
 | `7b5a63b` | `2bfaa9b` | Vertical slice B: body expiry tombstones, audited expiry endpoint, cleanup worker | security PASS; contract PASS |
+| `0052909` | `8ffff4a` | Vertical slice C: credential-project grants, safe bootstrap, transactional migrations | security PASS; contract PASS |
 
 ## GitHub Issue coordination
 
 | Field | Value |
 | --- | --- |
 | Authenticated account | `YaoYinYing` (verified with `gh api user`) |
-| Pending P0 Issues | #2 credential-to-project grants; #3 non-destructive key bootstrap |
-| Last pushed checkpoint | `7b5a63b`; remote HEAD verified; CI run 41817856459 success |
-| Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8), next run 2026-11-04 03:55 local; **not durable across process exit**, auto-expires after 7 days |
-| Status | Slice-C fixes for #2/#3 implemented at the candidate tree; Issues remain open until the audited checkpoint is pushed and the exact revision is linked |
+| Pending P0 Issues | none; #2 and #3 fixed by `2ab5e75` (merged as `0052909`) and closed with test/audit evidence |
+| Last pushed checkpoint | `0052909`; remote HEAD verified; CI run 41825517323 |
+| Scheduler | session-scoped hourly job `8ef0de4e` at local `:38` (America/Los_Angeles, UTC-8), next run 2026-11-04 04:55 local; **not durable across process exit**, auto-expires after 7 days |
+| Status | No open Issue findings |
 
 Do not treat later phases as verified until their checkpoints exist.
 
@@ -376,11 +377,11 @@ Do not infer any of these from local MCP behavior or from another plan.
   expiry retains metadata and does not rewrite backups.
 - Slice-B P2 debt resolved in slice C: migration 002 adds the
   `(body_state, body_expires_at)` index to existing databases and `issue-key` persists
-  the granted scope/project set in the sanitized audit `detail` column. Remaining
-  slice-B debt: worker orphan/audit passes scan the growing expired population; an
-  already-expired retry can record the retrying caller as the audit actor; a body fetch
-  that passes its state check immediately before expiry may still return the
-  already-decrypted content.
+  the granted scope/project set in the sanitized audit `detail` column; expiry audit
+  retries/reconciliation now use a system actor and repaired failures are not
+  double-counted. Remaining slice-B debt: worker orphan/audit passes scan the growing
+  expired population; a body fetch that passes its state check immediately before
+  expiry may still return the already-decrypted content.
 - Slice-C limitations: the `SqlDatabase` port has no interactive transaction for
   credential issuance, so `issue-key` compensates in application code (grants first,
   then credential) on any grant or audit failure; a process crash before compensation
@@ -393,6 +394,13 @@ Do not infer any of these from local MCP behavior or from another plan.
   scope/membership logic. Grant-specific tests set `autoGrantMemberships: false` /
   `grantExistingCredentials: false` and grant explicitly; the authoritative
   deny-by-default coverage lives in `tests/security/project-grants.test.ts`.
+- Slice-C audit P2/P3 debt: re-running `add-member` on an active membership currently
+  replaces its capability set (a non-owner rerun can downgrade an owner membership);
+  grant revocation is not asserted directly through `/me` and project-list paths;
+  the `init` database sentinel does not treat a dangling `corkboard.sqlite` symlink as
+  existing; `remove-member` writes a grant-revocation audit row even with no grants;
+  CLI mutations and their audits are separate statements, so a failure between them
+  can lose the audit row (authorization still denies by default).
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
