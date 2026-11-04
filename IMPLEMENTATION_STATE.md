@@ -95,7 +95,10 @@ pushed.
   `audit_events.detail` column. `src/storage/db.ts` now reads ordered
   `migrations/NNN_*.sql` files, applies unapplied versions, and records each in
   `schema_migrations`; the module-relative (`dist/migrations`) and cwd fallbacks are
-  retained. A definitive v1 database is upgraded in a regression test.
+  retained. Each pending migration runs in `BEGIN IMMEDIATE` with its version insert in
+  the same transaction, so a crash rolls the SQL back and concurrent upgraders
+  serialize instead of hitting a duplicate-column ALTER. A definitive v1 database is
+  upgraded in regression tests, including simulated crash and concurrent-upgrade tests.
 - Authorization is deny-by-default per credential. `authorizeProject` re-reads the
   credential and requires an explicit grant after the active project/membership/
   speaker/account checks. A valid credential with an active membership but no grant is
@@ -103,31 +106,46 @@ pushed.
   `NOT_FOUND`. All message, body, receipt, expiry, project-detail, and enumeration
   paths use this same function. Membership alone, account ownership, and newly joined
   projects confer nothing, and a grant adds no scope.
-- `GET /api/v1/me` and `GET /api/v1/projects` join the calling credential's grants and
-  omit ungranted projects. Grant revocation is read on every request, so it applies to
-  an already-authenticated principal on the next call.
+- `GET /api/v1/me` and `GET /api/v1/projects` apply the same grant predicate inline
+  (not via `authorizeProject`) and omit ungranted projects. Grant revocation is read on
+  every request, so it applies to an already-authenticated principal on the next call.
+  `remove-member` deletes that speaker's grants for the project, so re-adding the
+  membership cannot revive an old credential without an explicit re-grant.
 - CLI: `issue-key` accepts one or more `--project` occurrences, rejects zero and
   duplicates, validates an active membership and scope subset for every project,
-  inserts the credential then one grant per project, and deletes the new credential if
-  a grant insert fails. `grant-key-project` requires an active membership and inserts
-  `INSERT OR IGNORE`; `revoke-key-project` errors when the grant is absent. Both audit
-  `credential.project.grant`/`credential.project.revoke`. Issuance audit rows carry
-  sanitized JSON `detail` with granted project IDs and the scope list. No token, key,
-  or content is stored.
+  inserts the credential then one grant per project, and on any later failure deletes
+  grants, then the credential, preserving the original error; no token is printed
+  before all writes succeed. `grant-key-project` requires an active membership and
+  inserts `INSERT OR IGNORE`; `revoke-key-project` errors when the grant is absent.
+  Both audit `credential.project.grant`/`credential.project.revoke`. `remove-member`
+  deletes the speaker's grants for the project and audits the revocation. Issuance
+  audit rows carry sanitized JSON `detail` with granted project IDs and the scope list.
+  No token, key, or content is stored.
 - `init` is bootstrap-only: `--force` is removed (strict parsing rejects it), and init
   refuses — writing nothing and generating no keys — when `corkboard.sqlite` exists in
-  the data directory or the secrets file exists. The default secrets path is
-  `$XDG_CONFIG_HOME/corkboard/secrets.env`, else `~/.config/corkboard/secrets.env`,
-  with the directory `0700` and file `0600`; `--secrets-file` overrides it and is
-  rejected if it resolves inside the data directory. Only the secrets path is printed.
-  Rotation remains unimplemented and is documented as separate from bootstrap.
-- Tests: 156 total, 155 pass, 1 skipped (live D1 marker). New coverage includes v1→v2
-  migration and the missing index/detail column, deny-by-default at the service layer,
-  A-only/B-only grants, no widening on a new membership, grant-only without membership
-  (`NOT_FOUND`), enumeration filtering, immediate grant revocation, CLI multi-project
-  issuance, grant/revoke audit rows, init non-destruction (including `--force` as an
-  unknown option), default secrets isolation, in-data secrets rejection, and token
-  authentication plus body decryption surviving a refused reinitialization.
+  the data directory or the secrets file exists. Containment is enforced on canonical
+  paths (existing ancestors resolved with `realpathSync`), re-checked after directory
+  creation and immediately before the write, so symlinked parents/data directories and
+  a data directory nested under the secrets directory are rejected. The default secrets
+  path is `$XDG_CONFIG_HOME/corkboard/secrets.env`, else
+  `~/.config/corkboard/secrets.env`, with the directory `0700` and file `0600`;
+  `--secrets-file` overrides it. Only the secrets path is printed. Rotation remains
+  unimplemented and is documented as separate from bootstrap.
+- Expiry audit actor/repair fixes: an already-expired endpoint retry and worker
+  reconciliation write the deterministic row with a system actor (null account and
+  speaker); the initial endpoint transition may keep the authenticated principal. A
+  phase-1 audit failure repaired by phase 3 in the same worker run is not counted in
+  `failures`.
+- Tests: 164 total, 163 pass, 1 skipped (live D1 marker). New coverage includes v1→v2
+  migration and the missing index/detail column, crash-rollback and concurrent-upgrader
+  migrations, deny-by-default at the service layer, A-only/B-only grants, no widening
+  on a new membership, grant-only without membership (`NOT_FOUND`), enumeration
+  filtering, immediate grant revocation, CLI multi-project issuance and scope
+  rejection, grant/audit-failure rollback (no credential, grant, or token), membership
+  removal deleting grants, init non-destruction (including `--force` as an unknown
+  option), default secrets isolation, symlinked containment escapes, in-data secrets
+  rejection, and token authentication plus body decryption surviving a refused
+  reinitialization.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
 
@@ -363,15 +381,18 @@ Do not infer any of these from local MCP behavior or from another plan.
   already-expired retry can record the retrying caller as the audit actor; a body fetch
   that passes its state check immediately before expiry may still return the
   already-decrypted content.
-- Slice-C limitations: the `SqlDatabase` port has no interactive transaction, so
-  `issue-key` inserts the credential then its grants; a grant-insert failure deletes
-  the credential, but a process crash between the two steps leaves a grantless
-  credential (denied by default, revocable). Migration 002 does not backfill grants, so
-  pre-release credentials lose project access until explicitly granted. Grants and
-  membership management are CLI-only; no endpoint manages them. Key rotation remains
-  unimplemented. A crash after a migration's SQL runs but before its
-  `schema_migrations` row is recorded would require manual repair (multi-statement
-  migrations are not wrapped in an interactive transaction).
+- Slice-C limitations: the `SqlDatabase` port has no interactive transaction for
+  credential issuance, so `issue-key` compensates in application code (grants first,
+  then credential) on any grant or audit failure; a process crash before compensation
+  leaves a grantless credential (denied by default, revocable). Migration 002 does not
+  backfill grants, so pre-release credentials lose project access until explicitly
+  granted. Grants and membership management are CLI-only; no endpoint manages them.
+  Key rotation remains unimplemented.
+- Test-fixture note: `tests/helpers/service-fixture.ts` auto-grants existing
+  memberships/credentials by default so legacy service and HTTP tests keep exercising
+  scope/membership logic. Grant-specific tests set `autoGrantMemberships: false` /
+  `grantExistingCredentials: false` and grant explicitly; the authoritative
+  deny-by-default coverage lives in `tests/security/project-grants.test.ts`.
 - No human web session, OAuth, MCP, or native ChatGPT plugin implementation yet.
 - HTTP adapter caps declared and chunked bodies at 64 KiB and binds loopback by default;
   unconsumed request streams on non-body routes are drained by Node, so concurrent large

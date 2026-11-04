@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -104,15 +104,7 @@ test("an existing v1 database receives migration 002", async (t) => {
 
   // Build a genuine v1 database: migration 001 recorded, and the slice-B index
   // deliberately absent (it was only added to the fresh 001 file).
-  const legacy = new DatabaseSync(dbPath);
-  legacy.exec(readFileSync(join(repoRoot, "migrations", "001_init.sql"), "utf8"));
-  legacy.exec("DROP INDEX IF EXISTS idx_messages_body_state_expires");
-  legacy
-    .prepare(
-      "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)",
-    )
-    .run(new Date().toISOString());
-  legacy.close();
+  createLegacyV1(dbPath, repoRoot);
 
   const db = await openSqliteDatabase(dbPath);
   try {
@@ -140,6 +132,107 @@ test("an existing v1 database receives migration 002", async (t) => {
     db.close();
   }
 });
+
+test("an interrupted migration rolls back and the database reopens", async (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "corkboard-crash-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "legacy.sqlite");
+  createLegacyV1(dbPath, repoRoot);
+
+  // Simulate a crash between the non-idempotent ALTER and the version record:
+  // execute the SQL inside an uncommitted transaction and close. SQLite rolls
+  // the transaction back, so reopening must apply 002 cleanly.
+  const crashing = new DatabaseSync(dbPath);
+  crashing.exec("BEGIN IMMEDIATE");
+  crashing.exec("ALTER TABLE audit_events ADD COLUMN detail TEXT");
+  crashing.close();
+
+  const check = new DatabaseSync(dbPath);
+  try {
+    const before = check.prepare("PRAGMA table_info(audit_events)").all() as Array<{
+      name: string;
+    }>;
+    assert.equal(before.some((column) => column.name === "detail"), false);
+  } finally {
+    check.close();
+  }
+
+  const db = await openSqliteDatabase(dbPath);
+  try {
+    const versions = await db.all<{ version: number }>(
+      "SELECT version FROM schema_migrations ORDER BY version",
+    );
+    assert.deepEqual(
+      versions.map((row) => row.version),
+      [1, 2],
+    );
+    const columns = await db.all<{ name: string }>("PRAGMA table_info(audit_events)");
+    assert.equal(columns.filter((column) => column.name === "detail").length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("concurrent v1 upgrades serialize without duplicate-column errors", async (t) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "corkboard-concurrent-migrate-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "legacy.sqlite");
+  createLegacyV1(dbPath, repoRoot);
+
+  const moduleUrl = pathToFileURL(join(repoRoot, "src", "storage", "db.ts")).href;
+  const script = `
+import { openSqliteDatabase } from ${JSON.stringify(moduleUrl)};
+const db = await openSqliteDatabase(${JSON.stringify(dbPath)});
+db.close();
+`;
+  const codes = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      new Promise<number>((resolve) => {
+        const child = spawn(
+          process.execPath,
+          ["--input-type=module", "-e", script],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let stderr = "";
+        child.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        child.on("exit", (code) => {
+          if (code !== 0) process.stderr.write(stderr);
+          resolve(code ?? 1);
+        });
+      }),
+    ),
+  );
+  assert.deepEqual(codes, [0, 0, 0, 0, 0, 0]);
+
+  const db = await openSqliteDatabase(dbPath);
+  try {
+    const versions = await db.all<{ version: number }>(
+      "SELECT version FROM schema_migrations ORDER BY version",
+    );
+    assert.deepEqual(
+      versions.map((row) => row.version),
+      [1, 2],
+    );
+    const columns = await db.all<{ name: string }>("PRAGMA table_info(audit_events)");
+    assert.equal(columns.filter((column) => column.name === "detail").length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+function createLegacyV1(dbPath: string, repoRoot: string): void {
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(readFileSync(join(repoRoot, "migrations", "001_init.sql"), "utf8"));
+  legacy.exec("DROP INDEX IF EXISTS idx_messages_body_state_expires");
+  legacy
+    .prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)")
+    .run(new Date().toISOString());
+  legacy.close();
+}
 
 test("built adapter opens its bundled migration from dist", async (t) => {  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
   execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "pipe" });

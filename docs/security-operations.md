@@ -23,9 +23,12 @@ manager or treat it as a backup secret. Rules:
   the secrets file **outside** the data directory by default:
   `$XDG_CONFIG_HOME/corkboard/secrets.env` when `XDG_CONFIG_HOME` is set, otherwise
   `~/.config/corkboard/secrets.env`. The containing directory is `0700` and the file is
-  `0600`. Override the location with `init --secrets-file <path>`; a path that resolves
-  inside the data directory is rejected before any write. It prints only the
-  secrets-file path.
+  `0600`. Override the location with `init --secrets-file <path>`. Containment is
+  checked on canonical paths (existing ancestors resolved with realpath, so symlinked
+  parents and data directories cannot escape), re-checked after directory creation and
+  immediately before the write. A secrets path that resolves inside the data directory
+  is rejected, as is a data directory nested under the default secrets directory. It
+  prints only the secrets-file path.
 - `init` is bootstrap-only and non-destructive. It refuses, writing nothing, when the
   target `corkboard.sqlite` exists **or** the secrets file already exists. There is no
   overwrite/`--force` mode; an unknown `--force` is a command-line error. Key material
@@ -78,7 +81,8 @@ survive a changed pepper.
   with identical scopes. Adding a membership never widens an existing credential.
 - `grant-key-project` and `revoke-key-project` are CLI-only in this slice. Both require
   an existing credential; granting also requires an active membership. Deleted grants
-  take effect on the next request.
+  take effect on the next request. Removing a membership also deletes that speaker's
+  grants for the project, so re-adding the membership requires an explicit re-grant.
 - Migration 002 does not backfill grants. Credentials issued before the migration lose
   project access until an operator grants each intended project explicitly.
 - Agents must receive their own token. Do not share one token between a parent and its

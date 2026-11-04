@@ -20,6 +20,10 @@ prevented regression; when to remove the advice.
   grants no credential.
 - **Prevents:** Credential least-privilege failure and silent widening when the speaker
   joins another project.
+- **Test note:** the shared fixture auto-grants memberships/credentials by default so
+  legacy tests keep exercising scope/membership logic. Grant-specific tests must set
+  `autoGrantMemberships: false` / `grantExistingCredentials: false` and grant
+  explicitly.
 - **Remove when:** Not expected; keep as a rule for OAuth delegated grants too.
 
 ## 2026-11-04 — Bootstrap must refuse, not overwrite

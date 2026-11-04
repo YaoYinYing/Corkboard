@@ -5,7 +5,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { scryptSync } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, basename, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { generateSpeakerToken, hashSecret } from "../src/auth/credentials.ts";
@@ -162,10 +162,43 @@ function defaultSecretsFile(): string {
   return join(base, "corkboard", "secrets.env");
 }
 
-function isInside(parent: string, child: string): boolean {
-  const parentPath = resolve(parent);
-  const childPath = resolve(child);
+// Canonicalize a path that may not exist yet: resolve every existing ancestor
+// with realpathSync (following symlinks), then append the unresolved remainder.
+function canonicalPath(target: string): string {
+  let current = resolve(target);
+  const remainder: string[] = [];
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    remainder.unshift(basename(current));
+    current = parent;
+  }
+  const base = existsSync(current) ? realpathSync(current) : current;
+  return remainder.length === 0 ? base : join(base, ...remainder);
+}
+
+function isInsideCanonical(parent: string, child: string): boolean {
+  const parentPath = canonicalPath(parent);
+  const childPath = canonicalPath(child);
   return childPath === parentPath || childPath.startsWith(`${parentPath}${sep}`);
+}
+
+// The secrets file must not live in the data directory, including through a
+// symlinked parent or data dir. When the default secrets location is used, the
+// data directory must also not live inside that secrets directory (collision).
+// An explicit --secrets-file parent is operator-chosen and only the first rule
+// applies.
+function assertSecretsSeparated(
+  dataDir: string,
+  secretsFile: string,
+  secretsIsDefault: boolean,
+): void {
+  if (isInsideCanonical(dataDir, secretsFile)) {
+    throw new Error("--secrets-file must resolve outside the data directory");
+  }
+  if (secretsIsDefault && isInsideCanonical(dirname(secretsFile), dataDir)) {
+    throw new Error("the data directory must not resolve inside the secrets directory");
+  }
 }
 
 // Bootstrap only. Refuses to touch an existing installation: no key material is
@@ -173,14 +206,14 @@ function isInside(parent: string, child: string): boolean {
 // key rotation is a separate, unimplemented operation (see docs/security-operations.md).
 async function initCommand(values: Values): Promise<void> {
   const dataDir = requireValue(values["data-dir"], "--data-dir");
-  const secretsFile =
+  const secretsOverride =
     values["secrets-file"] === undefined || values["secrets-file"] === ""
-      ? defaultSecretsFile()
+      ? undefined
       : values["secrets-file"];
+  const secretsFile = secretsOverride ?? defaultSecretsFile();
+  const secretsIsDefault = secretsOverride === undefined;
 
-  if (isInside(dataDir, secretsFile)) {
-    throw new Error("--secrets-file must resolve outside the data directory");
-  }
+  assertSecretsSeparated(dataDir, secretsFile, secretsIsDefault);
   const databaseFile = join(dataDir, "corkboard.sqlite");
   if (existsSync(databaseFile)) {
     throw new Error(
@@ -197,6 +230,14 @@ async function initCommand(values: Values): Promise<void> {
   await mkdir(secretsDir, { recursive: true, mode: 0o700 });
   await chmod(secretsDir, 0o700);
 
+  // Re-check now that the paths exist: creation must not have been redirected
+  // by a symlink introduced after the first check.
+  assertSecretsSeparated(dataDir, secretsFile, secretsIsDefault);
+  const databaseAfter = join(dataDir, "corkboard.sqlite");
+  if (existsSync(databaseAfter) || existsSync(secretsFile)) {
+    throw new Error(`${secretsFile} exists; refusing to overwrite existing secrets`);
+  }
+
   const rootKey = crypto.getRandomValues(new Uint8Array(32));
   const pepper = crypto.getRandomValues(new Uint8Array(32));
   const content = [
@@ -206,6 +247,8 @@ async function initCommand(values: Values): Promise<void> {
     "",
   ].join("\n");
 
+  // Final canonical check immediately before the write.
+  assertSecretsSeparated(dataDir, secretsFile, secretsIsDefault);
   try {
     await writeFile(secretsFile, content, { mode: 0o600, flag: "wx" });
   } catch (error) {
@@ -270,7 +313,11 @@ async function addMemberCommand(values: Values): Promise<void> {
   await withDb(async (db) => {
     await db.run(
       `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
-       VALUES (?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (project_id, speaker_id) DO UPDATE SET
+         capabilities = excluded.capabilities,
+         joined_at = excluded.joined_at,
+         removed_at = NULL`,
       [projectId, speakerId, JSON.stringify(capabilities), new Date().toISOString()],
     );
     await insertAudit(db, {
@@ -297,11 +344,27 @@ async function removeMemberCommand(values: Values): Promise<void> {
       [new Date().toISOString(), projectId, speakerId],
     );
     if (removed.changes === 0) throw new Error("active membership not found");
+    // Removing a membership also removes that speaker's grants for the project,
+    // so re-adding the membership cannot revive an old credential. Grants are
+    // not restored automatically; they must be granted again explicitly.
+    await db.run(
+      `DELETE FROM credential_project_grants
+        WHERE project_id = ?
+          AND credential_id IN (SELECT id FROM credentials WHERE speaker_id = ?)`,
+      [projectId, speakerId],
+    );
     await insertAudit(db, {
       operation: "membership.remove",
       speakerId,
       accountId: await speakerAccount(db, speakerId),
       projectId,
+    });
+    await insertAudit(db, {
+      operation: "credential.project.revoke",
+      speakerId,
+      accountId: await speakerAccount(db, speakerId),
+      projectId,
+      detail: JSON.stringify({ projects: [projectId], source: "membership.remove" }),
     });
   });
   console.log(`membership removed: ${projectId} ${speakerId}`);
@@ -415,21 +478,23 @@ async function issueKeyCommand(values: Values): Promise<void> {
     const { token, publicPrefix } = generateSpeakerToken();
     const credentialId = randomId("cred_");
     const createdAt = new Date().toISOString();
-    await db.run(
-      `INSERT INTO credentials
-         (id, speaker_id, public_prefix, secret_verifier, scope_json, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        credentialId,
-        speakerId,
-        publicPrefix,
-        await hashSecret(token, pepper),
-        JSON.stringify(requestedScopes),
-        expiresAt,
-        createdAt,
-      ],
-    );
+    let inserted = false;
     try {
+      await db.run(
+        `INSERT INTO credentials
+           (id, speaker_id, public_prefix, secret_verifier, scope_json, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          credentialId,
+          speakerId,
+          publicPrefix,
+          await hashSecret(token, pepper),
+          JSON.stringify(requestedScopes),
+          expiresAt,
+          createdAt,
+        ],
+      );
+      inserted = true;
       for (const projectId of projectIds) {
         await db.run(
           `INSERT OR IGNORE INTO credential_project_grants
@@ -438,24 +503,39 @@ async function issueKeyCommand(values: Values): Promise<void> {
           [credentialId, projectId, createdAt],
         );
       }
+      await insertAudit(db, {
+        operation: "credential.issue",
+        speakerId,
+        accountId: await speakerAccount(db, speakerId),
+        projectId: projectIds.length === 1 ? (projectIds[0] ?? null) : null,
+        detail: JSON.stringify({
+          projects: projectIds,
+          scopes: requestedScopes,
+        }),
+      });
     } catch (error) {
       // The SqlDatabase port has no interactive transaction (D1-compatible SQL
-      // only), so undo the credential if a grant insert fails. A crash between
-      // the credential insert and the grants leaves a grantless credential,
-      // which is denied by default and can be revoked or granted explicitly.
-      await db.run("DELETE FROM credentials WHERE id = ?", [credentialId]);
+      // only), so compensate explicitly: grants first, then the credential.
+      // Cleanup failures must not replace the original error. A crash before
+      // cleanup leaves a grantless credential, which is denied by default and
+      // can be revoked; no token is printed until every write succeeds.
+      if (inserted) {
+        try {
+          await db.run(
+            "DELETE FROM credential_project_grants WHERE credential_id = ?",
+            [credentialId],
+          );
+        } catch {
+          // Best-effort compensation.
+        }
+        try {
+          await db.run("DELETE FROM credentials WHERE id = ?", [credentialId]);
+        } catch {
+          // Best-effort compensation.
+        }
+      }
       throw error;
     }
-    await insertAudit(db, {
-      operation: "credential.issue",
-      speakerId,
-      accountId: await speakerAccount(db, speakerId),
-      projectId: projectIds.length === 1 ? (projectIds[0] ?? null) : null,
-      detail: JSON.stringify({
-        projects: projectIds,
-        scopes: requestedScopes,
-      }),
-    });
     console.log(token);
   });
 }

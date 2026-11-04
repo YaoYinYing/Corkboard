@@ -572,6 +572,25 @@ function withAuditFailure(
   };
 }
 
+// Fails the first `remaining.count` audit inserts, then succeeds.
+function withAuditFailureCount(
+  db: SqlDatabase,
+  remaining: { count: number },
+): SqlDatabase {
+  return {
+    exec: (sql) => db.exec(sql),
+    all: <T>(sql: string, params?: readonly SqlValue[]) => db.all<T>(sql, params),
+    first: <T>(sql: string, params?: readonly SqlValue[]) => db.first<T>(sql, params),
+    run: (sql: string, params?: readonly SqlValue[]) => {
+      if (remaining.count > 0 && sql.includes("INSERT OR IGNORE INTO audit_events")) {
+        remaining.count -= 1;
+        return Promise.reject(new Error("injected audit insert failure"));
+      }
+      return db.run(sql, params);
+    },
+  };
+}
+
 function withBodyObjectRace(
   db: SqlDatabase,
   onObjectLookup: () => Promise<void>,
@@ -696,6 +715,35 @@ test("endpoint audit failure returns success and the worker repairs the audit ro
   });
 });
 
+test("a phase-1 audit failure repaired in phase 3 is not double-counted", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const expiry = new Date(fx.deps.now().getTime() + HOUR_MS).toISOString();
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "double count", {
+    bodyExpiresAt: expiry,
+  });
+  fx.setNow(new Date(fx.deps.now().getTime() + 2 * HOUR_MS));
+
+  // Phase 1 transitions the row then the audit insert fails; phase 3 repairs
+  // the same deterministic row in the same run.
+  const remaining = { count: 1 };
+  const summary = await expireDueBodies(
+    { ...expiryDeps(fx), db: withAuditFailureCount(fx.deps.db, remaining) },
+    {},
+  );
+  assert.equal(summary.expired, 1);
+  assert.equal(summary.failures, 0);
+  const audit = await fx.db.first<{
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+  }>(
+    "SELECT actor_account_id, actor_speaker_id FROM audit_events WHERE id = ?",
+    [expiryAuditId(sent.messageId)],
+  );
+  assert.deepEqual(audit, { actor_account_id: null, actor_speaker_id: null });
+});
+
 test("the already-expired endpoint path retries a missing audit row", async (t) => {
   const fx = await withFixture(t);
   const alice = await addActor(fx, "alice");
@@ -717,6 +765,7 @@ test("the already-expired endpoint path retries a missing audit row", async (t) 
 
   const again = await expireMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId);
   assert.deepEqual(again, { messageId: sent.messageId, bodyState: "expired" });
+  // The retry did not perform the transition, so it records a system actor.
   const audit = await fx.db.first<{
     actor_account_id: string | null;
     actor_speaker_id: string | null;
@@ -725,8 +774,8 @@ test("the already-expired endpoint path retries a missing audit row", async (t) 
     [expiryAuditId(sent.messageId)],
   );
   assert.deepEqual(audit, {
-    actor_account_id: "acct_alice",
-    actor_speaker_id: "spk_alice",
+    actor_account_id: null,
+    actor_speaker_id: null,
   });
 });
 

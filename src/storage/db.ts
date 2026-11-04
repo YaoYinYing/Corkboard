@@ -68,8 +68,31 @@ function applyMigrations(db: DatabaseSync): void {
   );
   for (const migration of listMigrations(migrationsDirectory())) {
     if (isApplied.get(migration.version) !== undefined) continue;
-    db.exec(readFileSync(migration.path, "utf8"));
-    record.run(migration.version, new Date().toISOString());
+    // Each migration and its version row commit atomically. BEGIN IMMEDIATE
+    // serializes concurrent upgraders; the in-transaction re-check makes a
+    // loser skip cleanly instead of hitting a non-idempotent ALTER. A crash
+    // rolls the migration SQL back, so the database stays reopenable. This
+    // transaction is the local SQLite runner's job; migration SQL stays
+    // D1-compatible.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (isApplied.get(migration.version) !== undefined) {
+        db.exec("COMMIT");
+        continue;
+      }
+      db.exec(readFileSync(migration.path, "utf8"));
+      record.run(migration.version, new Date().toISOString());
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // A failed statement may already have ended the transaction.
+      }
+      // Another connection may have committed this version while we waited.
+      if (isApplied.get(migration.version) !== undefined) continue;
+      throw error;
+    }
   }
 }
 

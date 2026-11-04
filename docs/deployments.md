@@ -17,7 +17,9 @@ node dist/scripts/corkboard.js init --data-dir /var/lib/corkboard
 #   $XDG_CONFIG_HOME/corkboard/secrets.env, else ~/.config/corkboard/secrets.env
 # dir 0700, file 0600; prints only the secrets-file path.
 # Override with: init --data-dir ... --secrets-file /etc/corkboard/secrets.env
-set -a; . "${XDG_CONFIG_HOME:-$HOME/.config}/corkboard/secrets.env"; set +a
+SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/corkboard/secrets.env"
+# or the exact path printed by init / passed to --secrets-file
+set -a; . "$SECRETS"; set +a
 node dist/scripts/corkboard.js serve
 ```
 
@@ -68,8 +70,11 @@ node dist/scripts/corkboard.js remove-member --project <project_id> --speaker <s
 
 `issue-key` requires at least one `--project`; the credential receives one grant per
 project. `add-member` grants credentials nothing: a key is usable only in projects it
-was explicitly granted, even when the speaker is a member of other projects. If
-granting a key fails mid-issuance, the new credential is deleted rather than left
+was explicitly granted, even when the speaker is a member of other projects.
+`remove-member` deletes that speaker's grants for the project, so re-adding the
+membership does not revive an old credential; `add-member` reactivates a removed
+membership but never restores grants, so grant it again explicitly. If granting a
+key fails mid-issuance, the new credential and its grants are removed rather than left
 partially provisioned. Existing pre-release credentials have no grants and lose access
 until granted explicitly.
 

@@ -133,9 +133,11 @@ export async function expireMessageBody(
 
   if (message.body_state === "expired") {
     // Retry a crash-interrupted audit and cleanup, but never fail the
-    // idempotent call: the destructive transition already succeeded.
+    // idempotent call: the destructive transition already succeeded. The
+    // transition was not performed by this caller, so the repaired row uses a
+    // system actor rather than the retrying principal.
     try {
-      await auditExpiry(deps, projectId, messageId, principal.speakerId, principal.accountId);
+      await auditExpiry(deps, projectId, messageId, null, null);
     } catch {
       // The cleanup worker reconciles the missing audit row.
     }
@@ -202,6 +204,9 @@ export async function expireDueBodies(
   const limit = validateLimit(options.limit);
   const nowIso = deps.now().toISOString();
   const examined = new Set<string>();
+  // Messages whose phase-1 audit failed. Phase 3 may repair the same row; count
+  // the failure once and clear it when the repair succeeds.
+  const auditFailures = new Set<string>();
   const summary: ExpireBodiesSummary = {
     examined: 0,
     expired: 0,
@@ -239,7 +244,10 @@ export async function expireDueBodies(
       // Worker-initiated expiry is a system action, not the sender's.
       await auditExpiry(deps, row.project_id, row.id, null, null);
     } catch {
-      summary.failures += 1;
+      if (!auditFailures.has(row.id)) {
+        auditFailures.add(row.id);
+        summary.failures += 1;
+      }
     }
   }
 
@@ -282,8 +290,12 @@ export async function expireDueBodies(
     examined.add(row.id);
     try {
       await auditExpiry(deps, row.project_id, row.id, null, null);
+      if (auditFailures.delete(row.id)) summary.failures -= 1;
     } catch {
-      summary.failures += 1;
+      if (!auditFailures.has(row.id)) {
+        auditFailures.add(row.id);
+        summary.failures += 1;
+      }
     }
   }
 

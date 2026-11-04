@@ -40,7 +40,10 @@ the credential/membership intersection.
 - **No implicit widening.** Joining a new project never widens an existing credential.
   Multiple credentials for one speaker are independent: each needs its own grant.
 - **Revocation is immediate.** `revoke-key-project` deletes the grant; the next request
-  is denied. Grant state is read on every request; there is no authorization cache.
+  is denied. `remove-member` deletes that speaker's grants for the project;
+  `add-member` reactivates a removed membership but never restores grants, so re-adding
+  the membership does not revive an old credential. Grant state is read on every
+  request; there is no authorization cache.
 - **Pre-release migration.** This is a pre-release schema change. Credentials issued
   before migration 002 have no grants and therefore lose all project access until an
   operator runs `grant-key-project` for each intended project.

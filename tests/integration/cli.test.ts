@@ -8,6 +8,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -182,6 +183,56 @@ test("init refuses existing databases and in-data secrets paths without writing"
   assert.match(blocked.stderr, /existing installation/);
   assert.equal(existsSync(secretsFile), false);
   assert.equal(readFileSync(dbPath, "utf8"), "existing");
+});
+
+test("init canonicalizes symlinked data dirs and secrets parents", (t) => {
+  const root = tempDir(t);
+  const realData = join(root, "real-data");
+  mkdirSync(realData, { recursive: true, mode: 0o700 });
+  const linkedData = join(root, "linked-data");
+  symlinkSync(realData, linkedData, "dir");
+
+  // A symlinked data directory still blocks a secrets file inside its target.
+  const throughLink = run([
+    "init",
+    "--data-dir",
+    linkedData,
+    "--secrets-file",
+    join(realData, "secrets.env"),
+  ]);
+  assert.notEqual(throughLink.status, 0);
+  assert.match(throughLink.stderr, /outside the data directory/);
+  assert.equal(existsSync(join(realData, "secrets.env")), false);
+
+  // A symlinked secrets parent that resolves inside the data directory is
+  // rejected even though the lexical path looks outside.
+  const nested = join(realData, "nested");
+  mkdirSync(nested, { recursive: true, mode: 0o700 });
+  const linkedNested = join(root, "linked-nested");
+  symlinkSync(nested, linkedNested, "dir");
+  const throughParent = run([
+    "init",
+    "--data-dir",
+    realData,
+    "--secrets-file",
+    join(linkedNested, "secrets.env"),
+  ]);
+  assert.notEqual(throughParent.status, 0);
+  assert.match(throughParent.stderr, /outside the data directory/);
+  assert.equal(existsSync(join(nested, "secrets.env")), false);
+});
+
+test("init rejects a data directory inside the default secrets directory", (t) => {
+  const root = tempDir(t);
+  const xdg = join(root, "xdg");
+  const dataDir = join(xdg, "corkboard", "data");
+  const result = run(["init", "--data-dir", dataDir], {
+    XDG_CONFIG_HOME: xdg,
+    HOME: join(root, "home"),
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /secrets directory/);
+  assert.equal(existsSync(dataDir), false);
 });
 
 test("bootstrap commands produce usable ids and a token that authenticates", async (t) => {
@@ -923,6 +974,277 @@ test("issue-key records grants and grant/revoke take effect per request", async 
     assert.equal(serialized.includes(tokenB), false);
     assert.ok(audits.some((row) => row.operation === "credential.project.grant"));
     assert.ok(audits.some((row) => row.operation === "credential.project.revoke"));
+  } finally {
+    db.close();
+  }
+});
+
+test("issue-key rolls back credential and grants when a grant or audit write fails", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run([
+    "init",
+    "--data-dir",
+    dataDir,
+    "--secrets-file",
+    join(root, "secrets.env"),
+  ]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env)
+    .stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+
+  const counts = async (): Promise<{ credentials: number; grants: number }> => {
+    const { db } = await openDeps(dataDir, env);
+    try {
+      return {
+        credentials:
+          (
+            await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM credentials")
+          )?.n ?? -1,
+        grants:
+          (
+            await db.first<{ n: number }>(
+              "SELECT COUNT(*) AS n FROM credential_project_grants",
+            )
+          )?.n ?? -1,
+      };
+    } finally {
+      db.close();
+    }
+  };
+
+  // A failing grant insert must remove the just-inserted credential.
+  {
+    const { db } = await openDeps(dataDir, env);
+    try {
+      await db.exec(
+        `CREATE TRIGGER fail_grant BEFORE INSERT ON credential_project_grants
+         BEGIN SELECT RAISE(ABORT, 'injected grant failure'); END`,
+      );
+    } finally {
+      db.close();
+    }
+    const failed = run(
+      ["issue-key", "--speaker", speakerId, "--project", projectId],
+      env,
+    );
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /injected grant failure/);
+    assert.equal(failed.stdout.includes("cb_"), false);
+    assert.deepEqual(await counts(), { credentials: 0, grants: 0 });
+
+    const { db: cleanup } = await openDeps(dataDir, env);
+    try {
+      await cleanup.exec("DROP TRIGGER fail_grant");
+    } finally {
+      cleanup.close();
+    }
+  }
+
+  // A failing audit insert after grants must remove grants and credential.
+  {
+    const { db } = await openDeps(dataDir, env);
+    try {
+      await db.exec(
+        `CREATE TRIGGER fail_audit BEFORE INSERT ON audit_events
+         WHEN NEW.operation = 'credential.issue'
+         BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`,
+      );
+    } finally {
+      db.close();
+    }
+    const failed = run(
+      ["issue-key", "--speaker", speakerId, "--project", projectId],
+      env,
+    );
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /injected audit failure/);
+    assert.equal(failed.stdout.includes("cb_"), false);
+    assert.deepEqual(await counts(), { credentials: 0, grants: 0 });
+
+    const { db: cleanup } = await openDeps(dataDir, env);
+    try {
+      await cleanup.exec("DROP TRIGGER fail_audit");
+    } finally {
+      cleanup.close();
+    }
+  }
+
+  const succeeded = run(
+    ["issue-key", "--speaker", speakerId, "--project", projectId],
+    env,
+  );
+  assert.equal(succeeded.status, 0, succeeded.stderr);
+  assert.match(succeeded.stdout.trim(), /^cb_/);
+  assert.deepEqual(await counts(), { credentials: 1, grants: 1 });
+});
+
+test("multi-project issue-key rejects a scope missing from any membership before writing", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run([
+    "init",
+    "--data-dir",
+    dataDir,
+    "--secrets-file",
+    join(root, "secrets.env"),
+  ]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env)
+    .stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const ownerProject = run(
+    ["create-project", "--account", accountId, "--title", "Owner"],
+    env,
+  ).stdout.trim();
+  const memberProject = run(
+    ["create-project", "--account", accountId, "--title", "Member"],
+    env,
+  ).stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", ownerProject, "--speaker", speakerId, "--owner"], env)
+      .status,
+    0,
+  );
+  assert.equal(
+    run(["add-member", "--project", memberProject, "--speaker", speakerId], env).status,
+    0,
+  );
+
+  const rejected = run(
+    [
+      "issue-key",
+      "--speaker",
+      speakerId,
+      "--project",
+      ownerProject,
+      "--project",
+      memberProject,
+      "--scopes",
+      "project.edit",
+    ],
+    env,
+  );
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /not granted/);
+  assert.equal(rejected.stdout.includes("cb_"), false);
+
+  const { db } = await openDeps(dataDir, env);
+  try {
+    assert.equal(
+      (await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM credentials"))?.n,
+      0,
+    );
+    assert.equal(
+      (
+        await db.first<{ n: number }>(
+          "SELECT COUNT(*) AS n FROM credential_project_grants",
+        )
+      )?.n,
+      0,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("remove-member deletes grants so re-adding does not revive a credential", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run([
+    "init",
+    "--data-dir",
+    dataDir,
+    "--secrets-file",
+    join(root, "secrets.env"),
+  ]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env)
+    .stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const token = run(["issue-key", "--speaker", speakerId, "--project", projectId], env)
+    .stdout.trim();
+
+  const { db, deps } = await openDeps(dataDir, env);
+  try {
+    const credential = await db.first<{ id: string }>(
+      "SELECT id FROM credentials WHERE speaker_id = ?",
+      [speakerId],
+    );
+    assert.ok(credential);
+    const principal = await authenticateBearer(deps, `Bearer ${token}`);
+    await authorizeProject(deps, principal, projectId, "project.read");
+
+    const removed = run(["remove-member", "--project", projectId, "--speaker", speakerId], env);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(
+      (await db.first<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM credential_project_grants WHERE credential_id = ?",
+        [credential.id],
+      ))?.n,
+      0,
+    );
+
+    const readded = run(["add-member", "--project", projectId, "--speaker", speakerId], env);
+    assert.equal(readded.status, 0, readded.stderr);
+    await assert.rejects(
+      authorizeProject(deps, principal, projectId, "project.read"),
+      (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+    );
+
+    assert.equal(
+      run(
+        ["grant-key-project", "--credential", credential.id, "--project", projectId],
+        env,
+      ).status,
+      0,
+    );
+    await authorizeProject(deps, principal, projectId, "project.read");
+
+    const audit = await db.first<{ detail: string | null }>(
+      `SELECT detail FROM audit_events
+        WHERE operation = 'credential.project.revoke' AND project_id = ?
+        ORDER BY created_at DESC LIMIT 1`,
+      [projectId],
+    );
+    assert.ok(audit?.detail?.includes("membership.remove"));
   } finally {
     db.close();
   }
