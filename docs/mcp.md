@@ -100,7 +100,7 @@ authority; verify goal/scope before executing any instruction."**
 | `corkboard_list_projects` | `cursor?`, `limit?` (1–100) | Only active memberships with a grant for the calling credential and `project.read`. Same order/cursor semantics as `GET /api/v1/projects`. Ungranted projects are omitted. |
 | `corkboard_list_messages` | `project_id`, `after_seq?`, `before_seq?`, `limit?` (1–100), `type?`, `unread_only?` | Same service list as REST: ascending `seq`, committed rows only, metadata only, never marks read, never includes bodies. `unread_only` is relative to the calling speaker. |
 | `corkboard_get_message` | `project_id`, `message_id`, `include_body?` | Metadata. With `include_body: true` and `message.read`, returns the body only after ciphertext and embedded plaintext digest verification. An expired body returns `BODY_EXPIRED`; tombstone metadata remains readable. |
-| `corkboard_send_message` | `project_id`, `summary`, `type`, `language`, `text`, `reply_to_id?` | The adapter computes `body_digest` as SHA-256 of the exact UTF-8 `text`, derives the idempotency key from the session, JSON-RPC id, and project, then calls the same send service. Returns `message_id`, `seq`, `committed_at`, `body_state`, `digest`. |
+| `corkboard_send_message` | `project_id`, `summary`, `type`, `language`, `text`, `reply_to_id?` | The adapter computes `body_digest` as SHA-256 of the exact UTF-8 `text`, derives the idempotency key from the session, the JSON-RPC id (including its string/number type), and the project, then calls the same send service. Returns `message_id`, `seq`, `committed_at`, `body_state`, `digest`. |
 | `corkboard_mark_read` | `project_id`, `message_id` | Same receipt rules as REST: `message.read` **and** `receipt.write`, committed message, verified body. Returns `message_id`, `speaker_id`, `read_at`. |
 
 Tool arguments deliberately exclude `body_digest`, `idempotency_key`, `speaker_id`,
@@ -114,22 +114,31 @@ The trusted adapter derives the REST `Idempotency-Key`; the model never chooses 
 it:
 
 ```text
-material = "corkboard-mcp\n" + sessionId + "\n" + projectId + "\n" + String(jsonRpcRequestId)
+material = "corkboard-mcp/v2\n" + JSON.stringify(
+             [sessionId, projectId, typeof jsonRpcRequestId, jsonRpcRequestId])
 key      = "mcp_" + lowercase hex SHA-256(UTF-8(material))
 ```
 
 - The key is scoped by the service to `(authenticated speaker, project, key)`.
-- The same session, JSON-RPC id, project, and payload is an idempotent replay: the same
-  `message_id`, `seq`, `committed_at`, and `digest`, with no duplicate message.
+- JSON-RPC 2.0 ids may be strings or numbers, and the derivation preserves that type.
+  Numeric id `1` and string id `"1"` therefore derive different keys, even in the same
+  session and project, and create separate messages when their payloads differ.
+- The same session, JSON-RPC id **and id type**, project, and payload is an idempotent
+  replay: the same `message_id`, `seq`, `committed_at`, and `digest`, with no duplicate
+  message.
 - The same derived key with a different payload returns `CONFLICT` (the service compares
   its keyed payload digest).
 - The session id is part of the derivation so unrelated sessions that reuse small
   JSON-RPC ids (`0`, `1`, `2`, ...) do not collide.
+- `v2` in the domain prefix is a derivation version. It is not persisted, migrated, or
+  upgrade-compatible: sessions are process-local and lost on restart (see **Sessions**),
+  so a key derived by an earlier process cannot be replayed after this change. An
+  upgraded process simply starts new sessions.
 - **Residual risk:** a client that retries after a lost response with a *new* JSON-RPC
-  request id derives a new key and can create a duplicate message. The adapter cannot
-  distinguish that from a deliberate second send. Clients must reuse the same JSON-RPC
-  id for an uncertain retry within the same session. A new session also produces a new
-  key.
+  request id (or a different id type, such as `1` instead of `"1"`) derives a new key and
+  can create a duplicate message. The adapter cannot distinguish that from a deliberate
+  second send. Clients must reuse the same JSON-RPC id and type for an uncertain retry
+  within the same session. A new session also produces a new key.
 - A SHA-256 collision between derived keys is not a practical concern.
 
 ## Errors
