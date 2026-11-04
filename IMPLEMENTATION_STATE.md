@@ -153,16 +153,23 @@ pushed.
 - **Authorization timing.** `docs/architecture.md`, `docs/api.md`, and
   `docs/security-operations.md` now state the exact contract: request-start
   authorization for every path; final re-authorization immediately before the durable
-  effect for send finalization, receipt insert, and plaintext body return; request-start
-  only for reads with no write. A revocation landing after the final re-check and before
-  the atomic SQL statement is explicitly not prevented.
+  effect for send finalization, receipt insert, expiry transition/repair, and plaintext
+  body return; request-start only for reads with no write. A revocation landing after
+  the final re-check and before the atomic SQL statement is explicitly not prevented.
+  Mid-request re-check errors follow `authorizeProject`: a mid-request credential
+  revocation is `FORBIDDEN`, a membership removal is `NOT_FOUND`, and a
+  request-start revocation remains `UNAUTHENTICATED`.
 - **Final re-checks.** `sendMessage` calls `authorizeProject(..., "message.send")` in
   `publish` immediately before `finalizeMessage`, so a mid-flight revocation allocates
   no `seq` and leaves only the documented reclaimable pending row/blob; a same-key retry
   after re-grant resumes. `markRead` re-authorizes `message.read` and re-checks
   `receipt.write` immediately before the receipt INSERT. `getMessageBody` re-authorizes
-  `message.read` after decryption and before returning plaintext. No duplicate
-  authorization logic exists; all three reuse `authorizeProject`.
+  `message.read` after decryption and before returning plaintext. `expireMessageBody`
+  re-authorizes `project.edit` immediately before the conditional `ready → expired`
+  UPDATE and before the already-expired repair path (audit retry and ciphertext
+  deletion), so a mid-request revocation performs no transition and deletes no
+  ciphertext. No duplicate authorization logic exists; all four reuse
+  `authorizeProject`.
 - **Independent-process persistence evidence.** `tests/integration/persistence-processes.test.ts`
   provisions one SQLite file, closes the parent connection, and runs four independent
   Node processes, each sending three messages concurrently in the same project. It
@@ -171,12 +178,16 @@ pushed.
   `PRAGMA integrity_check = ok`, and one blob per message.
 - **Fail-closed filesystem.** `src/storage/permissions.ts` exports
   `requiresPrivateFilesystem` (`NODE_ENV=production` or
-  `CORKBOARD_REQUIRE_PRIVATE_FS=1`) and `verifyPrivateFilesystem`. Production startup
-  rejects symlinked data/blob directories and requires `0700` data/blob directories and
-  `0600` database, WAL/SHM, and blob files; it throws before listening. Outside
-  production the previous best-effort behavior remains. Tests cover normal and
-  deliberately wrong modes, symlinks, the non-production path, and a real
-  production-mode `startServer`.
+  `CORKBOARD_REQUIRE_PRIVATE_FS=1`), `assertNoPrivateFilesystemRedirects`, and
+  `verifyPrivateFilesystem`. Paths are normalized with `resolve` before `lstat`, so
+  trailing separators, `.` and `..` cannot disguise a symlink. Production startup
+  rejects symlinked data/blob directories, the database file, and its `-wal`/`-shm`
+  sidecars before any `mkdir`/`chmod`/open, so a rejected redirect leaves the target
+  untouched; after opening it requires `0700` directories and `0600` regular
+  database/sidecar/blob files and throws before listening. Outside production the
+  previous best-effort behavior remains. Tests cover normal and deliberately wrong
+  modes, trailing-slash and DB/WAL symlinks, non-production behavior, untouched
+  targets, and real production-mode `startServer`.
 - **Slice-C audit debt cleared.** `add-member` updates capabilities only for a removed
   membership (`DO UPDATE ... WHERE removed_at IS NOT NULL`) and treats an active
   re-run as a no-op with no extra audit row. `init` uses `lstatSync` so a dangling or
@@ -185,7 +196,7 @@ pushed.
   membership removal. `remove-member` writes `credential.project.revoke` only when a
   grant was deleted. `init` rejects a data-directory path containing a newline before
   writing `secrets.env`.
-- Tests: 180 total, 179 pass, 1 skipped (live D1 marker). `npm run check` and
+- Tests: 187 total, 186 pass, 1 skipped (live D1 marker). `npm run check` and
   `npm run build` pass.
 
 ## Vertical slice B — body expiry and tombstone (implemented at this tree)
@@ -444,9 +455,10 @@ Do not infer any of these from local MCP behavior or from another plan.
   between them can lose the audit row (authorization still denies by default).
 - Revocation re-checks narrow but do not eliminate TOCTOU. A revocation that commits
   after the final re-check but before the atomic SQL statement (send finalization,
-  receipt INSERT) or before the plaintext response is written is not prevented. No
-  atomic-revocation guarantee is claimed. `getMessageBody` can also still return a body
-  that expires immediately after its state check, as recorded under slice B.
+  receipt INSERT, expiry UPDATE) or before the plaintext response is written is not
+  prevented. No atomic-revocation guarantee is claimed. `getMessageBody` can also still
+  return a body that expires immediately after its state check, as recorded under
+  slice B.
 - Production filesystem verification covers directories and files present at startup;
   WAL/SHM sidecars are checked when present and are created `0600` by the adapter. It
   does not detect a mode change made by another privileged process after startup.

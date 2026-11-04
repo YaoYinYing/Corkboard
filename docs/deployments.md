@@ -20,8 +20,15 @@ node dist/scripts/corkboard.js init --data-dir /var/lib/corkboard
 SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/corkboard/secrets.env"
 # or the exact path printed by init / passed to --secrets-file
 set -a; . "$SECRETS"; set +a
-node dist/scripts/corkboard.js serve
+NODE_ENV=production node dist/scripts/corkboard.js serve
 ```
+
+In production the server verifies filesystem confidentiality before listening: the
+data and blob directories must be `0700`; the database, its `-wal`/`-shm` sidecars, and
+blob files must be `0600`; and a symlinked data directory, blob directory, database, or
+sidecar is rejected. A mismatch throws and the server does not start. Set
+`NODE_ENV=production` or `CORKBOARD_REQUIRE_PRIVATE_FS=1` to enable this; local
+development keeps the previous best-effort behavior.
 
 `init` is non-destructive. It refuses, writing nothing, when `corkboard.sqlite` exists
 in the data directory or the secrets file already exists. There is no `--force` mode.
@@ -38,6 +45,8 @@ Environment:
 | `CORKBOARD_ROOT_KEY` | yes | base64 32-byte AES root key, version `v1` |
 | `CORKBOARD_CREDENTIAL_PEPPER` | yes | base64 32-byte HMAC pepper |
 | `CORKBOARD_DATA_DIR` | yes | database and blob directory |
+| `NODE_ENV` | no | `production` enables fail-closed filesystem mode verification |
+| `CORKBOARD_REQUIRE_PRIVATE_FS` | no | `1` enables the same verification without `NODE_ENV` |
 | `PORT` | no | defaults to `8787` |
 | `HOST` | no | listen host; default `127.0.0.1` |
 | `CORKBOARD_BOOTSTRAP_PASSWORD` | no | owner bootstrap password, environment only |

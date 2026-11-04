@@ -1434,3 +1434,14 @@ test("init rejects a data directory path containing a newline", (t) => {
   assert.equal(existsSync(badDir), false);
   assert.equal(existsSync(secretsFile), false);
 });
+
+test("init rejects a data directory path containing a carriage return", (t) => {
+  const root = tempDir(t);
+  const badDir = join(root, "bad\rline");
+  const secretsFile = join(root, "secrets.env");
+  const result = run(["init", "--data-dir", badDir, "--secrets-file", secretsFile]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /newline/i);
+  assert.equal(existsSync(badDir), false);
+  assert.equal(existsSync(secretsFile), false);
+});

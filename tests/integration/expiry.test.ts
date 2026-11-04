@@ -971,3 +971,95 @@ test("expire HTTP route exposes the endpoint and authorization ordering", async 
   assert.equal(metadataBody.body_state, "expired");
   assert.equal(metadataBody.body_expires_at, expiry);
 });
+
+// Interleaving helper: delete the credential-project grant immediately after the
+// message-state read, i.e. after request-start authorization and before the
+// final re-check.
+function revokeGrantAfterMessageRead(fx: ServiceFixture, principal: Principal): SqlDatabase {
+  const base = fx.db;
+  let revoked = false;
+  return {
+    exec: (sql: string): Promise<void> => base.exec(sql),
+    all: <T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> => base.all<T>(sql, params),
+    run: (sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }> =>
+      base.run(sql, params),
+    async first<T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined> {
+      const row = await base.first<T>(sql, params);
+      if (!revoked && sql.includes("SELECT seq, body_state FROM messages")) {
+        revoked = true;
+        await base.run(
+          "DELETE FROM credential_project_grants WHERE credential_id = ? AND project_id = ?",
+          [principal.credentialId, "proj_1"],
+        );
+      }
+      return row;
+    },
+  };
+}
+
+test("expiry re-authorizes before the destructive transition", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "expire me");
+  const storageKey = await blobKeyFor(fx, sent.messageId);
+
+  fx.deps.db = revokeGrantAfterMessageRead(fx, alice.principal);
+  await expectCode(
+    expireMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId),
+    "FORBIDDEN",
+  );
+
+  // No transition and no ciphertext deletion.
+  const row = await fx.db.first<{ body_state: string; seq: number }>(
+    "SELECT body_state, seq FROM messages WHERE id = ?",
+    [sent.messageId],
+  );
+  assert.deepEqual(row, { body_state: "ready", seq: 1 });
+  assert.ok(await fx.blobs.get(storageKey));
+  const object = await fx.db.first<{ state: string | null; storage_key: string | null }>(
+    "SELECT state, storage_key FROM body_objects WHERE storage_key = ?",
+    [storageKey],
+  );
+  assert.equal(object?.state, "ready");
+  assert.equal(object?.storage_key, storageKey);
+  const audit = await fx.db.first("SELECT id FROM audit_events WHERE id = ?", [
+    expiryAuditId(sent.messageId),
+  ]);
+  assert.equal(audit, undefined);
+
+  // After an explicit re-grant the retry expires and deletes exactly once.
+  await fx.grantProject(alice.principal.credentialId, "proj_1");
+  const result = await expireMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId);
+  assert.equal(result.bodyState, "expired");
+  assert.equal(await fx.blobs.get(storageKey), undefined);
+});
+
+test("an already-expired repair deletes nothing after mid-request revocation", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "repair me");
+  const storageKey = await blobKeyFor(fx, sent.messageId);
+
+  // Simulate a crash after the durable transition but before blob deletion.
+  await fx.expireMessage(sent.messageId);
+
+  fx.deps.db = revokeGrantAfterMessageRead(fx, alice.principal);
+  await expectCode(
+    expireMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId),
+    "FORBIDDEN",
+  );
+
+  assert.ok(await fx.blobs.get(storageKey));
+  const object = await fx.db.first<{ state: string | null; storage_key: string | null }>(
+    "SELECT state, storage_key FROM body_objects WHERE storage_key = ?",
+    [storageKey],
+  );
+  assert.equal(object?.state, "ready");
+  assert.equal(object?.storage_key, storageKey);
+  const audit = await fx.db.first("SELECT id FROM audit_events WHERE id = ?", [
+    expiryAuditId(sent.messageId),
+  ]);
+  assert.equal(audit, undefined);
+});

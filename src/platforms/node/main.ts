@@ -3,7 +3,7 @@
 // proxy's job; secrets are read from the environment and never printed.
 import { chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createApp,
@@ -16,6 +16,7 @@ import type { ServiceDeps } from "../../service/auth.ts";
 import { LocalBlobStore } from "../../storage/blobs/local.ts";
 import { openSqliteDatabase } from "../../storage/db.ts";
 import {
+  assertNoPrivateFilesystemRedirects,
   requiresPrivateFilesystem,
   verifyPrivateFilesystem,
 } from "../../storage/permissions.ts";
@@ -125,10 +126,12 @@ async function writeWebResponse(response: ServerResponse, body: Response): Promi
 
 export async function startServer(options: StartServerOptions = {}): Promise<RunningServer> {
   const env = options.env ?? process.env;
-  const dataDir = env.CORKBOARD_DATA_DIR;
-  if (dataDir === undefined || dataDir === "") {
+  const configuredDataDir = env.CORKBOARD_DATA_DIR;
+  if (configuredDataDir === undefined || configuredDataDir === "") {
     throw new Error("CORKBOARD_DATA_DIR is not set");
   }
+  // Normalize once so every later lstat/mkdir/open uses the same path.
+  const dataDir = resolve(configuredDataDir);
   const port = Number(env.PORT ?? String(DEFAULT_PORT));
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error("PORT must be an integer 0-65535");
@@ -136,13 +139,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   // Plain HTTP stays on loopback unless the operator opts into another HOST.
   const host = env.HOST === undefined || env.HOST === "" ? DEFAULT_HOST : env.HOST;
 
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const blobDir = join(dataDir, "blobs");
-  mkdirSync(blobDir, { recursive: true, mode: 0o700 });
+  const databasePath = join(dataDir, "corkboard.sqlite");
   const productionFilesystem = requiresPrivateFilesystem(env);
+  // Reject redirects before creating, chmodding, or opening anything, so a
+  // rejected symlink target is left untouched.
+  if (productionFilesystem) {
+    assertNoPrivateFilesystemRedirects({ dataDir, blobDir, databasePath });
+  }
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  mkdirSync(blobDir, { recursive: true, mode: 0o700 });
   // Establish the mode first; verification below fails closed if it did not take.
   if (productionFilesystem) chmodSync(blobDir, 0o700);
-  const databasePath = join(dataDir, "corkboard.sqlite");
   const db = await openSqliteDatabase(databasePath);
 
   let close: () => Promise<void>;

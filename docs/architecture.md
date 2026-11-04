@@ -195,14 +195,22 @@ Authorization is evaluated in two places, deliberately:
    - `getMessageBody` re-authorizes `message.read` after decryption and immediately
      before the plaintext response. A revocation in that window returns no content,
      writes no integrity audit, and creates no receipt.
+   - `expireMessageBody` re-authorizes `project.edit` immediately before the
+     conditional `ready → expired` UPDATE and before the already-expired repair path
+     (audit retry and ciphertext deletion). A revocation in either window performs no
+     transition and deletes no ciphertext.
 
 Reads that write nothing (message list, message metadata, `/me`, project enumeration)
-are authorized at request start only. Expiry and CLI mutations are authorized at
-request start and do not return plaintext.
+are authorized at request start only. CLI cleanup commands act as the operator, not on
+behalf of a bearer principal.
 
 Decision order is unchanged: no active credential or principal → `UNAUTHENTICATED`;
 unknown/inactive project, missing or removed membership → `NOT_FOUND`; active
 membership without the required credential-project grant or scope → `FORBIDDEN`.
+Final re-checks use the same `authorizeProject` semantics: because the principal was
+authenticated at request start, a credential revoked mid-request yields `FORBIDDEN`,
+while a membership removed mid-request (or a grant whose membership is no longer
+active) yields `NOT_FOUND`.
 
 This narrows the stale-authorization window; it is **not** an atomic-revocation
 guarantee. A revocation that commits after the final re-check but before the atomic SQL

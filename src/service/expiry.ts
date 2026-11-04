@@ -132,6 +132,9 @@ export async function expireMessageBody(
   }
 
   if (message.body_state === "expired") {
+    // Re-authorize immediately before the repair path: a revoked/removed caller
+    // performs neither the audit repair nor ciphertext deletion.
+    await authorizeProject(deps, principal, projectId, "project.edit");
     // Retry a crash-interrupted audit and cleanup, but never fail the
     // idempotent call: the destructive transition already succeeded. The
     // transition was not performed by this caller, so the repaired row uses a
@@ -149,6 +152,12 @@ export async function expireMessageBody(
     return { messageId, bodyState: "expired" };
   }
   if (message.body_state !== "ready") throw new AppError("NOT_FOUND");
+
+  // Re-authorize immediately before the destructive transition. If access was
+  // revoked while the request was in flight, no state changes and no ciphertext
+  // is deleted. A revocation after this check but before the UPDATE is not
+  // prevented; see docs/architecture.md.
+  await authorizeProject(deps, principal, projectId, "project.edit");
 
   let changes: number;
   try {

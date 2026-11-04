@@ -16,8 +16,10 @@ prevented regression; when to remove the advice.
   plaintext return; the operation previously succeeded.
 - **Fix:** `sendMessage` re-authorizes `message.send` immediately before finalization,
   `markRead` re-authorizes `message.read` and `receipt.write` before the receipt INSERT,
-  and `getMessageBody` re-authorizes `message.read` after decryption before returning.
-  All reuse `authorizeProject`; reads with no write stay request-start-only.
+  `getMessageBody` re-authorizes `message.read` after decryption before returning, and
+  `expireMessageBody` re-authorizes `project.edit` before the destructive UPDATE and
+  before the already-expired repair path. All reuse `authorizeProject`; reads with no
+  write stay request-start-only.
 - **Prevents:** Acting on stale access after revocation. It does not prevent a
   revocation landing after the final re-check and before the atomic SQL statement; no
   atomic-revocation guarantee is claimed.

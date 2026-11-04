@@ -3,9 +3,11 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -167,4 +169,108 @@ test("production startup refuses a symlinked data directory", async (t) => {
     }),
     /data directory must not be a symbolic link/,
   );
+  // Rejected before mkdir/open: the redirect target is untouched.
+  assert.deepEqual(readdirSync(real), []);
+});
+
+test("the filesystem verifier normalizes trailing separators before checking symlinks", (t) => {
+  const paths = setup(t);
+  const linkedData = join(paths.root, "linked-data");
+  symlinkSync(paths.dataDir, linkedData, "dir");
+  for (const suffix of ["/", "/.", "/./"]) {
+    assert.throws(
+      () => check({ ...paths, dataDir: linkedData + suffix }),
+      /data directory must not be a symbolic link/,
+    );
+  }
+
+  const target = join(paths.root, "blob-target");
+  mkdirSync(target, { mode: 0o700 });
+  chmodSync(target, 0o700);
+  const linkedBlobs = join(paths.root, "linked-blobs");
+  symlinkSync(target, linkedBlobs, "dir");
+  for (const suffix of ["/", "/.", "/./"]) {
+    assert.throws(
+      () => check({ ...paths, blobDir: linkedBlobs + suffix }),
+      /blob directory must not be a symbolic link/,
+    );
+  }
+});
+
+test("the filesystem verifier rejects symlinked database and sidecar files", (t) => {
+  const paths = setup(t);
+  const realDatabase = join(paths.root, "real.sqlite");
+  writeFileSync(realDatabase, "database", { mode: 0o600 });
+  chmodSync(realDatabase, 0o600);
+  unlinkSync(paths.databasePath);
+  symlinkSync(realDatabase, paths.databasePath);
+
+  assert.throws(() => check(paths), /database file must not be a symbolic link/);
+
+  unlinkSync(paths.databasePath);
+  writeFileSync(paths.databasePath, "database", { mode: 0o600 });
+  chmodSync(paths.databasePath, 0o600);
+  const realWal = join(paths.root, "real.sqlite-wal");
+  writeFileSync(realWal, "wal", { mode: 0o600 });
+  chmodSync(realWal, 0o600);
+  symlinkSync(realWal, `${paths.databasePath}-wal`);
+  assert.throws(() => check(paths), /database-wal file must not be a symbolic link/);
+});
+
+test("a rejected production start leaves database symlink targets untouched", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "corkboard-fs-db-link-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  chmodSync(dataDir, 0o700);
+  const target = join(root, "target.sqlite");
+  writeFileSync(target, "untouched", { mode: 0o600 });
+  chmodSync(target, 0o600);
+  symlinkSync(target, join(dataDir, "corkboard.sqlite"));
+
+  await assert.rejects(
+    startServer({
+      env: {
+        NODE_ENV: "production",
+        CORKBOARD_DATA_DIR: dataDir,
+        CORKBOARD_ROOT_KEY: key(),
+        CORKBOARD_CREDENTIAL_PEPPER: key(),
+        PORT: "0",
+      },
+    }),
+    /database file must not be a symbolic link/,
+  );
+  assert.equal(statSync(target).size, "untouched".length);
+  assert.equal(statSync(target).mode & 0o777, 0o600);
+  assert.deepEqual(
+    readdirSync(dataDir).filter((name) => name.startsWith("corkboard.sqlite")),
+    ["corkboard.sqlite"],
+  );
+});
+
+test("a rejected production start leaves blob symlink targets untouched", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "corkboard-fs-blob-link-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  chmodSync(dataDir, 0o700);
+  const target = join(root, "blob-target");
+  mkdirSync(target, { mode: 0o700 });
+  chmodSync(target, 0o700);
+  symlinkSync(target, join(dataDir, "blobs"));
+
+  await assert.rejects(
+    startServer({
+      env: {
+        NODE_ENV: "production",
+        CORKBOARD_DATA_DIR: dataDir,
+        CORKBOARD_ROOT_KEY: key(),
+        CORKBOARD_CREDENTIAL_PEPPER: key(),
+        PORT: "0",
+      },
+    }),
+    /blob directory must not be a symbolic link/,
+  );
+  assert.deepEqual(readdirSync(target), []);
+  assert.equal(readdirSync(dataDir).includes("corkboard.sqlite"), false);
 });

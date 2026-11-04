@@ -2,7 +2,7 @@
 // depends on instead of assuming the best-effort hardening succeeded.
 
 import { lstatSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export interface PrivateFilesystemPaths {
   dataDir: string;
@@ -22,11 +22,62 @@ export function requiresPrivateFilesystem(
   return env.NODE_ENV === "production" || env.CORKBOARD_REQUIRE_PRIVATE_FS === "1";
 }
 
-function assertNotSymlink(path: string, label: string): void {
-  let stats;
+// Normalize away trailing separators, "." and ".." so a path such as
+// "<symlink>/" cannot reach lstat in a different form than the one used later.
+function normalize(path: string): string {
+  return resolve(path);
+}
+
+function lstatOrUndefined(path: string): ReturnType<typeof lstatSync> | undefined {
   try {
-    stats = lstatSync(path);
-  } catch {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+// Pre-open guard: runs before any mkdir/chmod/open so a rejected redirect leaves
+// the symlink target untouched. Missing paths are allowed (startup creates them).
+// Only production calls this; non-production keeps the previous behavior.
+export function assertNoPrivateFilesystemRedirects(paths: PrivateFilesystemPaths): void {
+  const dataDir = normalize(paths.dataDir);
+  const blobDir = normalize(paths.blobDir);
+  const databasePath = normalize(paths.databasePath);
+
+  for (const [path, label] of [
+    [dataDir, "data directory"],
+    [blobDir, "blob directory"],
+  ] as const) {
+    const stats = lstatOrUndefined(path);
+    if (stats === undefined) continue;
+    if (stats.isSymbolicLink()) {
+      throw new Error(`${label} must not be a symbolic link: ${path}`);
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(`${label} is not a directory: ${path}`);
+    }
+  }
+
+  for (const [path, label] of [
+    [databasePath, "database file"],
+    [`${databasePath}-wal`, "database-wal file"],
+    [`${databasePath}-shm`, "database-shm file"],
+  ] as const) {
+    const stats = lstatOrUndefined(path);
+    if (stats === undefined) continue;
+    if (stats.isSymbolicLink()) {
+      throw new Error(`${label} must not be a symbolic link: ${path}`);
+    }
+    if (!stats.isFile()) {
+      throw new Error(`${label} is not a regular file: ${path}`);
+    }
+  }
+}
+
+function assertDirectory(path: string, label: string): void {
+  const stats = lstatOrUndefined(path);
+  if (stats === undefined) {
     throw new Error(`${label} is missing or unreadable: ${path}`);
   }
   if (stats.isSymbolicLink()) {
@@ -34,6 +85,19 @@ function assertNotSymlink(path: string, label: string): void {
   }
   if (!stats.isDirectory()) {
     throw new Error(`${label} is not a directory: ${path}`);
+  }
+}
+
+function assertRegularFile(path: string, label: string): void {
+  const stats = lstatOrUndefined(path);
+  if (stats === undefined) {
+    throw new Error(`${label} is missing or unreadable: ${path}`);
+  }
+  if (stats.isSymbolicLink()) {
+    throw new Error(`${label} must not be a symbolic link: ${path}`);
+  }
+  if (!stats.isFile()) {
+    throw new Error(`${label} is not a regular file: ${path}`);
   }
 }
 
@@ -58,23 +122,27 @@ export function verifyPrivateFilesystem(check: PrivateFilesystemCheck): void {
   // blob adapters stays in effect; nothing new fails startup.
   if (!check.production) return;
 
-  assertNotSymlink(check.dataDir, "data directory");
-  assertNotSymlink(check.blobDir, "blob directory");
-  assertMode(check.dataDir, 0o700, "data directory");
-  assertMode(check.blobDir, 0o700, "blob directory");
-  assertMode(check.databasePath, 0o600, "database file");
+  assertNoPrivateFilesystemRedirects(check);
+  const dataDir = normalize(check.dataDir);
+  const blobDir = normalize(check.blobDir);
+  const databasePath = normalize(check.databasePath);
+
+  assertDirectory(dataDir, "data directory");
+  assertDirectory(blobDir, "blob directory");
+  assertMode(dataDir, 0o700, "data directory");
+  assertMode(blobDir, 0o700, "blob directory");
+
+  assertRegularFile(databasePath, "database file");
+  assertMode(databasePath, 0o600, "database file");
   for (const suffix of ["-wal", "-shm"]) {
-    const sidecar = `${check.databasePath}${suffix}`;
-    try {
-      lstatSync(sidecar);
-    } catch {
-      continue;
-    }
+    const sidecar = `${databasePath}${suffix}`;
+    if (lstatOrUndefined(sidecar) === undefined) continue;
+    assertRegularFile(sidecar, `database${suffix} file`);
     assertMode(sidecar, 0o600, `database${suffix} file`);
   }
 
-  for (const name of readdirSync(check.blobDir)) {
-    const entry = join(check.blobDir, name);
+  for (const name of readdirSync(blobDir)) {
+    const entry = join(blobDir, name);
     const stats = lstatSync(entry);
     if (stats.isSymbolicLink()) {
       throw new Error(`blob directory must not contain symbolic links: ${entry}`);

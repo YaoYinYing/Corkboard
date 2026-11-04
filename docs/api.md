@@ -62,9 +62,19 @@ response re-authorize immediately before that effect, against current storage:
   receipt INSERT; no receipt is written on denial.
 - `GET .../body` re-authorizes `message.read` after decryption and before returning the
   plaintext; no content, receipt, or integrity audit is produced on denial.
+- `POST .../expire` re-authorizes `project.edit` immediately before the conditional
+  `ready → expired` UPDATE and before the already-expired repair path (audit retry and
+  ciphertext deletion). A revocation in either window performs no transition and
+  deletes no ciphertext.
 
 Message list, message metadata, `/me`, and `GET /projects` write nothing and are
 authorized at request start only. No authorization cache exists.
+
+Final re-checks use the same `authorizeProject` decision order. Because the principal
+was already authenticated at request start, a credential revoked mid-request yields
+`FORBIDDEN`; a membership removed mid-request, or a grant whose membership is no longer
+active, yields `NOT_FOUND`. A credential that is already revoked before authentication
+yields `UNAUTHENTICATED`.
 
 This is not an atomic-revocation guarantee: a revocation that commits after the final
 re-check but before the atomic SQL statement (or before the response is written) is not
@@ -288,12 +298,16 @@ content was fetched, not proof of understanding or execution.
 ### `POST /api/v1/projects/:projectId/messages/:messageId/expire`
 
 Requires `project.edit`, membership, and a grant for the calling credential. Ordinary member capabilities do not include
-`project.edit`; the owner membership does. Authorization and state ordering:
+`project.edit`; the owner membership does. Authorization is re-evaluated immediately
+before the transition (and before the already-expired repair path), so a revocation
+while the request is in flight performs no transition and deletes no ciphertext.
+Authorization and state ordering:
 
 1. Not a member or membership removed → `NOT_FOUND`; member without `project.edit`
    (credential or membership) → `FORBIDDEN`.
 2. Unknown, never committed (pending/provisional), or `failed` → `NOT_FOUND`.
-3. Already `expired` → idempotent `200`.
+3. Already `expired` → re-authorize, then idempotent `200`. A revoked/removed caller
+   receives the normal auth error and performs no audit repair or ciphertext deletion.
 4. Otherwise atomically mark `ready → expired` in one conditional UPDATE, then
    best-effort record an audit event (`message.expire`, `success`, actor
    speaker/project, no content), delete the ciphertext, and mark the `body_objects`

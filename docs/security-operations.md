@@ -104,9 +104,19 @@ plaintext return re-evaluate immediately before that effect:
 - **Body fetch.** `message.read` is re-authorized after decryption and immediately
   before the plaintext response. A revoked caller receives no content and causes no
   integrity audit or receipt.
+- **Expiry.** `project.edit` is re-authorized immediately before the conditional
+  `ready → expired` UPDATE and before the already-expired repair path (audit retry and
+  ciphertext deletion). A revoked caller performs no transition and deletes no
+  ciphertext.
 
 Message list, metadata, `/me`, and project enumeration write nothing and are authorized
-at request start only. Expiry mutations are authorized at request start.
+at request start only. CLI cleanup commands act as the operator, not on behalf of a
+bearer principal.
+
+Final re-checks use `authorizeProject` semantics: a credential revoked mid-request
+yields `FORBIDDEN` (the principal authenticated at request start); a membership removed
+mid-request, or a grant whose membership is no longer active, yields `NOT_FOUND`. A
+credential already revoked before authentication yields `UNAUTHENTICATED`.
 
 This is a bounded window, not atomic revocation. A revocation that commits after the
 final re-check but before the atomic SQL statement (or before the plaintext response is
@@ -129,11 +139,16 @@ written) is not prevented; no stronger guarantee is claimed. See
   are readable only by the service user (`0700` directories, `0600` files).
 - **Production mode verifies these modes instead of assuming them.** Production is
   selected by `NODE_ENV=production` or by the explicit `CORKBOARD_REQUIRE_PRIVATE_FS=1`.
-  On startup the server checks, and refuses to listen when it cannot confirm:
+  Paths are normalized (`resolve`, so trailing separators, `.` and `..` cannot disguise
+  a symlink) before any check. Before creating, chmodding, or opening anything, startup
+  rejects a symlinked data directory, blob directory, database file, or `-wal`/`-shm`
+  sidecar, so a rejected redirect leaves its target untouched. After opening it checks,
+  and refuses to listen when it cannot confirm:
   - the data directory and blob directory exist, are directories, are not symbolic
     links, and have mode `0700`;
-  - the database file, its existing `-wal`/`-shm` sidecars, and every blob file have
-    mode `0600`;
+  - the database file and its existing `-wal`/`-shm` sidecars are regular files, not
+    symbolic links, with mode `0600`;
+  - every blob file has mode `0600`;
   - the blob directory contains no symbolic links or non-file entries.
 
   The error names the path and expected mode; it never includes key material, tokens,

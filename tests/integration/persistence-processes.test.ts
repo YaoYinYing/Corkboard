@@ -10,6 +10,8 @@ import { openSqliteDatabase } from "../../src/storage/db.ts";
 
 const PROCESSES = 4;
 const MESSAGES_PER_PROCESS = 3;
+const CHILD_TIMEOUT_MS = 10_000;
+const TEST_TIMEOUT_MS = 30_000;
 const PROJECT_ID = "proj_mp";
 const SPEAKER_ID = "spk_mp";
 const CREDENTIAL_ID = "cred_mp";
@@ -22,24 +24,39 @@ interface ChildResult {
 }
 
 function runChild(script: string, env: Record<string, string>): Promise<ChildResult> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      action();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => reject(new Error(`child did not exit within ${CHILD_TIMEOUT_MS}ms`)));
+    }, CHILD_TIMEOUT_MS);
+    child.once("error", (error) => finish(() => reject(error)));
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.on("exit", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.on("exit", (code) => finish(() => resolve({ code: code ?? 1, stdout, stderr })));
   });
 }
 
-test("independent processes share one SQLite file without duplicate or lost messages", async (t) => {
+test(
+  "independent processes share one SQLite file without duplicate or lost messages",
+  { timeout: TEST_TIMEOUT_MS },
+  async (t) => {
   const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
   const root = mkdtempSync(join(tmpdir(), "corkboard-multiprocess-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -210,4 +227,5 @@ db.close();
   } finally {
     verify.close();
   }
-});
+  },
+);
