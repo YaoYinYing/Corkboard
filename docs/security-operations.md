@@ -207,6 +207,56 @@ written) is not prevented; no stronger guarantee is claimed. See
   before returning any content; a mismatch creates no receipt. No cross-tenant
   deduplication.
 
+### Read-only diagnostics
+
+`doctor` is an operator diagnostic, not a repair tool. It opens the database with a
+read-only connection: it does not create the data directory, chmod files, switch journal
+mode, apply migrations, or modify rows. If the database file is absent it reports
+`database: null` plus `SCHEMA_INCOMPLETE` and does not initialize an installation. A
+clean WAL database with no sidecars is opened `immutable` so no `-wal`/`-shm` files are
+created; with both sidecars present it reads the live WAL without creating files.
+SQLite may rewrite the existing `-shm` coordination file during a live read, so database
+and blob content are unchanged but `-shm` bytes may differ; authoritative orphan/missing
+reconciliation should be run against a quiesced instance or retried. Sidecar detection is
+not a lock: a concurrent checkpoint can recreate `-wal`/`-shm` between the check and the
+open, so a first read may need a retry. A lone sidecar (crash-recovery state), a
+symlinked or otherwise non-regular sidecar, a symlinked data directory, a database path
+that is not a regular file (including a symlink), and a busy/locked database exit `2`
+with a stable message instead of a stack trace. A **missing** data directory or database
+is not exit 2: it reports `database: null` and `SCHEMA_INCOMPLETE` and exits `1`.
+
+Output contains no message summaries, bodies, tokens, credential verifiers, key material,
+or secret file contents. Key presence is reported only as booleans: whether
+`CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER` are set, whether each has the
+32-byte base64 shape, and the configured key version `v1`. The full values are never
+printed or logged.
+
+Blob reconciliation never follows symlinks. `blob_dir_non_files` counts non-file entries
+(directories, symlinks, special files) and invalid-named regular files are ignored.
+`orphaned` means a valid opaque blob-file name is not referenced by any non-null
+`body_objects.storage_key`; `missing` means a referenced key has no regular file on disk;
+`expired_pending_deletion` means an expired message's body object is not yet
+`state = 'deleted'` (including `NULL`). These are reported as counts only. Output is
+bounded (at most ten provisional IDs and ages), but reconciliation reads every referenced
+storage key internally and `integrity_check` scans the database, and the
+applied/unexpected version lists are proportional to `schema_migrations` rows. A tampered
+database with a very large migration table can enlarge the report; normal installations
+have one row per shipped migration. Values that cannot be measured because the schema or
+database is unavailable are `null`, not zero; no content is selected.
+
+A `schema_migrations` version newer than the highest bundled migration is reported as
+`SCHEMA_AHEAD` with `complete: false` and exit `1`. The normal opener used by the server
+and other CLI commands refuses such a database with a clear error **before applying any
+migration**, so an older binary cannot write against a newer schema. Non-positive or
+non-integer migration rows are treated defensively as unexpected/hostile rather than
+silently ignored.
+
+Exit codes: `0` clean, `1` issues found (the stable codes are listed in
+[`deployments.md`](./deployments.md)), `2` the inspection could not run. There is no
+destructive repair/fix mode in this slice; do not "fix" an orphan by deleting files
+without first confirming the database and backup state. `doctor` is SQLite/Node-specific
+(`PRAGMA integrity_check`); the D1/Workers deployment has no equivalent yet.
+
 ## Logging and audit
 
 - Log request ID, route, status, duration, and actor IDs. Log a stable error code only
