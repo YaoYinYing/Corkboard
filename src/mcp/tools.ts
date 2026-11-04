@@ -90,19 +90,29 @@ function messageValue(message: MessageMetadata): Record<string, unknown> {
 }
 
 // Derivation (documented in docs/mcp.md):
-//   material = "corkboard-mcp\n" + sessionId + "\n" + projectId + "\n" + String(requestId)
+//   material = "corkboard-mcp/v2\n" + JSON.stringify(
+//                [sessionId, projectId, typeof requestId, requestId])
 //   key      = "mcp_" + lowercase hex SHA-256(material)
+// JSON-RPC ids are strings or numbers and those are distinct ids, so the JSON
+// array (and the explicit typeof) preserves the type instead of collapsing both
+// to "1". The v2 domain prefix separates these keys from the pre-fix
+// String(requestId) form; sessions are process-local, so nothing is migrated.
 // The session id prevents unrelated sessions that reuse small JSON-RPC ids
-// (0, 1, 2, ...) from colliding. Reusing the same session + request id with the
-// same payload is an idempotent replay; a different payload under the same key
-// is CONFLICT in the service.
+// (0, 1, 2, ...) from colliding. Reusing the same session + typed request id
+// with the same payload is an idempotent replay; a different payload under the
+// same key is CONFLICT in the service.
 export async function deriveIdempotencyKey(
   sessionId: string | undefined,
   requestId: RequestId,
   projectId: string,
 ): Promise<string> {
   if (sessionId === undefined) throw new AppError("UNAVAILABLE");
-  const material = `corkboard-mcp\n${sessionId}\n${projectId}\n${String(requestId)}`;
+  const material = `corkboard-mcp/v2\n${JSON.stringify([
+    sessionId,
+    projectId,
+    typeof requestId,
+    requestId,
+  ])}`;
   return `mcp_${await sha256Hex(ENCODER.encode(material))}`;
 }
 

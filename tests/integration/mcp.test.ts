@@ -139,7 +139,7 @@ async function rawTool(
   app: App,
   token: string,
   sessionId: string,
-  id: number,
+  id: string | number,
   name: string,
   args: JsonObject,
 ): Promise<JsonObject> {
@@ -466,6 +466,66 @@ test("same session and JSON-RPC id is idempotent and a changed payload conflicts
   assert.deepEqual(JSON.parse(conflictResult["content"][0].text), {
     error: { code: "CONFLICT" },
   });
+});
+
+test("numeric and string JSON-RPC ids derive distinct send idempotency keys", async (t) => {
+  const { fx, app } = await withApp(t);
+  const actor = await addActor(fx, "idtype");
+  await fx.addProject("proj_idtype", actor.accountId);
+  await fx.addMembership("proj_idtype", actor.speakerId, ALL_SCOPES);
+  await fx.grantProject("cred_idtype", "proj_idtype");
+
+  // One raw session, so only the JSON-RPC id type can distinguish these sends.
+  const sessionId = await rawSession(app, actor.token);
+  const base = {
+    project_id: "proj_idtype",
+    summary: "Typed id",
+    type: "request",
+    language: "en",
+  };
+
+  const numeric = await rawTool(app, actor.token, sessionId, 1, "corkboard_send_message", {
+    ...base,
+    text: "numeric id body",
+  });
+  const string = await rawTool(app, actor.token, sessionId, "1", "corkboard_send_message", {
+    ...base,
+    text: "string id body",
+  });
+
+  const numericValue = JSON.parse(numeric["result"]["content"][0].text) as JsonObject;
+  const stringValue = JSON.parse(string["result"]["content"][0].text) as JsonObject;
+  assert.equal(numericValue["isError"], undefined);
+  assert.equal(stringValue["isError"], undefined);
+  assert.notEqual(numericValue["message_id"], stringValue["message_id"]);
+  assert.notEqual(numericValue["seq"], stringValue["seq"]);
+
+  // The same typed id and payload replays the original message.
+  const replay = await rawTool(app, actor.token, sessionId, 1, "corkboard_send_message", {
+    ...base,
+    text: "numeric id body",
+  });
+  const replayValue = JSON.parse(replay["result"]["content"][0].text) as JsonObject;
+  assert.equal(replayValue["message_id"], numericValue["message_id"]);
+  assert.equal(replayValue["seq"], numericValue["seq"]);
+
+  // The same typed id with a changed payload is still a conflict.
+  const conflict = await rawTool(app, actor.token, sessionId, 1, "corkboard_send_message", {
+    ...base,
+    text: "changed numeric id body",
+  });
+  const conflictResult = conflict["result"] as JsonObject;
+  assert.equal(conflictResult["isError"], true);
+  assert.deepEqual(JSON.parse(conflictResult["content"][0].text), {
+    error: { code: "CONFLICT" },
+  });
+
+  // Exactly two committed messages, one per distinct typed id.
+  const listed = await rawTool(app, actor.token, sessionId, 2, "corkboard_list_messages", {
+    project_id: "proj_idtype",
+  });
+  const listedValue = JSON.parse(listed["result"]["content"][0].text) as JsonObject;
+  assert.equal(listedValue["messages"].length, 2);
 });
 
 test("session headers, GET/DELETE, and the 64 KiB cap behave as documented", async (t) => {
