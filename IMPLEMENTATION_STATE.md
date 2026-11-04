@@ -687,7 +687,8 @@ pushed.
   rather than duplicating it. Eligibility: sessions revoked/absolutely expired/idle
   past grace; authorization codes consumed or expired past grace; refresh tokens
   expired/revoked/rotated past grace; `oauth_token_clients` rows whose credential is
-  gone or revoked/expired past grace (never a still-valid credential); OAuth access
+  gone, or revoked/expired past grace with no remaining refresh row (never a
+  still-valid credential or one with a live refresh row); OAuth access
   credentials with an association, revoked/expired past grace, and no remaining
   refresh row. Associated `credential_project_grants` are removed with the credential.
 - **Transaction and concurrency.** All deletes run in one `BEGIN IMMEDIATE` transaction
@@ -709,24 +710,32 @@ pushed.
   `docs/architecture.md` (retention section and delete order), `docs/oauth.md` (row
   lifecycle), and the completed TODO sub-item. No HTTP surface was added, so
   `docs/api.md` is unchanged.
-- **Tests.** New `tests/integration/retention.test.ts` (9 service tests with an injected
-  clock) and `tests/integration/retention-cli.test.ts` (5 real-process CLI tests).
-  Coverage includes active/just-inside/just-over grace boundaries per class, idle
-  expiry, consumed/expired codes, rotated/revoked/expired refresh rows, orphan and
+- **Audit fixes (P1/P2).** Association cleanup is orphan-only: a revoked/expired
+  credential with a live refresh row keeps its `oauth_token_clients` association and
+  grants, so refresh and RFC 7009 access-token revocation still work. Once the refresh
+  row is pruned past grace, the credential, association, and grants are deleted
+  together. `validateRetentionOptions` bounds grace to the representable JavaScript
+  `Date` range, so an overflowing `--grace-hours` is rejected before the database is
+  opened (exit 2). Regression tests cover the full refresh → revoke → prune sequence
+  and grace-0 exact boundaries (exactly at cutoff deleted, 1 ms younger retained).
+- **Tests.** New `tests/integration/retention.test.ts` (11 service tests with an
+  injected clock) and `tests/integration/retention-cli.test.ts` (5 real-process CLI
+  tests). Coverage includes active/just-inside/just-over grace boundaries per class,
+  idle expiry, consumed/expired codes, rotated/revoked/expired refresh rows, orphan and
   live associations, the refresh-row blocker, `cb_` credential protection, per-table
   limits and no-op rerun, injected rollback, untouched message/receipt/blob/audit
   tables, input validation before writes, real temp-directory `--json` counts, exit
-  codes, pre-open bounds rejection, and output secrecy.
-- **Tests run.** `npm ci`, `npm run check` (318 tests: 317 pass, 1 pre-existing skip
+  codes, pre-open bounds and overflow rejection, and output secrecy.
+- **Tests run.** `npm ci`, `npm run check` (320 tests: 319 pass, 1 pre-existing skip
   for the live D1 marker), and `npm run build`. Exact counts are recorded in the
   checkpoint commit trailer.
 - **Limitations.** The command is Node/SQLite-only (it uses the local
   `BEGIN IMMEDIATE` runner; a D1 adapter would need a batch equivalent). A credential
-  blocked from deletion by a still-live refresh row has its `oauth_token_clients`
-  association removed once revoked/expired past grace, so that inert credential is not
-  re-classified by a later run. There is no automatic scheduling and no audit row is
-  written for prune. No blob/message/audit deletion is added. Independent review is
-  pending.
+  blocked from deletion by a still-live refresh row keeps its `oauth_token_clients`
+  association and grants, so refresh and RFC 7009 revocation remain effective; the
+  credential, association, and grants are deleted together once the refresh row ages
+  out past grace. There is no automatic scheduling and no audit row is written for
+  prune. No blob/message/audit deletion is added. Independent review is pending.
 
 ## Implemented and verified at this tree
 

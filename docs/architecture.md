@@ -177,8 +177,11 @@ unusable at the run time **and** became unusable at or before `now - grace`:
 - `oauth_authorization_codes`: consumed or expired at or before the cutoff.
 - `oauth_refresh_tokens`: expired, revoked, or rotated at or before the cutoff.
 - `oauth_token_clients`: the credential row is gone, or the credential is
-  revoked/expired at or before the cutoff. A still-valid credential's association is
-  never deleted.
+  revoked/expired at or before the cutoff **and** no `oauth_refresh_tokens` row still
+  references it. The association is the durable ownership proof used by RFC 7009
+  revocation and the marker that lets a later run delete the credential, so it is never
+  removed while the credential exists with a refresh row. A still-valid credential's
+  association is never deleted.
 - OAuth access `credentials`: the row has an `oauth_token_clients` association,
   is revoked/expired at or before the cutoff, and no `oauth_refresh_tokens` row still
   references it. Speaker credentials have no such association and are never eligible.

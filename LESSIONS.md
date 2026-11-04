@@ -17,9 +17,13 @@ prevented regression; when to remove the advice.
   credential ids while the association still exists, delete grants and associations,
   then delete each credential with a conditional predicate. Everything else deletes
   with its own `WHERE ... <= cutoff` predicate, so a rerun is a no-op and a concurrent
-  run cannot widen the set. Import `SESSION_IDLE_MS` from `sessions.ts` instead of
-  copying the idle window.
-- **Prevents:** Deleting a speaker credential, racing a live token, or leaving a
+  run cannot widen the set. Never delete an association while any
+  `oauth_refresh_tokens` row still references the credential: the association is what
+  keeps RFC 7009 access-token revocation working and what lets refresh rotate the row;
+  orphan-only cleanup runs separately. Import `SESSION_IDLE_MS` from `sessions.ts`
+  instead of copying the idle window.
+- **Prevents:** Deleting a speaker credential, breaking revocation or refresh for a
+  live token, making a credential permanently unprunable, or leaving a
   non-deterministic set of rows between runs.
 - **Remove when:** The schema gains an immutable credential kind/issuer column with its
   own index.

@@ -10,6 +10,9 @@ export const RETENTION_DEFAULT_LIMIT = 1000;
 export const RETENTION_MAX_LIMIT = 10_000;
 
 const HOUR_MS = 60 * 60 * 1000;
+// Largest magnitude a JS Date can represent. A larger grace cannot produce a
+// cutoff ISO string, so reject it before the CLI opens the database.
+const MAX_DATE_MS = 8_640_000_000_000_000;
 
 export interface RetentionDeps {
   db: SqlDatabase;
@@ -37,13 +40,17 @@ export function validateRetentionOptions(
   options: RetentionOptions = {},
 ): { graceHours: number; limit: number } {
   const graceHours = options.graceHours ?? RETENTION_DEFAULT_GRACE_HOURS;
+  const graceMs = graceHours * HOUR_MS;
   if (
     typeof graceHours !== "number" ||
     !Number.isFinite(graceHours) ||
     graceHours < 0 ||
-    !Number.isFinite(graceHours * HOUR_MS)
+    !Number.isFinite(graceMs) ||
+    graceMs > MAX_DATE_MS
   ) {
-    throw new RangeError("graceHours must be a finite non-negative number of hours");
+    throw new RangeError(
+      "graceHours must be a finite non-negative number of hours within the representable date range",
+    );
   }
   const limit = options.limit ?? RETENTION_DEFAULT_LIMIT;
   if (!Number.isInteger(limit) || limit < 1 || limit > RETENTION_MAX_LIMIT) {
@@ -66,13 +73,14 @@ export async function pruneRetention(
     throw new RangeError("now must be a valid date");
   }
   const graceMs = graceHours * HOUR_MS;
-  if (!Number.isFinite(graceMs) || !Number.isFinite(nowMs - graceMs - SESSION_IDLE_MS)) {
+  const idleCutoffMs = nowMs - graceMs - SESSION_IDLE_MS;
+  if (!Number.isFinite(idleCutoffMs) || Math.abs(idleCutoffMs) > MAX_DATE_MS) {
     throw new RangeError("graceHours is too large");
   }
   const cutoff = new Date(nowMs - graceMs).toISOString();
   // A session is idle-expired when last_seen_at + SESSION_IDLE_MS <= now; it is
   // past the grace period when that instant is <= now - grace.
-  const idleCutoff = new Date(nowMs - graceMs - SESSION_IDLE_MS).toISOString();
+  const idleCutoff = new Date(idleCutoffMs).toISOString();
 
   const summary: RetentionSummary = {
     graceHours,
@@ -160,10 +168,15 @@ export async function pruneRetention(
       ).changes;
     }
 
-    // Associations whose credential row is gone, and associations for
-    // revoked/expired credentials. A still-valid credential's association is
-    // never touched. The remaining-limit bound keeps this table within `limit`
-    // overall.
+    // True orphan associations only. An association for a credential row that
+    // still exists is the durable ownership proof used by RFC 7009 revocation
+    // and the marker that lets a later run delete that credential. Removing it
+    // while a live refresh row exists would let refresh rewrite the credential
+    // in place, make access-token revocation a silent no-op, and leave the
+    // credential permanently unprunable. Associations for revoked/expired
+    // credentials without a refresh row were already removed with the
+    // credential above. The remaining-limit bound keeps this table within
+    // `limit` overall.
     const remaining = limit - summary.tokenClients;
     if (remaining > 0) {
       summary.tokenClients += (
@@ -172,14 +185,13 @@ export async function pruneRetention(
             WHERE credential_id IN (
               SELECT t.credential_id
                 FROM oauth_token_clients t
-                LEFT JOIN credentials c ON c.id = t.credential_id
-               WHERE c.id IS NULL
-                  OR (c.revoked_at IS NOT NULL AND c.revoked_at <= ?)
-                  OR (c.expires_at IS NOT NULL AND c.expires_at <= ?)
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM credentials c WHERE c.id = t.credential_id
+               )
                ORDER BY t.credential_id
                LIMIT ?
             )`,
-          [cutoff, cutoff, remaining],
+          [remaining],
         )
       ).changes;
     }

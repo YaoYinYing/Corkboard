@@ -190,6 +190,15 @@ test("prune accepts CORKBOARD_DATA_DIR and --limit/--grace-hours", async (t) => 
   const summary = JSON.parse(result.stdout.trim()) as Record<string, number>;
   assert.equal(summary.graceHours, 1);
   assert.equal(summary.limit, 2);
+
+  const zeroGrace = run(["prune", "--json", "--grace-hours", "0"], {
+    CORKBOARD_DATA_DIR: dataDir,
+  });
+  assert.equal(zeroGrace.status, 0, zeroGrace.stderr);
+  assert.equal(
+    (JSON.parse(zeroGrace.stdout.trim()) as Record<string, number>).graceHours,
+    0,
+  );
 });
 
 test("prune without --json prints only short counts and leaks nothing", async (t) => {
@@ -215,6 +224,7 @@ test("prune rejects usage and config errors with exit 2 before opening the datab
     ["prune", "--data-dir", fresh, "--grace-hours", "-1"],
     ["prune", "--data-dir", fresh, "--grace-hours", "NaN"],
     ["prune", "--data-dir", fresh, "--grace-hours", "Infinity"],
+    ["prune", "--data-dir", fresh, "--grace-hours", "9999999999"],
     ["prune", "--data-dir", fresh, "--limit", "0"],
     ["prune", "--data-dir", fresh, "--limit", "10001"],
     ["prune", "--data-dir", fresh, "--limit", "1.5"],

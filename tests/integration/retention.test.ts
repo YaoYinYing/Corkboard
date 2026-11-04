@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { hashSecret, randomBase64url } from "../../src/auth/credentials.ts";
+import { AppError } from "../../src/domain/errors.ts";
+import { authenticateBearer } from "../../src/service/auth.ts";
+import { revokeOAuthToken, rotateRefreshToken } from "../../src/service/oauth.ts";
 import {
   pruneRetention,
   type RetentionDeps,
@@ -17,8 +21,8 @@ function at(base: Date, deltaMs: number): string {
   return new Date(base.getTime() + deltaMs).toISOString();
 }
 
-function retentionDeps(fx: ServiceFixture): RetentionDeps {
-  fx.setNow(NOW);
+function retentionDeps(fx: ServiceFixture, now: Date = NOW): RetentionDeps {
+  fx.setNow(now);
   return { db: fx.db, now: fx.deps.now };
 }
 
@@ -442,6 +446,218 @@ test("oauth credentials need no refresh row; cb_ speaker credentials are never e
     0,
     "grants of a deleted OAuth credential are removed",
   );
+  assert.deepEqual(
+    (
+      await fx.db.all<{ credential_id: string }>(
+        "SELECT credential_id FROM oauth_token_clients ORDER BY credential_id",
+      )
+    ).map((row) => row.credential_id),
+    ["cred_oat_with_refresh"],
+    "the association of a credential blocked by a live refresh row is retained",
+  );
+});
+
+test("a credential blocked by a live refresh row keeps its association, stays refreshable and revocable, then is pruned", async (t) => {
+  const fx = await withFixture(t);
+  const base = await seedBase(fx);
+  await fx.db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    [
+      base.projectId,
+      base.speakerId,
+      JSON.stringify(["message.read", "message.send"]),
+      at(NOW, -DAY_MS),
+    ],
+  );
+  await addCredential(fx, {
+    id: "cred_oat_exp",
+    speakerId: base.speakerId,
+    revokedAt: null,
+    expiresAt: at(NOW, -2 * DAY_MS),
+  });
+  await fx.db.run(
+    "INSERT INTO credential_project_grants (credential_id, project_id, granted_at) VALUES (?, ?, ?)",
+    ["cred_oat_exp", base.projectId, at(NOW, -2 * DAY_MS)],
+  );
+  await addTokenClient(fx, "cred_oat_exp", base.clientId);
+
+  const refreshToken = `cb_ort_${randomBase64url(32)}`;
+  await fx.db.run(
+    `INSERT INTO oauth_refresh_tokens
+       (id, family_id, client_id, credential_id, token_prefix, token_verifier,
+        created_at, expires_at, revoked_at, rotated_at)
+     VALUES ('rt_live_blocker', 'fam_blocker', ?, 'cred_oat_exp', ?, ?, ?, ?, NULL, NULL)`,
+    [
+      base.clientId,
+      refreshToken.slice(0, 12),
+      await hashSecret(refreshToken, fx.deps.pepper),
+      at(NOW, -2 * DAY_MS),
+      at(NOW, 30 * DAY_MS),
+    ],
+  );
+
+  // The expired credential is blocked from deletion by the live refresh row and
+  // must keep its ownership association.
+  const first = await pruneRetention(retentionDeps(fx));
+  assert.equal(first.oauthCredentials, 0);
+  assert.equal(first.tokenClients, 0);
+  assert.equal(await count(fx, "oauth_token_clients"), 1);
+  assert.equal(await count(fx, "credentials"), 1);
+  assert.equal(await count(fx, "credential_project_grants"), 1);
+
+  // Refresh still works and yields a usable access token.
+  const rotated = await rotateRefreshToken(fx.deps, {
+    clientId: base.clientId,
+    refreshToken,
+  });
+  const principal = await authenticateBearer(fx.deps, `Bearer ${rotated.access_token}`);
+  assert.equal(principal.speakerId, base.speakerId);
+
+  // RFC 7009 revocation with that access token is effective because the
+  // association survived.
+  await revokeOAuthToken(fx.deps, {
+    clientId: base.clientId,
+    token: rotated.access_token,
+  });
+  await assert.rejects(
+    authenticateBearer(fx.deps, `Bearer ${rotated.access_token}`),
+    (error: unknown) => error instanceof AppError && error.code === "UNAUTHENTICATED",
+  );
+
+  // Once refresh rows age out past grace, the credential, association, and
+  // grant are deleted together.
+  const later = new Date(NOW.getTime() + 25 * HOUR_MS);
+  const laterSummary = await pruneRetention(retentionDeps(fx, later));
+  assert.equal(laterSummary.refreshTokens, 2);
+  assert.equal(laterSummary.tokenClients, 1);
+  assert.equal(laterSummary.oauthCredentials, 1);
+  assert.equal(await count(fx, "oauth_refresh_tokens"), 0);
+  assert.equal(await count(fx, "oauth_token_clients"), 0);
+  assert.equal(await count(fx, "credentials"), 0);
+  assert.equal(await count(fx, "credential_project_grants"), 0);
+});
+
+test("grace-hours 0 deletes exactly at the cutoff and retains 1 ms younger", async (t) => {
+  const fx = await withFixture(t);
+  const base = await seedBase(fx);
+
+  await addSession(fx, {
+    id: "sess_revoked_exact",
+    accountId: base.accountId,
+    revokedAt: at(NOW, 0),
+    expiresAt: at(NOW, 12 * HOUR_MS),
+    lastSeenAt: at(NOW, 0),
+  });
+  await addSession(fx, {
+    id: "sess_revoked_younger",
+    accountId: base.accountId,
+    revokedAt: at(NOW, 1),
+    expiresAt: at(NOW, 12 * HOUR_MS),
+    lastSeenAt: at(NOW, 0),
+  });
+  await addSession(fx, {
+    id: "sess_expired_exact",
+    accountId: base.accountId,
+    revokedAt: null,
+    expiresAt: at(NOW, 0),
+    lastSeenAt: at(NOW, 0),
+  });
+  await addSession(fx, {
+    id: "sess_expired_younger",
+    accountId: base.accountId,
+    revokedAt: null,
+    expiresAt: at(NOW, 1),
+    lastSeenAt: at(NOW, 0),
+  });
+  await addSession(fx, {
+    id: "sess_idle_exact",
+    accountId: base.accountId,
+    revokedAt: null,
+    expiresAt: at(NOW, 12 * HOUR_MS),
+    lastSeenAt: at(NOW, -SESSION_IDLE_MS),
+  });
+  await addSession(fx, {
+    id: "sess_idle_younger",
+    accountId: base.accountId,
+    revokedAt: null,
+    expiresAt: at(NOW, 12 * HOUR_MS),
+    lastSeenAt: at(NOW, -SESSION_IDLE_MS + 1),
+  });
+
+  await addCode(fx, base, {
+    id: "code_consumed_exact",
+    expiresAt: at(NOW, HOUR_MS),
+    consumedAt: at(NOW, 0),
+  });
+  await addCode(fx, base, {
+    id: "code_consumed_younger",
+    expiresAt: at(NOW, HOUR_MS),
+    consumedAt: at(NOW, 1),
+  });
+  await addCode(fx, base, {
+    id: "code_expired_exact",
+    expiresAt: at(NOW, 0),
+    consumedAt: null,
+  });
+  await addCode(fx, base, {
+    id: "code_expired_younger",
+    expiresAt: at(NOW, 1),
+    consumedAt: null,
+  });
+
+  await addCredential(fx, {
+    id: "cred_oat_live",
+    speakerId: base.speakerId,
+    revokedAt: null,
+    expiresAt: at(NOW, HOUR_MS),
+  });
+  await addTokenClient(fx, "cred_oat_live", base.clientId);
+  for (const [id, expiresAt, revokedAt, rotatedAt] of [
+    ["rt_expired_exact", at(NOW, 0), null, null],
+    ["rt_expired_younger", at(NOW, 1), null, null],
+    ["rt_revoked_exact", at(NOW, 30 * DAY_MS), at(NOW, 0), null],
+    ["rt_revoked_younger", at(NOW, 30 * DAY_MS), at(NOW, 1), null],
+    ["rt_rotated_exact", at(NOW, 30 * DAY_MS), null, at(NOW, 0)],
+    ["rt_rotated_younger", at(NOW, 30 * DAY_MS), null, at(NOW, 1)],
+  ] as const) {
+    await addRefresh(fx, base, {
+      id,
+      credentialId: "cred_oat_live",
+      expiresAt,
+      revokedAt,
+      rotatedAt,
+    });
+  }
+
+  for (const [id, revokedAt, expiresAt] of [
+    ["cred_revoked_exact", at(NOW, 0), at(NOW, HOUR_MS)],
+    ["cred_revoked_younger", at(NOW, 1), at(NOW, HOUR_MS)],
+    ["cred_expired_exact", null, at(NOW, 0)],
+    ["cred_expired_younger", null, at(NOW, 1)],
+  ] as const) {
+    await addCredential(fx, { id, speakerId: base.speakerId, revokedAt, expiresAt });
+    await addTokenClient(fx, id, base.clientId);
+    await fx.db.run(
+      "INSERT INTO credential_project_grants (credential_id, project_id, granted_at) VALUES (?, ?, ?)",
+      [id, base.projectId, at(NOW, -DAY_MS)],
+    );
+  }
+
+  const summary = await pruneRetention(retentionDeps(fx), { graceHours: 0 });
+
+  assert.equal(summary.sessions, 3);
+  assert.equal(summary.authorizationCodes, 2);
+  assert.equal(summary.refreshTokens, 3);
+  assert.equal(summary.tokenClients, 2);
+  assert.equal(summary.oauthCredentials, 2);
+
+  assert.equal(await count(fx, "sessions"), 4);
+  assert.equal(await count(fx, "oauth_authorization_codes"), 2);
+  assert.equal(await count(fx, "oauth_refresh_tokens"), 3);
+  assert.equal(await count(fx, "credentials"), 3);
+  assert.equal(await count(fx, "oauth_token_clients"), 3);
+  assert.equal(await count(fx, "credential_project_grants"), 2);
 });
 
 test("limit is a per-table batch and a second run is a no-op", async (t) => {

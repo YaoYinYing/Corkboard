@@ -372,8 +372,9 @@ that are definitely unusable:
 - authorization codes once consumed or expired past grace (5-minute TTL);
 - refresh tokens once expired, revoked, or rotated past grace (30-day TTL, rotation on
   every use, family revocation on reuse);
-- `oauth_token_clients` associations whose credential row is gone or whose credential
-  is revoked/expired past grace — never one for a still-valid credential;
+- `oauth_token_clients` associations whose credential row is gone, or whose credential
+  is revoked/expired past grace **and** no refresh row still references it (the same
+  blocker as credential deletion) — never one for a still-valid credential;
 - an OAuth access credential once revoked/expired past grace **and** no refresh row
   still references it. Its `credential_project_grants` row is removed with it. A
   regular `cb_` speaker credential never has an `oauth_token_clients` association and
@@ -383,8 +384,10 @@ The grace period keeps a just-expired row available to a request already in flig
 and tolerates clock skew. `prune` is transactional and bounded by `--limit` per table,
 so it is safe to repeat and a failure deletes nothing. It never touches messages,
 receipts, blobs, or audit events. If a credential is blocked from deletion by a live
-refresh row, its association is still removed once it is revoked/expired past grace,
-so that inert credential is not reclassified by a later run; see
+refresh row, it keeps its `oauth_token_clients` association and grants so refresh and
+RFC 7009 access-token revocation remain effective. Once the refresh row ages out past
+grace, the credential, association, and grants are deleted together; the association
+is never removed while a refresh row references the credential. See
 [`security-operations.md`](./security-operations.md).
 
 ## Limits and explicit non-goals

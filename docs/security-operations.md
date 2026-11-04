@@ -400,9 +400,12 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   does not write audit rows (nothing is selected from the audit table). Deletes run in
   one `BEGIN IMMEDIATE` transaction in FK-safe order, bounded by `--limit` (default
   1000, 1–10000) per table, so a failure rolls everything back and the command can be
-  run repeatedly. A credential blocked by a still-live refresh row is retained; its
-  `oauth_token_clients` association is removed once it is revoked/expired past grace,
-  so the inert credential is not re-classified by a later run (see Known limits).
+  run repeatedly. A credential blocked by a still-live refresh row is retained
+  **together with its `oauth_token_clients` association and grants**, so refresh and
+  RFC 7009 access-token revocation keep working. Once that refresh row itself ages out
+  past grace, the credential, association, and grants are deleted together in the same
+  run. The association is never removed while a refresh row still references the
+  credential.
 
 ## Environment separation
 
@@ -493,8 +496,9 @@ deployment that uses production-derived keys is not an acceptable rehearsal.
 - Retention (`prune`) is explicit, operator-run, and Node/SQLite-only; it writes no
   audit row and never deletes blobs, messages, receipts, or audit events. A
   revoked/expired OAuth access credential that still has a live refresh row is retained
-  but loses its `oauth_token_clients` association, so a later run cannot reclassify it;
-  the row stays inert. There is no automatic scheduling.
+  with its `oauth_token_clients` association and grants (so refresh and RFC 7009
+  revocation remain effective), and is deleted with them once the refresh row is
+  pruned past grace. There is no automatic scheduling.
 - Hard deletion of metadata/backups is not implemented; expiry is a tombstone, not
   comprehensive erasure.
 - Rate limiting is per-process and per-credential; there is no distributed/global
