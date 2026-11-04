@@ -239,12 +239,19 @@ function envelopeCipherLength(envelope: Uint8Array): number {
 
 // Publishes a pending message and returns the committed row. A concurrent
 // finalize of the same message is treated as success and reloaded.
+//
+// Authorization is re-evaluated immediately before the finalization UPDATE so a
+// revocation that landed while the body was being written prevents publication.
+// A revocation after this check but before the UPDATE itself is not prevented;
+// see docs/architecture.md.
 async function publish(
   deps: ServiceDeps,
+  principal: Principal,
   projectId: string,
   messageId: string,
   bodyObjectId: string,
 ): Promise<MessageRow> {
+  await authorizeProject(deps, principal, projectId, "message.send");
   try {
     await finalizeMessage(deps.db, {
       projectId,
@@ -335,7 +342,7 @@ async function commitBody(
     [objectId, messageId, projectId],
   );
 
-  return publish(deps, projectId, messageId, objectId);
+  return publish(deps, principal, projectId, messageId, objectId);
 }
 
 export async function sendMessage(
@@ -534,7 +541,7 @@ async function replayOrResume(
       }
       throw error;
     }
-    const row = await publish(deps, projectId, messageId, existing.body_object_id);
+    const row = await publish(deps, principal, projectId, messageId, existing.body_object_id);
     return { status: "done", result: sendResult(row, bodyDigest) };
   }
 
@@ -798,6 +805,9 @@ export async function getMessageBody(
     message.body_object_id,
     "message.body.read",
   );
+  // Re-authorize after decryption and immediately before the plaintext return.
+  // A revoked/removed caller gets no content and no integrity audit.
+  await authorizeProject(deps, principal, projectId, "message.read");
   return {
     messageId,
     text: DECODER.decode(opened.plaintext),
@@ -840,6 +850,11 @@ export async function markRead(
     message.body_object_id,
     "message.receipt.write",
   );
+
+  // Re-authorize both scopes immediately before the receipt INSERT. A revoked
+  // or removed caller creates no receipt.
+  const finalAccess = await authorizeProject(deps, principal, projectId, "message.read");
+  requireScope(finalAccess.rights, "receipt.write");
 
   const inserted = await deps.db.run(
     `INSERT OR IGNORE INTO message_receipts (message_id, speaker_id, read_at)

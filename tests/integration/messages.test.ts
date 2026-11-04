@@ -492,7 +492,7 @@ test("20 sequential sends replay in cursor order", async (t) => {
   }
 });
 
-test("concurrent sends yield unique contiguous sequences", async (t) => {
+test("same-process concurrent sends yield unique contiguous sequences", async (t) => {
   const fx = await withFixture(t);
   const alice = await addActor(fx, "alice");
   await addProject(fx, "proj_1", alice, [alice]);
@@ -804,6 +804,124 @@ test("removing one membership leaves unrelated active memberships working", asyn
   const list = await listMessages(fx.deps, alice.principal, "proj_2");
   assert.equal(list.messages[0]?.messageId, sent.messageId);
   await expectCode(listMessages(fx.deps, alice.principal, "proj_1"), "NOT_FOUND");
+});
+
+test("a send that loses its grant before finalization does not commit and can resume", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+
+  // Interleaving: the grant disappears after the body blob is written but
+  // before the finalization UPDATE, i.e. between the request-start check and
+  // the durable commit.
+  const base = fx.blobs;
+  let revoked = false;
+  fx.deps.blobs = {
+    async put(key: string, bytes: Uint8Array): Promise<void> {
+      await base.put(key, bytes);
+      if (!revoked) {
+        revoked = true;
+        await fx.db.run(
+          "DELETE FROM credential_project_grants WHERE credential_id = ? AND project_id = ?",
+          [alice.principal.credentialId, "proj_1"],
+        );
+      }
+    },
+    get: (key: string) => base.get(key),
+    delete: (key: string) => base.delete(key),
+  };
+
+  await expectCode(
+    send(fx, alice.principal, "proj_1", "interleave-key", "held back"),
+    "FORBIDDEN",
+  );
+
+  // No sequence was allocated and no message became visible. The provisional
+  // row/blob is reclaimable, as documented.
+  const committed = await fx.db.all<{ id: string }>(
+    "SELECT id FROM messages WHERE project_id = ? AND seq IS NOT NULL",
+    ["proj_1"],
+  );
+  assert.equal(committed.length, 0);
+  const project = await fx.db.first<{ next_seq: number }>(
+    "SELECT next_seq FROM projects WHERE id = ?",
+    ["proj_1"],
+  );
+  assert.equal(project?.next_seq, 0);
+  const pending = await fx.db.all<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE project_id = ?",
+    ["proj_1"],
+  );
+  assert.deepEqual(pending, [{ body_state: "pending" }]);
+
+  // After an explicit re-grant the same idempotency key resumes and publishes
+  // exactly once.
+  await fx.grantProject(alice.principal.credentialId, "proj_1");
+  const resumed = await send(fx, alice.principal, "proj_1", "interleave-key", "held back");
+  assert.equal(resumed.seq, 1);
+  assert.equal(resumed.bodyState, "ready");
+  assert.equal((await fx.db.all("SELECT id FROM messages WHERE seq IS NOT NULL")).length, 1);
+});
+
+test("a receipt write that loses access after the body read creates no receipt", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "read me");
+
+  // Interleaving: the credential is revoked while the body is being read, after
+  // the request-start authorization and the integrity check.
+  const base = fx.blobs;
+  let revoked = false;
+  fx.deps.blobs = {
+    put: (key: string, bytes: Uint8Array) => base.put(key, bytes),
+    async get(key: string): Promise<Uint8Array | undefined> {
+      const bytes = await base.get(key);
+      if (!revoked) {
+        revoked = true;
+        await fx.db.run("UPDATE credentials SET revoked_at = ? WHERE id = ?", [
+          fx.deps.now().toISOString(),
+          alice.principal.credentialId,
+        ]);
+      }
+      return bytes;
+    },
+    delete: (key: string) => base.delete(key),
+  };
+
+  await expectCode(markRead(fx.deps, alice.principal, "proj_1", sent.messageId), "FORBIDDEN");
+  assert.equal((await fx.db.all("SELECT message_id FROM message_receipts")).length, 0);
+});
+
+test("a body fetch that loses membership after decryption returns no plaintext", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "secret body");
+
+  // Interleaving: the membership is removed after decryption but before the
+  // plaintext response is assembled.
+  const base = fx.blobs;
+  let removed = false;
+  fx.deps.blobs = {
+    put: (key: string, bytes: Uint8Array) => base.put(key, bytes),
+    async get(key: string): Promise<Uint8Array | undefined> {
+      const bytes = await base.get(key);
+      if (!removed) {
+        removed = true;
+        await fx.db.run(
+          "UPDATE project_memberships SET removed_at = ? WHERE project_id = ? AND speaker_id = ?",
+          [fx.deps.now().toISOString(), "proj_1", alice.speakerId],
+        );
+      }
+      return bytes;
+    },
+    delete: (key: string) => base.delete(key),
+  };
+
+  await expectCode(getMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId), "NOT_FOUND");
+  assert.equal((await fx.db.all("SELECT message_id FROM message_receipts")).length, 0);
+  assert.equal((await fx.db.all("SELECT id FROM audit_events")).length, 0);
 });
 
 test("unknown and malformed bearer headers are UNAUTHENTICATED", async (t) => {

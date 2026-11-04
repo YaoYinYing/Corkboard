@@ -138,6 +138,55 @@ test("project enumeration only returns granted projects", async (t) => {
   );
 });
 
+test("grant revocation and membership removal are reflected in /me and project listing", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  await fx.addAccount("acct_alice");
+  await fx.addSpeaker("spk_alice", "acct_alice");
+  for (const project of ["proj_a", "proj_b"]) {
+    await fx.addProject(project, "acct_alice");
+    await fx.addMembership(project, "spk_alice", undefined, {
+      grantExistingCredentials: false,
+    });
+  }
+  const key = await fx.addCredential({
+    speakerId: "spk_alice",
+    autoGrantMemberships: false,
+    grantProjects: ["proj_a", "proj_b"],
+  });
+
+  const app = createApp(fx.deps);
+  const call = async (path: string) =>
+    app(
+      new Request(`http://localhost${path}`, {
+        headers: { authorization: `Bearer ${key.token}` },
+      }),
+    );
+  const enumerated = async (): Promise<{ me: string[]; list: string[] }> => {
+    const me = (await (await call("/api/v1/me")).json()) as { projects: string[] };
+    const list = (await (await call("/api/v1/projects")).json()) as {
+      projects: Array<{ id: string }>;
+    };
+    return { me: me.projects, list: list.projects.map((project) => project.id) };
+  };
+
+  // The token authenticates once; each request re-reads grant and membership
+  // state from storage.
+  assert.deepEqual(await enumerated(), {
+    me: ["proj_a", "proj_b"],
+    list: ["proj_a", "proj_b"],
+  });
+
+  await fx.revokeProjectGrant(key.credentialId, "proj_b");
+  assert.deepEqual(await enumerated(), { me: ["proj_a"], list: ["proj_a"] });
+
+  await fx.db.run(
+    "UPDATE project_memberships SET removed_at = ? WHERE project_id = ? AND speaker_id = ?",
+    [fx.deps.now().toISOString(), "proj_a", "spk_alice"],
+  );
+  assert.deepEqual(await enumerated(), { me: [], list: [] });
+});
+
 test("grant revocation applies to an already authenticated principal", async (t) => {
   const fx = await createServiceFixture();
   t.after(() => fx.close());

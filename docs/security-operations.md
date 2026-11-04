@@ -88,10 +88,78 @@ survive a changed pepper.
 - Agents must receive their own token. Do not share one token between a parent and its
   subagents if attribution matters; sharing makes them indistinguishable.
 
+### Revocation ordering
+
+Credential revocation, grant deletion, membership removal, and message expiry are read
+from storage on every authorization decision; there is no authorization cache. Every
+path authorizes at request start, and the three paths with a durable effect or a
+plaintext return re-evaluate immediately before that effect:
+
+- **Send.** `message.send` is re-authorized before the finalization `UPDATE` that
+  assigns `seq`. If access was revoked, no sequence is allocated and no message is
+  published; the provisional row/blob is reclaimable, and a retry with the same
+  idempotency key after an explicit re-grant resumes normally.
+- **Read receipt.** `message.read` is re-authorized and `receipt.write` re-checked
+  immediately before the receipt `INSERT`. A revoked caller creates no receipt.
+- **Body fetch.** `message.read` is re-authorized after decryption and immediately
+  before the plaintext response. A revoked caller receives no content and causes no
+  integrity audit or receipt.
+- **Expiry.** `project.edit` is re-authorized immediately before the conditional
+  `ready → expired` UPDATE and before the already-expired repair path (audit retry and
+  ciphertext deletion). A revoked caller performs no transition and deletes no
+  ciphertext.
+
+Message list, metadata, `/me`, and project enumeration write nothing and are authorized
+at request start only. CLI cleanup commands act as the operator, not on behalf of a
+bearer principal.
+
+Final re-checks use `authorizeProject` semantics: a credential revoked mid-request
+yields `FORBIDDEN` (the principal authenticated at request start); a membership removed
+mid-request, or a grant whose membership is no longer active, yields `NOT_FOUND`. A
+credential already revoked before authentication yields `UNAUTHENTICATED`.
+
+This is a bounded window, not atomic revocation. A revocation that commits after the
+final re-check but before the atomic SQL statement (or before the plaintext response is
+written) is not prevented; no stronger guarantee is claimed. See
+`docs/architecture.md`.
+
+### Membership and grant CLI semantics
+
+- Re-running `add-member` on an **active** membership is a no-op: it does not change
+  capabilities or `joined_at` and writes no grant audit row. Only a membership with
+  `removed_at` set is reactivated, and reactivation may replace its capability set.
+  This prevents a non-owner re-run from silently downgrading an owner membership.
+- `remove-member` deletes that speaker's grants for the project. It writes the
+  `credential.project.revoke` audit row only when at least one grant was actually
+  deleted; `membership.remove` is always audited.
+
 ## Database and blobs
 
 - SQLite: WAL, `foreign_keys=ON`, `busy_timeout` set. Database file and blob directory
   are readable only by the service user (`0700` directories, `0600` files).
+- **Production mode verifies these modes instead of assuming them.** Production is
+  selected by `NODE_ENV=production` or by the explicit `CORKBOARD_REQUIRE_PRIVATE_FS=1`.
+  Paths are normalized (`resolve`, so trailing separators, `.` and `..` cannot disguise
+  a symlink) before any check. Before creating, chmodding, or opening anything, startup
+  rejects a symlinked data directory, blob directory, database file, or `-wal`/`-shm`
+  sidecar, so a rejected redirect leaves its target untouched. After opening it checks,
+  and refuses to listen when it cannot confirm:
+  - the data directory and blob directory exist, are directories, are not symbolic
+    links, and have mode `0700`;
+  - the database file and its existing `-wal`/`-shm` sidecars are regular files, not
+    symbolic links, with mode `0600`;
+  - every blob file has mode `0600`;
+  - the blob directory contains no symbolic links or non-file entries.
+
+  The error names the path and expected mode; it never includes key material, tokens,
+  or message content. Outside production the existing best-effort tightening remains,
+  and startup does not fail on modes. A symlinked data or blob directory is rejected in
+  production so a mount or redirect cannot silently change where plaintext-adjacent
+  state is written.
+- The `init` bootstrap sentinel treats a `corkboard.sqlite` symlink, including a
+  dangling one, as an existing installation and refuses to write. A data-directory path
+  containing a newline or carriage return is rejected before the secrets file is
+  written, so the `secrets.env` line cannot be split into a second assignment.
 - Blobs are stored under random opaque keys, never served statically.
 - Ciphertext is AES-256-GCM with a fresh 96-bit nonce per encryption. AAD binds only
   pre-decryption metadata: service ID, project ID, message ID, object ID, format

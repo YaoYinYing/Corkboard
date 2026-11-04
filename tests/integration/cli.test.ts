@@ -1249,3 +1249,199 @@ test("remove-member deletes grants so re-adding does not revive a credential", a
     db.close();
   }
 });
+
+test("re-running add-member does not change an active membership", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env)
+    .stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId, "--owner"], env).status,
+    0,
+  );
+  const first = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  let before: { capabilities: string; joined_at: string; removed_at: string | null };
+  try {
+    before = (await first.first<typeof before>(
+      "SELECT capabilities, joined_at, removed_at FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
+      [projectId, speakerId],
+    )) as typeof before;
+    assert.equal(before.removed_at, null);
+    assert.ok(before.capabilities.includes('"member.manage"'));
+  } finally {
+    first.close();
+  }
+
+  // A non-owner re-run must not downgrade the owner membership or rewrite
+  // joined_at, and it writes no second grant audit row.
+  const rerun = run(["add-member", "--project", projectId, "--speaker", speakerId], env);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /already active/);
+  const second = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    const after = await second.first<typeof before>(
+      "SELECT capabilities, joined_at, removed_at FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
+      [projectId, speakerId],
+    );
+    assert.deepEqual(after, before);
+    const audits = await second.all<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM audit_events
+        WHERE operation = 'membership.grant' AND project_id = ? AND actor_speaker_id = ?`,
+      [projectId, speakerId],
+    );
+    assert.equal(audits[0]?.n, 1);
+  } finally {
+    second.close();
+  }
+
+  // Reactivation of a removed membership may still replace capabilities.
+  assert.equal(
+    run(["remove-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const third = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    const reactivated = await third.first<{ capabilities: string; removed_at: string | null }>(
+      "SELECT capabilities, removed_at FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
+      [projectId, speakerId],
+    );
+    assert.equal(reactivated?.removed_at, null);
+    assert.equal(reactivated?.capabilities.includes('"member.manage"'), false);
+    assert.ok(reactivated?.capabilities.includes('"message.send"'));
+  } finally {
+    third.close();
+  }
+});
+
+test("init treats a symlinked database path as an existing installation", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const target = join(root, "missing-target");
+  symlinkSync(target, join(dataDir, "corkboard.sqlite"));
+  const secretsFile = join(root, "config", "secrets.env");
+
+  const dangling = run(["init", "--data-dir", dataDir, "--secrets-file", secretsFile]);
+  assert.notEqual(dangling.status, 0);
+  assert.match(dangling.stderr, /existing installation|symbolic link/);
+  assert.equal(existsSync(secretsFile), false);
+  assert.equal(existsSync(target), false);
+
+  // A symlink to a real file is rejected too, and the target is untouched.
+  writeFileSync(target, "existing database");
+  const linked = run(["init", "--data-dir", dataDir, "--secrets-file", secretsFile]);
+  assert.notEqual(linked.status, 0);
+  assert.match(linked.stderr, /existing installation|symbolic link/);
+  assert.equal(existsSync(secretsFile), false);
+  assert.equal(readFileSync(target, "utf8"), "existing database");
+});
+
+test("remove-member audits grant revocation only when grants were deleted", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  const speakerNoKey = run(["create-speaker", "--account", accountId, "--name", "NoKey"], env)
+    .stdout.trim();
+  const speakerWithKey = run(["create-speaker", "--account", accountId, "--name", "WithKey"], env)
+    .stdout.trim();
+  for (const speaker of [speakerNoKey, speakerWithKey]) {
+    assert.equal(
+      run(["add-member", "--project", projectId, "--speaker", speaker], env).status,
+      0,
+    );
+  }
+  assert.equal(
+    run(["issue-key", "--speaker", speakerWithKey, "--project", projectId], env).status,
+    0,
+  );
+
+  assert.equal(
+    run(["remove-member", "--project", projectId, "--speaker", speakerNoKey], env).status,
+    0,
+  );
+  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    const noKeyRevocations = await db.all<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM audit_events
+        WHERE operation = 'credential.project.revoke' AND actor_speaker_id = ?`,
+      [speakerNoKey],
+    );
+    assert.equal(noKeyRevocations[0]?.n, 0);
+    const noKeyRemovals = await db.all<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM audit_events
+        WHERE operation = 'membership.remove' AND actor_speaker_id = ?`,
+      [speakerNoKey],
+    );
+    assert.equal(noKeyRemovals[0]?.n, 1);
+  } finally {
+    db.close();
+  }
+
+  assert.equal(
+    run(["remove-member", "--project", projectId, "--speaker", speakerWithKey], env).status,
+    0,
+  );
+  const after = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    const keyRevocations = await after.all<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM audit_events
+        WHERE operation = 'credential.project.revoke' AND actor_speaker_id = ?`,
+      [speakerWithKey],
+    );
+    assert.equal(keyRevocations[0]?.n, 1);
+  } finally {
+    after.close();
+  }
+});
+
+test("init rejects a data directory path containing a newline", (t) => {
+  const root = tempDir(t);
+  const badDir = join(root, "bad\nline");
+  const secretsFile = join(root, "secrets.env");
+  const result = run(["init", "--data-dir", badDir, "--secrets-file", secretsFile]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /newline/i);
+  assert.equal(existsSync(badDir), false);
+  assert.equal(existsSync(secretsFile), false);
+});
+
+test("init rejects a data directory path containing a carriage return", (t) => {
+  const root = tempDir(t);
+  const badDir = join(root, "bad\rline");
+  const secretsFile = join(root, "secrets.env");
+  const result = run(["init", "--data-dir", badDir, "--secrets-file", secretsFile]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /newline/i);
+  assert.equal(existsSync(badDir), false);
+  assert.equal(existsSync(secretsFile), false);
+});
