@@ -2,9 +2,10 @@
 
 **Status: implemented for the Node.js + SQLite vertical slices A–D, the
 bearer-authenticated MCP slice, human account sessions (slice I), the OAuth 2.1
-authorization-server core (slice J), and the read-only human web dashboard (slice L,
+authorization-server core (slice J), the read-only human web dashboard (slice L,
 with metadata filters, summary search, and bounded replay in slice M; English and
-Simplified Chinese).** Cloudflare Workers/D1, the ChatGPT Web plugin
+Simplified Chinese), and the operator observability slice (queue-to-commit histogram
+and authorized per-project counts).** Cloudflare Workers/D1, the ChatGPT Web plugin
 experience, dashboard write actions, and the "Planned, not implemented" section below
 are not implemented. See `IMPLEMENTATION_STATE.md` for the current evidence,
 [`oauth.md`](./oauth.md) for the OAuth flows, and [`web-ui.md`](./web-ui.md) for the
@@ -334,13 +335,38 @@ A successful response is `200` with a stable JSON snapshot and
       { "le_ms": 10000, "count": 30 },
       { "le_ms": null, "count": 42 }
     ]
+  },
+  "queue_to_commit_ms": {
+    "count": 12,
+    "sum": 480,
+    "buckets": [
+      { "le_ms": 5, "count": 2 },
+      { "le_ms": 25, "count": 5 },
+      { "le_ms": 50, "count": 7 },
+      { "le_ms": 100, "count": 8 },
+      { "le_ms": 250, "count": 9 },
+      { "le_ms": 500, "count": 10 },
+      { "le_ms": 1000, "count": 11 },
+      { "le_ms": 2500, "count": 11 },
+      { "le_ms": 5000, "count": 12 },
+      { "le_ms": 10000, "count": 12 },
+      { "le_ms": null, "count": 12 }
+    ]
   }
 }
 ```
 
-`le_ms: null` is the `+Inf` bucket (duration greater than 10000 ms). Buckets are
-cumulative, ordered low to high; the final bucket always equals `latency_ms.count`.
-`routes` and `errors` are sorted by label/code; `statuses` by numeric status.
+`le_ms: null` is the `+Inf` bucket (duration greater than 10000 ms). Both histograms
+use the same fixed cumulative bounds; buckets are ordered low to high, and each
+histogram's final bucket equals its `count`. `routes` and `errors` are sorted by
+label/code; `statuses` by numeric status.
+
+`queue_to_commit_ms` is measured server-side for each message **this process
+finalized**: `committed_at − received_at`, i.e. the delay from provisional
+creation (`seq = NULL`) to finalization (`seq` assigned). It uses the stored
+server timestamps, is clamped at zero, and has no labels. Idempotent replays of an
+already-committed message are not samples, and a finalization performed by another
+process is not observed here. A non-finite sample is ignored.
 
 Counters cover every response produced by the app, including errors and `429`
 `RATE_LIMITED`, with error codes extracted from the standard Corkboard envelope. `/mcp`
@@ -348,16 +374,20 @@ is one route label; each initialize, tool call, and other `/mcp` HTTP request in
 it. No tool name or tool-argument content is read. Route labels are fixed templates:
 `/healthz`, `/mcp`, `/metrics`, `/api/v1/me`, `/api/v1/session`,
 `/api/v1/projects`,
-`/api/v1/projects/:projectId`, `/api/v1/projects/:projectId/messages`,
+`/api/v1/projects/:projectId`, `/api/v1/projects/:projectId/stats`,
+`/api/v1/projects/:projectId/messages`,
 `/api/v1/projects/:projectId/messages/:messageId`, and the `/body`, `/read`, `/expire`
 variants; every other path is `unknown`. Raw pathnames, query strings, project/message
 IDs, speaker/account IDs, bodies, summaries, tokens, and IPs are never included.
 
 Limitations: the registry is **process-local in memory**. It resets on restart, is not
-shared across processes or Workers isolates, keeps no persistence or history, and has
-no per-project authorized views. The latency histogram measures request duration, not
-queue-to-commit delay (no queue-to-commit histogram is implemented). Disabling the
-endpoint does not stop the counters; it only hides the route.
+shared across processes or Workers isolates, keeps no persistence or history, and
+aggregates no cross-project view. The request latency histogram measures HTTP request
+duration; `queue_to_commit_ms` measures message finalization delay as described above.
+Per-project message counts are deliberately **not** part of this operator snapshot;
+they are exposed only through the authorized per-project stats endpoint below, so a
+project's existence and volume are never disclosed to an unauthorized caller.
+Disabling the endpoint does not stop the counters; it only hides the route.
 
 ### `GET /api/v1/me`
 
@@ -398,6 +428,37 @@ project metadata and the caller's effective capabilities. A non-member receives
 { "project": { "id", "title", "summary", "status", "created_at", "updated_at" },
   "capabilities": ["project.read", "message.read", "message.send", "receipt.write"] }
 ```
+
+### `GET /api/v1/projects/:projectId/stats`
+
+Requires `project.read`, an active membership, and an explicit grant for the calling
+credential — the same decision as project detail. Returns bounded, non-content counts
+for that project only:
+
+```json
+{
+  "project_id": "proj_...",
+  "messages": { "ready": 12, "pending": 1, "expired": 3 },
+  "unread": 4
+}
+```
+
+- `messages.ready`: committed messages with `body_state = "ready"`.
+- `messages.pending`: provisional rows awaiting finalization (`seq IS NULL`,
+  `body_state = "pending"`). These rows are never returned by message list/replay.
+- `messages.expired`: committed metadata tombstones after body expiry. `failed` rows
+  are not counted.
+- `unread`: committed (`ready` or `expired`) messages with no read receipt from the
+  **calling speaker**, matching the list endpoint's `unread=true` filter. It is the
+  only viewer-relative value.
+
+The counts are computed by project-scoped, parameterized SQL with no content
+selection. An unknown project and a project the caller is not a member of return the
+same `404 NOT_FOUND`, so the endpoint cannot enumerate project existence; an active
+member without a grant receives `FORBIDDEN`, consistent with project detail. The
+response contains no summaries, bodies, message/speaker/account identifiers, or
+tokens. The endpoint is read-only; other methods return `405` with `Allow: GET`.
+Counts are a snapshot of current rows and are not paginated or time-windowed.
 
 ### `POST /api/v1/projects/:projectId/messages`
 

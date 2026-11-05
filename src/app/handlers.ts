@@ -50,7 +50,7 @@ import {
   revokeSession,
   sessionTokenFromCookie,
 } from "../service/sessions.ts";
-import { listProjects } from "../service/projects.ts";
+import { getProjectStats, listProjects } from "../service/projects.ts";
 import {
   getMessage,
   getMessageBody,
@@ -395,11 +395,25 @@ async function handleProjectDetail(
   });
 }
 
+async function handleProjectStats(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+): Promise<Response> {
+  const stats = await getProjectStats(deps, principal, projectId);
+  return json(200, {
+    project_id: stats.projectId,
+    messages: stats.messages,
+    unread: stats.unread,
+  });
+}
+
 async function handleSendMessage(
   deps: ServiceDeps,
   principal: Principal,
   projectId: string,
   request: Request,
+  metrics: MetricsRegistry,
 ): Promise<Response> {
   // Authorization precedes body parsing so denied callers learn nothing about
   // payload validity. sendMessage repeats this check after its own validation.
@@ -442,6 +456,15 @@ async function handleSendMessage(
     clientSentAt,
     bodyExpiresAt,
   });
+  // Only a finalization this request performed is a queue-to-commit sample; a
+  // replay of an older commit must not look like a long queue delay.
+  if (result.queueToCommitMs !== undefined) {
+    try {
+      metrics.recordQueueToCommit(result.queueToCommitMs);
+    } catch {
+      // Recording is best effort and must not change the response.
+    }
+  }
   return json(replay ? 200 : 201, {
     message_id: result.messageId,
     project_id: result.projectId,
@@ -561,6 +584,12 @@ async function route(
     return handleProjectDetail(deps, principal, projectId);
   }
 
+  if (segments.length === 5 && segments[4] === "stats") {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    const principal = await authenticate(deps, request, context, limiter);
+    return handleProjectStats(deps, principal, projectId);
+  }
+
   if (segments[4] !== "messages") return notFound(requestId);
 
   if (segments.length === 5) {
@@ -569,7 +598,7 @@ async function route(
     }
     const principal = await authenticate(deps, request, context, limiter);
     if (method === "POST") {
-      return handleSendMessage(deps, principal, projectId, request);
+      return handleSendMessage(deps, principal, projectId, request, metrics);
     }
     const result = await listMessages(deps, principal, projectId, listQueryFrom(url));
     return json(200, {
@@ -658,7 +687,11 @@ export function createApp(
   // Validate at the construction boundary too, so a direct caller cannot
   // enable an empty/whitespace or sub-minimum token by bypassing env parsing.
   const metricsToken = normalizeMetricsToken(options.metricsToken);
-  const mcp = createMcpEndpoint(deps, { maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
+  const metrics = options.metrics ?? new MetricsRegistry();
+  const mcp = createMcpEndpoint(deps, {
+    maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+    metrics,
+  });
   const limiter = new RateLimiter(options.rateLimit ?? DEFAULT_RATE_LIMIT, {
     ...(options.rateLimitNow === undefined ? {} : { now: options.rateLimitNow }),
     ...(options.rateLimitMaxKeys === undefined ? {} : { maxKeys: options.rateLimitMaxKeys }),
@@ -729,7 +762,6 @@ export function createApp(
       },
     ),
   };
-  const metrics = options.metrics ?? new MetricsRegistry();
   const clock = options.metricsNow ?? ((): number => performance.now());
   return async (request: Request): Promise<Response> => {
     const started = clock();

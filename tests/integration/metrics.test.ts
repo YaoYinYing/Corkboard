@@ -300,6 +300,7 @@ test("enabled metrics requires the exact bearer token and never echoes it", asyn
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "errors",
     "latency_ms",
+    "queue_to_commit_ms",
     "requests",
     "routes",
     "statuses",
@@ -369,6 +370,115 @@ test("counters cover REST success/error, 429, and MCP initialize/tool requests",
   assert.equal(buckets.length, LATENCY_BUCKETS_MS.length + 1);
   assert.equal(buckets[buckets.length - 1]?.le_ms, null);
   assert.equal(buckets[buckets.length - 1]?.count, 5);
+});
+
+test("queue-to-commit buckets are cumulative and boundary-deterministic", () => {
+  const registry = new MetricsRegistry();
+  const samples = [0, 5, 6, 25, 26, 10000, 10001];
+  for (const sample of samples) registry.recordQueueToCommit(sample);
+
+  const snapshot = registry.snapshot();
+  assert.equal(snapshot.requests.total, 0);
+  assert.equal(snapshot.queue_to_commit_ms.count, samples.length);
+  assert.equal(
+    snapshot.queue_to_commit_ms.sum,
+    samples.reduce((sum, value) => sum + value, 0),
+  );
+  assert.deepEqual(
+    snapshot.queue_to_commit_ms.buckets.map((bucket) => bucket.le_ms),
+    [...LATENCY_BUCKETS_MS, null],
+  );
+  assert.deepEqual(
+    snapshot.queue_to_commit_ms.buckets.map((bucket) => bucket.count),
+    [2, 4, 5, 5, 5, 5, 5, 5, 5, 6, 7],
+  );
+
+  // Negative and non-finite samples cannot corrupt the cumulative buckets.
+  registry.recordQueueToCommit(-1);
+  registry.recordQueueToCommit(Number.NaN);
+  assert.equal(registry.snapshot().queue_to_commit_ms.count, samples.length + 1);
+});
+
+test("queue-to-commit records real finalizations only and starts empty", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  // A ticking server clock produces a non-zero provisional-to-commit delay.
+  let tick = 0;
+  const base = Date.parse("2026-11-03T12:00:00.000Z");
+  fx.deps.now = () => new Date(base + (tick += 1000));
+  const app = createApp(fx.deps, { metricsToken: METRICS_TOKEN });
+  const actor = await addActor(fx, "queue");
+  await fx.addProject("proj_queue", actor.accountId);
+  await fx.addMembership("proj_queue", actor.speakerId);
+
+  const empty = await jsonBody(await metricsCall(app, METRICS_TOKEN));
+  assert.deepEqual(empty.queue_to_commit_ms, {
+    count: 0,
+    sum: 0,
+    buckets: [...LATENCY_BUCKETS_MS.map((le_ms) => ({ le_ms, count: 0 })), { le_ms: null, count: 0 }],
+  });
+
+  const payload = {
+    summary: "queue sample",
+    type: "request",
+    language: "en",
+    text: "queue sample body",
+    body_digest: `sha256:${await sha256("queue sample body")}`,
+  };
+  const first = await call(app, "/api/v1/projects/proj_queue/messages", {
+    method: "POST",
+    token: actor.token,
+    headers: { "idempotency-key": "queue-1" },
+    body: payload,
+  });
+  assert.equal(first.status, 201);
+
+  // Replaying the same idempotency key is not a second finalization.
+  const replay = await call(app, "/api/v1/projects/proj_queue/messages", {
+    method: "POST",
+    token: actor.token,
+    headers: { "idempotency-key": "queue-1" },
+    body: payload,
+  });
+  assert.equal(replay.status, 200);
+
+  const sessionId = await mcpSession(app, actor.token);
+  const mcpSend = await rawMcp(
+    app,
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "corkboard_send_message",
+        arguments: {
+          project_id: "proj_queue",
+          summary: "mcp queue sample",
+          type: "request",
+          language: "en",
+          text: "mcp queue body",
+        },
+      },
+    },
+    { token: actor.token, sessionId },
+  );
+  assert.equal(mcpSend.status, 200);
+
+  const snapshot = await jsonBody(await metricsCall(app, METRICS_TOKEN));
+  const queue = snapshot.queue_to_commit_ms as JsonObject;
+  assert.equal(queue.count, 2);
+  assert.equal(queue.sum > 0, true);
+  const buckets = queue.buckets as JsonObject[];
+  assert.equal(buckets.length, LATENCY_BUCKETS_MS.length + 1);
+  assert.equal(buckets[buckets.length - 1]?.le_ms, null);
+  assert.equal(buckets[buckets.length - 1]?.count, queue.count);
+  for (let index = 1; index < buckets.length; index += 1) {
+    assert.ok((buckets[index]?.count as number) >= (buckets[index - 1]?.count as number));
+  }
+  const serialized = JSON.stringify(snapshot);
+  for (const forbidden of [payload.summary, payload.text, "proj_queue", actor.token]) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
 });
 
 test("latency buckets are cumulative and boundary-deterministic", () => {

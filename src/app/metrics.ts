@@ -1,7 +1,7 @@
-// Process-local request metrics. Web APIs only; no bodies, summaries, tokens,
-// IDs, IPs, or raw pathnames are stored. Route labels are fixed templates so
-// attacker-controlled paths cannot grow the map. Values reset on restart and
-// are not shared across processes or Workers isolates.
+// Process-local request and message-timing metrics. Web APIs only; no bodies,
+// summaries, tokens, IDs, IPs, or raw pathnames are stored. Route labels are
+// fixed templates so attacker-controlled paths cannot grow the map. Values reset
+// on restart and are not shared across processes or Workers isolates.
 import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 
 export const METRICS_TOKEN_MIN_LENGTH = 32;
@@ -27,6 +27,16 @@ export const LATENCY_BUCKETS_MS = [
 
 export interface MetricsConfig {
   token: string;
+}
+
+// Cumulative `le` buckets: a sample increments its own bucket index and every
+// larger bucket, including `+Inf`.
+function recordBucket(counts: number[], durationMs: number): void {
+  let first = LATENCY_BUCKETS_MS.findIndex((bound) => durationMs <= bound);
+  if (first === -1) first = LATENCY_BUCKETS_MS.length;
+  for (let index = first; index < counts.length; index += 1) {
+    counts[index] = (counts[index] ?? 0) + 1;
+  }
 }
 
 // An absent, empty, or whitespace-only token disables the endpoint. Any other
@@ -61,6 +71,7 @@ export type RouteLabel =
   | "/api/v1/session"
   | "/api/v1/projects"
   | "/api/v1/projects/:projectId"
+  | "/api/v1/projects/:projectId/stats"
   | "/api/v1/projects/:projectId/messages"
   | "/api/v1/projects/:projectId/messages/:messageId"
   | "/api/v1/projects/:projectId/messages/:messageId/body"
@@ -137,6 +148,9 @@ export function routeLabelFor(pathname: string): RouteLabel {
   }
   if (segments[2] !== "projects" || segments.length < 4) return "unknown";
   if (segments.length === 4) return "/api/v1/projects/:projectId";
+  if (segments.length === 5 && segments[4] === "stats") {
+    return "/api/v1/projects/:projectId/stats";
+  }
   if (segments[4] !== "messages") return "unknown";
   if (segments.length === 5) return "/api/v1/projects/:projectId/messages";
   if (segments.length === 6) {
@@ -167,6 +181,13 @@ export interface MetricsSnapshot {
     /** Cumulative counts; `le_ms: null` is the `+Inf` bucket. */
     buckets: Array<{ le_ms: number | null; count: number }>;
   };
+  /** Queue-to-commit delay for messages finalized by this process. */
+  queue_to_commit_ms: {
+    count: number;
+    sum: number;
+    /** Cumulative counts; `le_ms: null` is the `+Inf` bucket. */
+    buckets: Array<{ le_ms: number | null; count: number }>;
+  };
 }
 
 export class MetricsRegistry {
@@ -177,6 +198,11 @@ export class MetricsRegistry {
   private latencyCount = 0;
   private latencySumMs = 0;
   private readonly bucketCounts = new Array<number>(LATENCY_BUCKETS_MS.length + 1).fill(0);
+  private queueCommitCount = 0;
+  private queueCommitSumMs = 0;
+  private readonly queueCommitBucketCounts = new Array<number>(
+    LATENCY_BUCKETS_MS.length + 1,
+  ).fill(0);
 
   recordRequest(
     route: RouteLabel,
@@ -195,11 +221,21 @@ export class MetricsRegistry {
     this.latencySumMs += durationMs;
     // Buckets are cumulative (`le`), so a sample increments its own bucket and
     // every larger bucket, including `+Inf`.
-    let first = LATENCY_BUCKETS_MS.findIndex((bound) => durationMs <= bound);
-    if (first === -1) first = LATENCY_BUCKETS_MS.length;
-    for (let index = first; index < this.bucketCounts.length; index += 1) {
-      this.bucketCounts[index] = (this.bucketCounts[index] ?? 0) + 1;
-    }
+    recordBucket(this.bucketCounts, durationMs);
+  }
+
+  /**
+   * Records one finalized message's queue-to-commit delay: server time from
+   * provisional creation (`received_at`, seq NULL) to finalization (`committed_at`,
+   * seq assigned). Idempotent replays are not samples; the caller records only a
+   * finalization this call performed. Non-finite samples are ignored.
+   */
+  recordQueueToCommit(durationMs: number): void {
+    if (!Number.isFinite(durationMs)) return;
+    const sample = Math.max(0, durationMs);
+    this.queueCommitCount += 1;
+    this.queueCommitSumMs += sample;
+    recordBucket(this.queueCommitBucketCounts, sample);
   }
 
   snapshot(): MetricsSnapshot {
@@ -223,6 +259,20 @@ export class MetricsRegistry {
             count: this.bucketCounts[index] ?? 0,
           })),
           { le_ms: null, count: this.bucketCounts[LATENCY_BUCKETS_MS.length] ?? 0 },
+        ],
+      },
+      queue_to_commit_ms: {
+        count: this.queueCommitCount,
+        sum: this.queueCommitSumMs,
+        buckets: [
+          ...LATENCY_BUCKETS_MS.map((bound, index) => ({
+            le_ms: bound as number | null,
+            count: this.queueCommitBucketCounts[index] ?? 0,
+          })),
+          {
+            le_ms: null,
+            count: this.queueCommitBucketCounts[LATENCY_BUCKETS_MS.length] ?? 0,
+          },
         ],
       },
     };

@@ -604,7 +604,13 @@ reach the core, such as the 64 KiB body-limit rejection). Every response recorde
 the app wrapper increments one total, one fixed route label, one HTTP status, and (for
 error responses in the standard Corkboard envelope) one stable error code. It also
 records request duration into cumulative histogram buckets at 5, 25, 50, 100, 250, 500,
-1000, 2500, 5000, and 10000 ms plus a `+Inf` bucket.
+1000, 2500, 5000, and 10000 ms plus a `+Inf` bucket. It also tracks one
+**queue-to-commit** sample per message finalized by this process: the server delay from
+provisional creation (`received_at`, `seq = NULL`) to finalization (`committed_at`,
+`seq` assigned), using the same fixed cumulative buckets with no labels. Idempotent
+replays of an already-committed message are not samples, so a replay cannot appear as a
+long queue delay. The service returns the delay only when the request performed the
+finalization; REST and MCP send paths feed it to the same registry.
 
 Cardinality is fixed. `routeLabelFor` maps path shape to one of a small set of
 templates (`/healthz`, `/mcp`, `/metrics`, the `/api/v1` routes with `:projectId` and
@@ -629,9 +635,13 @@ and body are identical. A valid token sees a stable JSON snapshot with
 authenticate a speaker and does not touch the per-credential limiter.
 
 The registry is process-local and in-memory: values reset on restart and are not shared
-across processes or Workers isolates. There is no persistence, no per-project
-authorized view, and no queue-to-commit histogram; the histogram measures HTTP request
-duration only. These are documented limitations, not hidden behavior.
+across processes or Workers isolates. There is no persistence, no cross-project
+aggregation, and no history. Per-project message counts are not part of this operator
+snapshot. They are exposed only through `GET /api/v1/projects/:projectId/stats`, which
+runs the same `project.read` authorization as project detail and returns project-scoped
+ready/pending/expired counts plus the calling speaker's unread count. An unknown project
+and a project the caller does not belong to are the same `NOT_FOUND`, and the query
+selects no message content. These are documented limitations, not hidden behavior.
 
 ## Deliberate deferments
 

@@ -363,7 +363,7 @@ recorded there.
 - [x] Add explicit operator-run, bounded retention/pruning for definitely unusable session and OAuth rows: grace period, per-table batch limit, one transaction, idempotent rerun, and no deletion of messages, receipts, blobs, audit events, speaker credentials, or still-usable tokens. No scheduler. (Slice K.)
 - [ ] Implement minimal structured observability: request IDs, error classes, histogram of queue-to-commit delays, per-project counts with authorized views; no content logging.
   - [x] Process-local request/route/status/error-code counters and request-duration histogram with an operator-only `GET /metrics` (disabled unless `CORKBOARD_METRICS_TOKEN` is set). No content, IDs, or tokens are recorded. (Slice H; see `docs/api.md`.)
-  - [ ] Queue-to-commit delay histogram and per-project counts with authorized views remain unimplemented.
+  - [x] Queue-to-commit delay histogram and per-project counts with authorized views. The histogram is process-local and label-free in `GET /metrics`; per-project ready/pending/expired/unread counts are exposed only through `GET /api/v1/projects/:projectId/stats` under the normal `project.read` authorization, with uniform `NOT_FOUND` for unknown/foreign projects. (Slice R; see `docs/api.md`.)
 - [ ] Test two isolated clients running in **different deployment environments**; controlled failure injection for D1/R2 and SQLite/filesystem, fail closed and recover.
 - [ ] Provide reproducible Docker Compose/local installation and Worker deploy docs with explicit data directory/secret handling and admin bootstrap instructions.
 

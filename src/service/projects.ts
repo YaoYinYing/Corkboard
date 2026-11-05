@@ -2,7 +2,12 @@
 // scope checks are identical to every other project-scoped path; the only
 // difference is the transport that renders the result.
 import { AppError } from "../domain/errors.ts";
-import { parseScopeJson, type Principal, type ServiceDeps } from "./auth.ts";
+import {
+  authorizeProject,
+  parseScopeJson,
+  type Principal,
+  type ServiceDeps,
+} from "./auth.ts";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -153,6 +158,70 @@ async function listSessionProjects(
       member_display_name: memberNames.get(row.id) ?? null,
     })),
     next_cursor: nextCursor,
+  };
+}
+
+export interface ProjectStats {
+  projectId: string;
+  messages: {
+    /** Committed messages whose body is readable. */
+    ready: number;
+    /** Provisional rows awaiting finalization (`seq IS NULL`). */
+    pending: number;
+    /** Retained metadata tombstones after body expiry. */
+    expired: number;
+  };
+  /**
+   * Committed (ready or expired) messages with no receipt for the calling
+   * speaker, matching the list endpoint's `unread` filter.
+   */
+  unread: number;
+}
+
+// Authorized per-project counts. Authorization is the same `project.read`
+// decision as project detail: an unknown project and a project the caller is
+// not a member of are the same NOT_FOUND, so the endpoint cannot enumerate
+// project existence. Counting is project-scoped and parameterized; the only
+// per-viewer value is `unread`, derived from the authenticated speaker.
+export async function getProjectStats(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+): Promise<ProjectStats> {
+  await authorizeProject(deps, principal, projectId, "project.read");
+
+  const counts = await deps.db.first<{
+    ready: number | null;
+    pending: number | null;
+    expired: number | null;
+  }>(
+    `SELECT
+       COALESCE(SUM(CASE WHEN seq IS NOT NULL AND body_state = 'ready' THEN 1 ELSE 0 END), 0) AS ready,
+       COALESCE(SUM(CASE WHEN seq IS NULL AND body_state = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+       COALESCE(SUM(CASE WHEN seq IS NOT NULL AND body_state = 'expired' THEN 1 ELSE 0 END), 0) AS expired
+       FROM messages
+      WHERE project_id = ?`,
+    [projectId],
+  );
+  const unread = await deps.db.first<{ unread: number | null }>(
+    `SELECT COUNT(*) AS unread
+       FROM messages m
+      WHERE m.project_id = ? AND m.seq IS NOT NULL
+        AND m.body_state IN ('ready', 'expired')
+        AND NOT EXISTS (
+          SELECT 1 FROM message_receipts r
+           WHERE r.message_id = m.id AND r.speaker_id = ?)`,
+    [projectId, principal.speakerId],
+  );
+
+  return {
+    projectId,
+    messages: {
+      ready: Number(counts?.ready ?? 0),
+      pending: Number(counts?.pending ?? 0),
+      expired: Number(counts?.expired ?? 0),
+    },
+    unread: Number(unread?.unread ?? 0),
   };
 }
 

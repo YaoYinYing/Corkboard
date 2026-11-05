@@ -8,6 +8,7 @@ import type { CallToolResult, RequestId } from "@modelcontextprotocol/sdk/types.
 import { z } from "zod";
 import { sha256Hex } from "../domain/digest.ts";
 import { AppError } from "../domain/errors.ts";
+import type { MetricsRegistry } from "../app/metrics.ts";
 import type { Principal, ServiceDeps } from "../service/auth.ts";
 import { getPrincipalIdentity } from "../service/identity.ts";
 import {
@@ -120,6 +121,7 @@ export function registerCorkboardTools(
   server: McpServer,
   deps: ServiceDeps,
   onToolRequest?: ToolRequestObserver,
+  metrics?: MetricsRegistry,
 ): void {
   const run = makeRun(onToolRequest);
   server.registerTool(
@@ -253,6 +255,13 @@ export function registerCorkboardTools(
           bodyDigest,
           replyToId: args.reply_to_id ?? null,
         });
+        if (result.queueToCommitMs !== undefined) {
+          try {
+            metrics?.recordQueueToCommit(result.queueToCommitMs);
+          } catch {
+            // Recording is best effort and must not change the tool result.
+          }
+        }
         return {
           message_id: result.messageId,
           seq: result.seq,

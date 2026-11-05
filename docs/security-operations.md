@@ -696,19 +696,43 @@ rather than comprehensive erasure.
   covers perfect timing indistinguishability, and no token content or length is
   exposed.
 - The snapshot contains counters and timing only: total requests, fixed route labels,
-  HTTP status counts, stable Corkboard error codes (including `RATE_LIMITED`), and
-  cumulative latency buckets. It never contains bodies, summaries, tokens, keys,
-  request/response bodies, query strings, raw pathnames, project/message/speaker/account
-  IDs, or IPs. `/mcp` requests are counted under the `/mcp` label; tool names and
-  arguments are not read.
+  HTTP status counts, stable Corkboard error codes (including `RATE_LIMITED`),
+  cumulative request-latency buckets, and a cumulative **queue-to-commit** histogram
+  for messages finalized by this process. Queue-to-commit is `committed_at −
+  received_at` (provisional `seq = NULL` creation to finalization), clamped at zero,
+  with the same fixed bucket bounds and no labels. Idempotent replays are not samples.
+  The snapshot never contains bodies, summaries, tokens, keys, request/response
+  bodies, query strings, raw pathnames, project/message/speaker/account IDs, or IPs.
+  `/mcp` requests are counted under the `/mcp` label; tool names and arguments are not
+  read.
 - `GET /metrics` does not authenticate a speaker and is not keyed by the per-credential
   rate limiter; it neither consumes nor affects user buckets. Protect it with the token
   and network policy (bind to loopback or the reverse proxy); it is operator-only, not a
   public health endpoint.
 - Metrics are **process-local and in-memory**. They reset on restart, are not shared
   across processes or Workers isolates, and have no persistence or history. Scrape each
-  process separately; do not treat them as billable or audited records. There is no
-  per-project authorized view and no queue-to-commit histogram in this slice.
+  process separately; do not treat them as billable or audited records. The operator
+  snapshot deliberately does **not** include per-project counts, because the operator
+  token is not a project authorization decision.
+
+### Authorized per-project counts
+
+`GET /api/v1/projects/:projectId/stats` is the only per-project count surface. It
+requires the normal `project.read` decision (active membership, explicit credential
+grant, and scope), exactly like project detail, and returns only:
+
+- committed `ready`, provisional `pending` (`seq IS NULL`), and committed `expired`
+  message counts for that project; and
+- `unread`, the number of committed (`ready` or `expired`) messages with no receipt
+  from the **calling speaker**.
+
+The SQL is project-scoped and parameterized and selects no message content. An unknown
+project and a project the caller is not a member of are the same `404 NOT_FOUND`, so an
+unauthorized caller cannot enumerate project existence or volume; an active member
+without a grant receives `FORBIDDEN`, consistent with project detail. The response
+contains no summaries, bodies, message/speaker/account IDs, or tokens, and the route
+is read-only (`POST` and other methods return `405`). Do not add these counts to the
+operator snapshot or to any unauthenticated aggregate.
 
 ## Known limits
 
@@ -723,8 +747,10 @@ rather than comprehensive erasure.
   comprehensive erasure.
 - Rate limiting is per-process and per-credential; there is no distributed/global
   limiter and no application-level per-IP limiting (delegated to the reverse proxy).
-- Metrics are per-process in-memory counters with no persistence, aggregation, or
-  per-project views; the latency histogram is request duration, not queue-to-commit.
+- Metrics are per-process in-memory counters with no persistence or aggregation. The
+  request histogram measures HTTP duration and the separate queue-to-commit histogram
+  measures message finalization delay; per-project counts require an authorized
+  `project.read` view and are not in the operator snapshot.
 - Human sessions are implemented as server-side rows with 12-hour absolute / 30-minute
   idle expiry and per-session revocation. The OAuth 2.1 authorization-server core is
   implemented (dynamic public clients, PKCE, rotating refresh tokens, revocation), but

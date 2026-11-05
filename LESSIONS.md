@@ -616,3 +616,19 @@ prevented regression; when to remove the advice.
   from the source tokens.
 - **Remove when:** the design system ships a generated stylesheet with its own CSP and
   provenance checks.
+
+## 2026-11-04 — A replay is not a new queue delay
+
+- **Failure:** Recording queue-to-commit time on every `sendMessage` response makes an
+  idempotent replay of an old message look like a delay as long as the message's age:
+  `received_at` is re-read from the row while the replay's clock is current. The
+  histogram then reports multi-day "queue" samples for a healthy service.
+- **Reproducer:** Send with an idempotency key, advance the fixture clock, replay the
+  same key and payload, and assert the queue histogram still has one sample. The
+  service-level counterpart asserts the replay result omits `queueToCommitMs`.
+- **Fix:** `publish` reports whether this call actually won the finalization; the delay
+  is computed from the provisional row's `received_at` to the finalization
+  `committed_at` only then. Both REST and MCP send paths feed the same registry.
+- **Prevents:** Replays inflating latency/queue metrics and misleading capacity work.
+- **Remove when:** Timing is emitted from a durable finalization record that already
+  distinguishes the original commit from later reads.

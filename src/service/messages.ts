@@ -48,6 +48,13 @@ export interface SendMessageResult {
   committedAt: string;
   bodyState: "ready" | "expired";
   digest: string;
+  /**
+   * Server-side time from provisional creation to finalization, present only
+   * when this call performed the finalization. An idempotent replay of an
+   * already-committed message omits it, so a replay is never misreported as a
+   * long queue delay.
+   */
+  queueToCommitMs?: number;
 }
 
 export interface ListMessagesQuery {
@@ -201,7 +208,11 @@ async function loadMessage(
   );
 }
 
-function sendResult(row: MessageRow, digest: string): SendMessageResult {
+function sendResult(
+  row: MessageRow,
+  digest: string,
+  queueToCommitMs?: number,
+): SendMessageResult {
   if (row.seq === null || row.committed_at === null) throw new AppError("UNAVAILABLE");
   if (row.body_state !== "ready" && row.body_state !== "expired") {
     throw new AppError("UNAVAILABLE");
@@ -213,7 +224,18 @@ function sendResult(row: MessageRow, digest: string): SendMessageResult {
     committedAt: row.committed_at,
     bodyState: row.body_state,
     digest,
+    ...(queueToCommitMs === undefined ? {} : { queueToCommitMs }),
   };
+}
+
+// Both timestamps are server-authored ISO-8601 values. A clock adjustment or a
+// malformed row clamps to zero rather than reporting a negative delay.
+function queueToCommitMs(receivedAt: string | null, committedAt: string | null): number | undefined {
+  if (receivedAt === null || committedAt === null) return undefined;
+  const started = Date.parse(receivedAt);
+  const finished = Date.parse(committedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(finished)) return undefined;
+  return Math.max(0, finished - started);
 }
 
 function listRowToMetadata(row: MessageListRow): MessageMetadata {
@@ -262,8 +284,9 @@ async function publish(
   projectId: string,
   messageId: string,
   bodyObjectId: string,
-): Promise<MessageRow> {
+): Promise<{ row: MessageRow; finalized: boolean }> {
   await authorizeProject(deps, principal, projectId, "message.send");
+  let finalized = false;
   try {
     await finalizeMessage(deps.db, {
       projectId,
@@ -271,6 +294,7 @@ async function publish(
       bodyObjectId,
       committedAt: deps.now().toISOString(),
     });
+    finalized = true;
   } catch (error) {
     if (!(error instanceof NotFoundError)) throw error;
   }
@@ -278,7 +302,7 @@ async function publish(
   if (row === undefined || (row.body_state !== "ready" && row.body_state !== "expired")) {
     throw new AppError("UNAVAILABLE");
   }
-  return row;
+  return { row, finalized };
 }
 
 // Writes the blob, body_objects row and provisional message, then finalizes.
@@ -300,7 +324,7 @@ async function commitBody(
     bodyExpiresAt: string | null;
     receivedAt: string;
   },
-): Promise<MessageRow> {
+): Promise<{ row: MessageRow; queueToCommitMs: number | undefined }> {
   const objectId = randomId("obj_");
   const sealed = await sealBody(
     ENCODER.encode(input.text),
@@ -354,7 +378,11 @@ async function commitBody(
     [objectId, messageId, projectId],
   );
 
-  return publish(deps, principal, projectId, messageId, objectId);
+  const { row, finalized } = await publish(deps, principal, projectId, messageId, objectId);
+  return {
+    row,
+    queueToCommitMs: finalized ? queueToCommitMs(input.receivedAt, row.committed_at) : undefined,
+  };
 }
 
 export async function sendMessage(
@@ -411,17 +439,23 @@ export async function sendMessage(
   const generatedMessageId = randomId("msg_");
 
   const commitRecordedMessage = async (messageId: string): Promise<SendMessageResult> => {
-    const row = await commitBody(deps, principal, projectId, messageId, {
-      summary,
-      type,
-      language,
-      text,
-      replyToId,
-      clientSentAt,
-      bodyExpiresAt,
-      receivedAt,
-    });
-    return sendResult(row, bodyDigest);
+    const { row, queueToCommitMs: delayMs } = await commitBody(
+      deps,
+      principal,
+      projectId,
+      messageId,
+      {
+        summary,
+        type,
+        language,
+        text,
+        replyToId,
+        clientSentAt,
+        bodyExpiresAt,
+        receivedAt,
+      },
+    );
+    return sendResult(row, bodyDigest, delayMs);
   };
 
   // An existing key is a replay or resume. It returns the committed result even
@@ -553,8 +587,21 @@ async function replayOrResume(
       }
       throw error;
     }
-    const row = await publish(deps, principal, projectId, messageId, existing.body_object_id);
-    return { status: "done", result: sendResult(row, bodyDigest) };
+    const { row, finalized } = await publish(
+      deps,
+      principal,
+      projectId,
+      messageId,
+      existing.body_object_id,
+    );
+    return {
+      status: "done",
+      result: sendResult(
+        row,
+        bodyDigest,
+        finalized ? queueToCommitMs(existing.received_at, row.committed_at) : undefined,
+      ),
+    };
   }
 
   // No message row exists yet, or the provisional row has no blob reference:

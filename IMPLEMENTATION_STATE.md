@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–O implemented and pushed; slice-O P2 fixes on branch, not pushed |
-| Last pushed checkpoint | `f06c4ac` (slice O sanitized auth/OAuth audit events, tree `496e9ae`) on `origin/main`; CI success verified after push |
-| Branch | `main` at `f06c4ac`, clean; slice-O P2 fixes on `slice-o-p2-fixes`, not pushed |
+| Phase | 0 complete; vertical slices A–O implemented and pushed; slice Q UI design tokens on `main` (`58e548f`); slice R observability P2-fixed squash candidate on `slice-obs-final`, not pushed |
+| Last pushed checkpoint | `f06c4ac` (slice O sanitized auth/OAuth audit events, tree `496e9ae`) on `origin/main`; CI success verified after push. UI checkpoint `58e548f` (tree `09e3153`) is now `origin/main`; slice R was replayed onto it. |
+| Branch | Replay base `58e548f` (`origin/main`); `slice-obs-final` at the slice-R P2-fixed squash candidate, not pushed; slice-O P2 fixes on `slice-o-p2-fixes`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), integration of the slice-R squash candidate, real-browser verification of the UI token slice |
 
 ## Checkpoint history
 
@@ -41,6 +41,7 @@ as the work it describes.
 | `8410b37` | `116cbb6` | Slice N audit fixes: immutable/read-only snapshot without source sidecars, restore manifest reuse, byte caps, CLI JSON/redaction | superseded by final N commit |
 | `c2aec6a` | `e45dcdf` | Slice N final: pre-snapshot DB cap, bounded listings, redaction/sanitization, mid-stream digest cap, docs | security PASS; contract PASS (delta on `e45dcdf`) |
 | `f06c4ac` | `496e9ae` | Vertical slice O: sanitized authentication/OAuth lifecycle audit events | security PASS; contract PASS (two independent audits) |
+| `4a8bde8` | `dd59cff` | Vertical slice R: queue-to-commit histogram and authorized per-project counts (audited candidate, replayed onto `58e548f`) | audits PASS; P2 fixes and squash follow |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
@@ -517,8 +518,9 @@ pushed.
   consumption by `/metrics` or `/healthz`.
 - **Limitations.** Metrics are process-local in memory: they reset on restart, are not
   shared across processes or Workers isolates, and have no persistence or history.
-  There are no per-project authorized views and no queue-to-commit histogram; latency is
-  HTTP request duration only. Disabling the endpoint stops neither counting nor memory
+  There are no per-project authorized views and no queue-to-commit histogram in that
+  slice; latency is HTTP request duration only. (Both are added by slice R below.)
+  Disabling the endpoint stops neither counting nor memory
   use (the registry is bounded by the fixed label/status/error sets).
 
 ## Vertical slice I — human account sessions (implemented and pushed)
@@ -1065,7 +1067,7 @@ pushed.
   test file gains the palette and inline-style guard extensions in this replay.
   The checkpoint commit trailer carries the final Base-SHA and
   Tree-SHA. The original branch commit is not an ancestor of the checkpoint.
-  Not pushed; `main` is unchanged.
+  Pushed as `58e548f` (tree `09e3153`); it is the current `origin/main`.
 - **CSS.** `WEB_CSS` in `src/app/web.ts` defines the light palette as CSS custom
   properties on `:root`, overrides the palette under
   `@media (prefers-color-scheme: dark)` with `color-scheme: dark`, and defines the
@@ -1089,6 +1091,55 @@ pushed.
   exit 0.
 - **Unverified.** No real-browser render check: light/dark appearance, 320px layout,
   focus visibility, and both locales are asserted from the stylesheet and DOM only.
+
+## Vertical slice R — queue-to-commit histogram and authorized per-project counts (candidate `4a8bde8`, tree `dd59cff`)
+
+- **Checkpoint.** Feature commit `18d53d4` (tree `5cb629b`) was replayed onto the UI
+  checkpoint `58e548f` (tree `09e3153`) as `4a8bde8` (tree `dd59cff`); the feature
+  commit applied cleanly, and its original message retains the original Base-SHA.
+  Independent security and contract audits PASS on the replayed candidate. Their P2
+  items are fixed here: member-without-grant and `failed`-row stats tests, a
+  concurrent same-key finalization-winner test, and state/doc corrections. This
+  squash checkpoint is based on `58e548f`; the commit trailer carries the final
+  Base-SHA and Tree-SHA. Not pushed.
+- **Queue-to-commit.** `MetricsRegistry.recordQueueToCommit` adds one label-free
+  sample per message finalized by this process: `committed_at − received_at`, i.e.
+  provisional creation (`seq = NULL`) to finalization (`seq` assigned), clamped at
+  zero. It uses the same fixed cumulative buckets (5/25/50/100/250/500/1000/2500/
+  5000/10000 ms + `+Inf`) as request latency and appears as `queue_to_commit_ms` in
+  the existing operator-only `GET /metrics` snapshot. Idempotent replays are not
+  samples: the service returns the delay only when that request performed the
+  finalization (`publish` reports `finalized`), and both the REST send handler and
+  the MCP send tool record it best-effort. Non-finite samples are ignored.
+- **Authorized per-project counts.** New
+  `GET /api/v1/projects/:projectId/stats` calls `getProjectStats`, which runs the
+  existing `project.read` service authorization (active membership, explicit
+  credential grant, scope). It returns `{ project_id, messages: { ready, pending,
+  expired }, unread }`: committed ready rows, provisional `seq IS NULL` pending rows,
+  committed expired tombstones, and committed ready/expired messages with no receipt
+  from the calling speaker. The SQL is project-scoped and parameterized and selects
+  no content. An unknown project and a project the caller is not a member of share the
+  same `404 NOT_FOUND`; an active member without a grant gets `FORBIDDEN`, matching
+  project detail. The route is read-only and has the fixed metrics label
+  `/api/v1/projects/:projectId/stats`.
+- **Docs.** `docs/api.md` (snapshot field and stats endpoint), `docs/architecture.md`,
+  `docs/security-operations.md` (operator snapshot and authorized counts),
+  `TODO.md` (observability sub-item closed), and `LESSIONS.md`.
+- **Tests.** New `tests/integration/project-stats.test.ts` (7 tests: empty state,
+  ready/pending/expired/per-speaker unread and project scoping, member-without-grant
+  `FORBIDDEN`, `failed`-row exclusion, foreign/unknown/unauthenticated non-enumeration
+  with uniform 404, no-content plus read-only methods, and fixed route label).
+  `tests/integration/metrics.test.ts` adds cumulative bucket-boundary and
+  empty-state/replay-exclusion/MCP-recording tests; the idempotent-replay service
+  test now asserts the replay omits the timing field, and a concurrent same-key send
+  test asserts exactly one response carries the queue sample with exactly one message.
+- **Verification.** Squashed tree: `npm ci` exit 0; `npm run check` exit 0 (secret
+  scan, history scan, typecheck, 391 tests: 390 pass, 1 skipped live-D1, 0 fail);
+  `npm run build` exit 0.
+- **Limitations.** The histogram is process-local and resets on restart; a
+  finalization performed by another process is not observed. The stats endpoint is a
+  current-row snapshot (not time-windowed), counts project rows so its cost grows with
+  project size, and is not wired into the dashboard UI. D1 remains unexecuted.
 
 ## Implemented and verified at this tree
 
@@ -1419,6 +1470,14 @@ Do not infer any of these from local MCP behavior or from another plan.
   row says "unset/empty disables" and omits whitespace-only; no test injects a throwing
   `MetricsRegistry.recordRequest` to prove the original response is preserved on the
   core and adapter recording paths. Metrics remain process-local and reset on restart.
+- Slice-R audit debt (non-blocking): the queue-to-commit histogram is process-local and
+  observes only finalizations performed by this process; it resets on restart and is
+  not aggregated across processes. Its samples use wall-clock `received_at`/
+  `committed_at`, so a server clock adjustment can produce a clamped zero or an
+  inflated sample. The authorized stats endpoint counts current rows (its cost grows
+  with project size), is not time-windowed, and is not wired into the dashboard UI.
+  D1 execution remains unverified; the stats SQL avoids SQLite-only functions but has
+  no D1 runtime test.
 - No attachments. Per-credential rate limiting is implemented but process-local; it is
   not distributed/global, is not shared across processes or Workers isolates, and
   per-IP limiting remains delegated to the reverse proxy. MCP session state is in-memory/process-local

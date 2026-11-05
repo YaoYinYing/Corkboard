@@ -296,8 +296,12 @@ test("same key with the same payload returns the same message", async (t) => {
   await addProject(fx, "proj_1", alice, [alice]);
 
   const first = await send(fx, alice.principal, "proj_1", "stable-key", "only once");
+  // The first send was a real finalization, so it carries the internal
+  // queue-to-commit sample; a replay must not report one.
+  const { queueToCommitMs, ...firstResult } = first;
+  assert.equal(typeof queueToCommitMs, "number");
   const second = await send(fx, alice.principal, "proj_1", "stable-key", "only once");
-  assert.deepEqual(second, first);
+  assert.deepEqual(second, firstResult);
   assert.equal((await fx.db.all("SELECT id FROM messages")).length, 1);
   assert.equal((await fx.db.all("SELECT id FROM body_objects")).length, 1);
   assert.equal((await fx.db.all("SELECT key FROM idempotency_keys")).length, 1);
@@ -490,6 +494,23 @@ test("20 sequential sends replay in cursor order", async (t) => {
     const body = await getMessageBody(fx.deps, alice.principal, "proj_1", sent[i] ?? "");
     assert.equal(body.text, `message ${i}`);
   }
+});
+
+test("concurrent same-key sends finalize once and report one queue sample", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+
+  const [first, second] = await Promise.all([
+    send(fx, alice.principal, "proj_1", "race-key", "only one finalization"),
+    send(fx, alice.principal, "proj_1", "race-key", "only one finalization"),
+  ]);
+  assert.equal(first.messageId, second.messageId);
+  const carriers = [first, second].filter(
+    (result) => result.queueToCommitMs !== undefined,
+  );
+  assert.equal(carriers.length, 1);
+  assert.equal((await fx.db.all("SELECT id FROM messages")).length, 1);
 });
 
 test("same-process concurrent sends yield unique contiguous sequences", async (t) => {
