@@ -441,7 +441,8 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   | `oauth.client.register` | `success` / `failure` | none | public `client_id` on success; `reason` on failure |
   | `oauth.consent` | `success` | account id | `client_id`, `project_id`, `speaker_id`, sorted `scopes`, `decision: "allow"` |
   | `oauth.consent` | `denied` | account id | `client_id`, `decision: "deny"` (no project, speaker, or scopes) |
-  | `oauth.token.issue` | `success` / `failure` | account id when known | `client_id`, internal `credential_id`, sorted `scopes`, `grant_type`; failures carry `reason` |
+  | `oauth.token.issue` | `success` | account id | `client_id`, internal `credential_id`, sorted `scopes`, `grant_type` |
+  | `oauth.token.issue` | `failure` | none | `reason`; `grant_type` only for the two supported literals (rate-limited failures omit it); `client_id` only when syntactically valid and an active registered client |
   | `oauth.refresh.reuse` | `detected` | none | `client_id`, internal `credential_id` |
   | `oauth.revoke` | `success` | none | `client_id`, internal `credential_id`, `token_type`; only when ownership is proven |
 
@@ -449,8 +450,12 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   elements, 2,048 characters for the whole document; an oversized document is
   dropped). Audit rows never contain tokens, authorization codes, session or CSRF
   values, passwords or hashes, email addresses, client names, redirect URIs, raw IPs,
-  request bodies, or absolute paths. Failure details are uniform constants, so the
-  audit stream exposes no additional account-existence signal.
+  request bodies, or absolute paths. Login failure details are uniform constants, and
+  consent denial records a fixed denial shape, so those events expose no additional
+  account-existence signal. Token failures carry a bounded `reason`; they add
+  `grant_type` only for the two supported literals and `client_id` only when it is
+  syntactically valid and an active registered client, so they expose no additional
+  account-existence signal either.
 - Audit writes are **fail-open**: `writeAudit` swallows insert errors, never logs the
   error or its parameters, and therefore cannot change a login, token, consent,
   revocation, or logout response or an authorization outcome. Authorization decisions
