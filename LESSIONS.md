@@ -17,7 +17,8 @@ actionable and prune stale ones.
   Blank means only Unicode `White_Space` and/or `Default_Ignorable_Code_Point`
   characters, so it covers ordinary whitespace plus NBSP, NEL, ideographic space,
   ZWSP, ZWJ/ZWNJ, word joiner, variation selectors, and BOM; any character outside
-  those categories makes the value non-blank (for example U+2800, controls, or a
+  those categories makes the value non-blank (for example U+2800, non-whitespace
+  controls, or a
   lone combining mark). The check runs in addition to, and after, the existing
   length checks, so an over-limit blank value still reports the length error first.
   Values are rejected, never trimmed or normalized; internal spaces and newlines
