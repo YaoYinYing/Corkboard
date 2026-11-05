@@ -3,15 +3,17 @@
 // identical to every other project-scoped path; the only difference is the
 // transport that renders the result.
 import { randomBase64url } from "../auth/credentials.ts";
-import { SCOPES } from "../domain/authz.ts";
+import { SCOPES, type Scope } from "../domain/authz.ts";
 import { AppError } from "../domain/errors.ts";
 import { validateProjectSummary, validateProjectTitle } from "../domain/validation.ts";
+import { writeAudit } from "./audit.ts";
 import {
   authorizeProject,
   parseScopeJson,
   type Principal,
   type ServiceDeps,
 } from "./auth.ts";
+import type { SqlTransaction } from "../storage/db.ts";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -379,4 +381,258 @@ export async function listProjects(
     })),
     next_cursor: nextCursor,
   };
+}
+
+// Dashboard membership editor. Every function first requires `project.edit`
+// through the same `authorizeProject` decision as project edit, so a foreign,
+// unknown, or capability-insufficient project is the uniform NOT_FOUND. The
+// write functions re-read that authorization inside their transaction, so a
+// membership removed or downgraded after the request check aborts the write.
+const MAX_MEMBER_SPEAKER_ID_CHARS = 128;
+
+export interface ProjectMember {
+  speakerId: string;
+  displayName: string | null;
+  capabilities: Scope[];
+  joinedAt: string | null;
+}
+
+export interface AddProjectMemberInput {
+  speakerId: string;
+  capabilities: readonly string[];
+}
+
+function normalizeMemberSpeakerId(value: string): string {
+  if (value === "" || value.length > MAX_MEMBER_SPEAKER_ID_CHARS) {
+    throw new AppError("VALIDATION_ERROR");
+  }
+  return value;
+}
+
+// An explicit, non-empty subset of the seven identifiers. Duplicates collapse
+// to one entry in canonical order; an unknown value rejects the whole request.
+function normalizeMemberCapabilities(values: readonly string[]): Scope[] {
+  const requested = new Set<Scope>();
+  for (const value of values) {
+    if (typeof value !== "string" || !(SCOPES as readonly string[]).includes(value)) {
+      throw new AppError("VALIDATION_ERROR");
+    }
+    requested.add(value as Scope);
+  }
+  if (requested.size === 0) throw new AppError("VALIDATION_ERROR");
+  return SCOPES.filter((scope) => requested.has(scope));
+}
+
+async function requireEditorMembershipInTransaction(
+  tx: SqlTransaction,
+  principal: Principal,
+  projectId: string,
+): Promise<void> {
+  const membership = await tx.first<{ capabilities: string }>(
+    `SELECT m.capabilities
+       FROM project_memberships m
+       JOIN projects p ON p.id = m.project_id
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
+        AND p.status = 'active' AND s.status = 'active'
+        AND s.owner_account_id = ? AND a.status = 'active'`,
+    [projectId, principal.speakerId, principal.accountId],
+  );
+  if (membership === undefined) throw new AppError("NOT_FOUND");
+  if (!parseScopeJson(membership.capabilities).has("project.edit")) {
+    throw new AppError("NOT_FOUND");
+  }
+}
+
+export async function listProjectMembers(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+): Promise<ProjectMember[]> {
+  await authorizeProject(deps, principal, projectId, "project.edit");
+  const rows = await deps.db.all<{
+    speaker_id: string;
+    display_name: string | null;
+    capabilities: string;
+    joined_at: string | null;
+  }>(
+    `SELECT m.speaker_id, s.display_name, m.capabilities, m.joined_at
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+      WHERE m.project_id = ? AND m.removed_at IS NULL
+      ORDER BY m.joined_at ASC, m.speaker_id ASC`,
+    [projectId],
+  );
+  return rows.map((row) => ({
+    speakerId: row.speaker_id,
+    displayName: row.display_name,
+    capabilities: SCOPES.filter((scope) => parseScopeJson(row.capabilities).has(scope)),
+    joinedAt: row.joined_at,
+  }));
+}
+
+// Only an active speaker owned by the signed-in account may be added. A
+// foreign, unknown, inactive, or other-account speaker is the same
+// VALIDATION_ERROR, so the add form cannot enumerate accounts or speakers.
+// Adding writes only the membership: no credential, scope grant, or implicit
+// capability is created. An active duplicate is CONFLICT; a previously
+// removed membership is reactivated with the submitted capability set and,
+// because removal deleted its grants, no old credential becomes usable again.
+export async function addProjectMember(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  input: AddProjectMemberInput,
+): Promise<void> {
+  await authorizeProject(deps, principal, projectId, "project.edit");
+  const speakerId = normalizeMemberSpeakerId(input.speakerId);
+  const capabilities = normalizeMemberCapabilities(input.capabilities);
+
+  const owned = await deps.db.first<{ id: string }>(
+    `SELECT s.id
+       FROM speakers s
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE s.id = ? AND s.owner_account_id = ?
+        AND s.status = 'active' AND a.status = 'active'`,
+    [speakerId, principal.accountId],
+  );
+  if (owned === undefined) throw new AppError("VALIDATION_ERROR");
+
+  const now = deps.now().toISOString();
+  let reactivated = false;
+  await deps.db.transaction(async (tx) => {
+    await requireEditorMembershipInTransaction(tx, principal, projectId);
+
+    const rechecked = await tx.first<{ id: string }>(
+      `SELECT s.id
+         FROM speakers s
+         JOIN accounts a ON a.id = s.owner_account_id
+        WHERE s.id = ? AND s.owner_account_id = ?
+          AND s.status = 'active' AND a.status = 'active'`,
+      [speakerId, principal.accountId],
+    );
+    if (rechecked === undefined) throw new AppError("VALIDATION_ERROR");
+
+    const existing = await tx.first<{ removed_at: string | null }>(
+      "SELECT removed_at FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
+      [projectId, speakerId],
+    );
+    if (existing !== undefined && existing.removed_at === null) {
+      throw new AppError("CONFLICT", "membership is already active");
+    }
+    if (existing === undefined) {
+      await tx.run(
+        `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+         VALUES (?, ?, ?, ?)`,
+        [projectId, speakerId, JSON.stringify(capabilities), now],
+      );
+    } else {
+      reactivated = true;
+      await tx.run(
+        `UPDATE project_memberships
+            SET capabilities = ?, joined_at = ?, removed_at = NULL
+          WHERE project_id = ? AND speaker_id = ?`,
+        [JSON.stringify(capabilities), now, projectId, speakerId],
+      );
+    }
+  });
+
+  await writeAudit(deps, {
+    operation: "membership.grant",
+    outcome: "success",
+    actorAccountId: principal.accountId,
+    actorSpeakerId: speakerId,
+    projectId,
+    detail: { capabilities, reactivated },
+  });
+}
+
+export interface RemoveProjectMemberResult {
+  grantsDeleted: number;
+}
+
+// Soft-deletes the membership and, mirroring `remove-member` in the CLI,
+// deletes every credential grant that speaker held for this project. The
+// exact last-owner rule: an owner membership is a non-removed membership whose
+// speaker is owned by `projects.owner_account_id`; removing the last remaining
+// one is refused so the owning account always keeps a membership it can
+// manage the project through. Speaker status does not affect the count.
+export async function removeProjectMember(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  speakerId: string,
+): Promise<RemoveProjectMemberResult> {
+  await authorizeProject(deps, principal, projectId, "project.edit");
+  const targetSpeakerId = normalizeMemberSpeakerId(speakerId);
+
+  const now = deps.now().toISOString();
+  let grantsDeleted = 0;
+  await deps.db.transaction(async (tx) => {
+    await requireEditorMembershipInTransaction(tx, principal, projectId);
+
+    const project = await tx.first<{ owner_account_id: string }>(
+      "SELECT owner_account_id FROM projects WHERE id = ? AND status = 'active'",
+      [projectId],
+    );
+    if (project === undefined) throw new AppError("NOT_FOUND");
+
+    const membership = await tx.first<{ speaker_owner_account_id: string | null }>(
+      `SELECT s.owner_account_id AS speaker_owner_account_id
+         FROM project_memberships m
+         JOIN speakers s ON s.id = m.speaker_id
+        WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL`,
+      [projectId, targetSpeakerId],
+    );
+    if (membership === undefined) throw new AppError("NOT_FOUND");
+
+    if (membership.speaker_owner_account_id === project.owner_account_id) {
+      const owners = await tx.first<{ count: number | null }>(
+        `SELECT COUNT(*) AS count
+           FROM project_memberships m
+           JOIN speakers s ON s.id = m.speaker_id
+          WHERE m.project_id = ? AND m.removed_at IS NULL
+            AND s.owner_account_id = ?`,
+        [projectId, project.owner_account_id],
+      );
+      if (Number(owners?.count ?? 0) <= 1) {
+        throw new AppError("CONFLICT", "cannot remove the last owner membership");
+      }
+    }
+
+    const removed = await tx.run(
+      `UPDATE project_memberships SET removed_at = ?
+        WHERE project_id = ? AND speaker_id = ? AND removed_at IS NULL`,
+      [now, projectId, targetSpeakerId],
+    );
+    if (removed.changes === 0) throw new AppError("NOT_FOUND");
+
+    const grants = await tx.run(
+      `DELETE FROM credential_project_grants
+        WHERE project_id = ?
+          AND credential_id IN (SELECT id FROM credentials WHERE speaker_id = ?)`,
+      [projectId, targetSpeakerId],
+    );
+    grantsDeleted = grants.changes;
+  });
+
+  await writeAudit(deps, {
+    operation: "membership.remove",
+    outcome: "success",
+    actorAccountId: principal.accountId,
+    actorSpeakerId: targetSpeakerId,
+    projectId,
+  });
+  if (grantsDeleted > 0) {
+    await writeAudit(deps, {
+      operation: "credential.project.revoke",
+      outcome: "success",
+      actorAccountId: principal.accountId,
+      actorSpeakerId: targetSpeakerId,
+      projectId,
+      detail: { projects: [projectId], source: "membership.remove" },
+    });
+  }
+  return { grantsDeleted };
 }

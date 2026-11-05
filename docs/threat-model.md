@@ -222,6 +222,24 @@ title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
   rotation/revocation UI; leaked credentials are revoked through the CLI. The route
   remains a cookie-authenticated POST and therefore needs the same CSRF defense; the
   request logger records only the fixed path, never the token.
+- **Membership editor.** `GET/POST /projects/:projectId/members` and
+  `POST /projects/:projectId/members/:speakerId/remove` require `project.edit` through
+  the same session-viewer decision as project edit; an unknown, foreign, non-member, or
+  capability-insufficient project is the uniform `404`, and the viewer is resolved
+  before any POST body is parsed. Add accepts only an **active speaker owned by the
+  signed-in account**; a foreign, unknown, inactive, or other-account speaker is the
+  same `400` form error with no write, so the form does not enumerate accounts or
+  speakers. The capability set must be an explicit, non-empty subset of the seven
+  identifiers; an unknown value is rejected, duplicates collapse, and an active
+  duplicate is a conflict that changes nothing. A removed membership is reactivated
+  with the submitted capabilities but restores no grants. Removal soft-deletes the
+  membership and, mirroring the CLI, deletes that speaker's `credential_project_grants`
+  for the project, so re-adding cannot revive an old credential. It refuses to remove
+  the last non-removed membership whose speaker is owned by `projects.owner_account_id`
+  (speaker status does not affect the count), so the owning account always keeps a
+  manageable membership. Both writes run in one transaction that re-reads the caller's
+  `project.edit` membership under active checks; the update and grant deletion roll back
+  together. Membership management for other accounts' speakers remains CLI-only.
 - **Body reveal and integrity.** The body route calls the existing verified decrypt
   path, re-authorizes after decryption, and returns a generic error page on
   failure. It never returns ciphertext, partial plaintext, or an integrity error

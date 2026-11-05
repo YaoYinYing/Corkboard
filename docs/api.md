@@ -200,6 +200,9 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`, `type`, `sender`, `unread`, and `q` use the same identifiers, bounds, and filter semantics as the REST message list below. A blank or whitespace-only value is treated as absent (blank text and number inputs reach the parser as empty values); only non-blank values are validated and can return the HTML `400` page. |
 | `/projects/:projectId` | `POST` | Form-encoded title/summary update; requires `project.edit` plus the same CSRF check. Unknown, foreign, and non-owner projects are a uniform `404`. `303` to the timeline. |
 | `/projects/:projectId/edit` | `GET` | Edit form; requires `project.edit` and is otherwise the same uniform `404`. |
+| `/projects/:projectId/members` | `GET` | Active membership list and add form; requires `project.edit` and is otherwise the same uniform `404`. |
+| `/projects/:projectId/members` | `POST` | Form-encoded add of an active speaker owned by the session account with an explicit capability set; requires `project.edit` plus the session CSRF check. `303` to the list. |
+| `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; soft-deletes the membership and its credential grants. Requires `project.edit` plus the session CSRF check. `303` to the list. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
 | `/speakers` | `GET` | Speakers owned by the session account only, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active owned speaker. |
@@ -243,8 +246,20 @@ issue writes one credential and only the selected project grants in one transact
 re-reading each membership under active checks before the writes, and audits up to 32
 project IDs plus the true `project_count` and scopes, without the token. The raw token appears exactly once in the `200` `no-store` POST response; it is
 not in a redirect, URL, cookie, database column, or log. There is no rotation,
-revocation, grant-editing, or expiry UI; those remain CLI-only. No message send,
-expiry, membership editor, or admin action exists.
+revocation, grant-editing, or expiry UI; those remain CLI-only. The membership
+editor is `GET`/`POST /projects/:projectId/members` plus
+`POST /projects/:projectId/members/:speakerId/remove`. It requires `project.edit`
+(the same uniform `404` for unknown, foreign, non-member, and capability-insufficient
+projects, resolved before the body is parsed). The add form accepts one active speaker
+owned by the session account and an explicit non-empty subset of the seven
+capabilities; foreign, unknown, inactive, and other-account speakers are one `400`
+with no write, and an active duplicate is a `400` conflict without changing
+capabilities. A removed membership is reactivated with the submitted capabilities.
+Removal soft-deletes the row, deletes that speaker's credential grants for the
+project (so re-adding cannot revive an old credential), and refuses the last
+non-removed membership owned by the project owner account. Both writes are one
+transaction with an in-transaction `project.edit` re-check. No message send, expiry,
+credential rotation/revocation, or admin action exists.
 
 ## Endpoints
 
@@ -743,10 +758,12 @@ only and are separate from the per-credential API bucket.
 
 ## Planned, not implemented
 
-HTTP endpoints for membership management and speaker/credential management are
-deferred (the CLI provides bootstrap, project-create, speaker-create, membership, and
-credential commands in slice A). Project create/edit is implemented only as the
-HTML dashboard routes above; there is no `/api/v1` create/edit endpoint. Also
+HTTP endpoints under `/api/v1` for membership management and speaker/credential
+management are deferred (the CLI provides bootstrap, project-create, speaker-create,
+membership, and credential commands in slice A; the dashboard provides the HTML
+membership editor and credential issuance described above). Project create/edit is
+implemented only as the HTML dashboard routes above; there is no `/api/v1` create/edit
+endpoint. Also
 deferred: the ChatGPT Web plugin installation/linking experience,
 attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
 metadata), account registration/invite provisioning, email verification, password
@@ -754,8 +771,10 @@ reset, and the remaining dashboard write/admin actions. Human sign-in/session
 read/sign-out is implemented as described above; the dashboard (login, project list,
 project create/edit, timeline with metadata filters, summary-only search, and
 bounded cursor replay, body reveal, English/Simplified Chinese) is implemented per
-[`web-ui.md`](./web-ui.md); speaker/credential management, membership editing,
-project deletion/status changes, and message/expiry writes remain deferred. The
+[`web-ui.md`](./web-ui.md); the speaker directory, credential issuance, and the
+per-project HTML membership editor are implemented; credential
+rotation/revocation and grant editing, project deletion/status changes, and
+message/expiry writes remain deferred or CLI-only. The
 bearer-authenticated `/mcp` surface is implemented
 (see above and `mcp.md`);
 the OAuth 2.1 authorization-server core is implemented (see above and `oauth.md`), but

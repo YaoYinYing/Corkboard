@@ -8,7 +8,7 @@ import { SCOPES } from "../domain/authz.ts";
 import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 import { AppError, RateLimitError } from "../domain/errors.ts";
 import { normalizeEmail, validateLoginPassword } from "../domain/validation.ts";
-import type { ServiceDeps } from "../service/auth.ts";
+import type { Principal, ServiceDeps } from "../service/auth.ts";
 import {
   resolveSessionViewer,
   sessionAccountPrincipal,
@@ -23,10 +23,14 @@ import {
   type ReadReceipt,
 } from "../service/messages.ts";
 import {
+  addProjectMember,
   createProject,
   getProjectForEdit,
+  listProjectMembers,
   listProjects,
+  removeProjectMember,
   updateProject,
+  type ProjectMember,
 } from "../service/projects.ts";
 import {
   getOwnedSpeakerForKey,
@@ -165,6 +169,19 @@ const EN = {
   credentialProjectsLabel: "Granted projects",
   credentialScopesLabel: "Scopes",
   statusInactive: "Inactive",
+  membersTitle: "Members",
+  membersEmpty: "This project has no active members.",
+  membersCapabilitiesLabel: "Capabilities",
+  membersJoinedLabel: "Joined",
+  addMemberTitle: "Add member",
+  addMemberSpeakerLabel: "Speaker ID",
+  addMemberAction: "Add member",
+  addMemberHint:
+    "Only an active speaker owned by your account can be added. Select at least one capability. Adding a member creates no credential or credential grant.",
+  addMemberError: "Check the speaker ID and capabilities and try again.",
+  memberDuplicate: "That speaker is already an active member.",
+  memberLastOwner: "The last owner membership cannot be removed.",
+  removeMemberAction: "Remove",
 } as const;
 
 type MessageKey = keyof typeof EN;
@@ -255,6 +272,19 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   credentialProjectsLabel: "已授权项目",
   credentialScopesLabel: "权限范围",
   statusInactive: "未激活",
+  membersTitle: "成员",
+  membersEmpty: "此项目没有活跃成员。",
+  membersCapabilitiesLabel: "权限",
+  membersJoinedLabel: "加入时间",
+  addMemberTitle: "添加成员",
+  addMemberSpeakerLabel: "说话者 ID",
+  addMemberAction: "添加成员",
+  addMemberHint:
+    "只能添加由你的账户拥有且处于活跃状态的说话者。请至少选择一项权限。添加成员不会创建凭证或凭证授权。",
+  addMemberError: "请检查说话者 ID 和权限后重试。",
+  memberDuplicate: "该说话者已经是活跃成员。",
+  memberLastOwner: "无法移除最后一个所有者成员。",
+  removeMemberAction: "移除",
 };
 
 const CATALOGS: Readonly<Record<Locale, Readonly<Record<MessageKey, string>>>> = {
@@ -1027,6 +1057,210 @@ async function handleProjectUpdate(
   }
 }
 
+interface MembersPageState {
+  errorKey?: MessageKey;
+  speakerIdValue?: string;
+  selectedScopes?: ReadonlySet<string>;
+}
+
+function renderMembersPage(
+  locale: Locale,
+  url: URL,
+  projectId: string,
+  members: readonly ProjectMember[],
+  csrf: string,
+  status: number,
+  state: MembersPageState = {},
+): Response {
+  const error =
+    state.errorKey === undefined
+      ? ""
+      : `<p class="error" role="alert">${escapeHtml(t(locale, state.errorKey))}</p>`;
+  const list =
+    members.length === 0
+      ? `<p class="empty">${escapeHtml(t(locale, "membersEmpty"))}</p>`
+      : `<ul class="project-list">
+${members
+  .map((member, index) => {
+    const nameId = `member-${index}-name`;
+    const capabilities =
+      member.capabilities.length === 0
+        ? escapeHtml(t(locale, "speakerNoScopes"))
+        : member.capabilities.map((scope) => `<code>${escapeHtml(scope)}</code>`).join(" ");
+    const joined =
+      member.joinedAt === null
+        ? escapeHtml(t(locale, "noneLabel"))
+        : `<time datetime="${escapeHtml(member.joinedAt)}">${escapeHtml(formatCommittedAt(locale, member.joinedAt))}</time>`;
+    return `<li><article aria-labelledby="${nameId}">
+<h2 id="${nameId}">${escapeHtml(displaySpeakerName({ id: member.speakerId, display_name: member.displayName }))}</h2>
+<dl>
+<dt>${escapeHtml(t(locale, "speakerNameLabel"))}</dt><dd><code>${escapeHtml(member.speakerId)}</code></dd>
+<dt>${escapeHtml(t(locale, "membersCapabilitiesLabel"))}</dt><dd>${capabilities}</dd>
+<dt>${escapeHtml(t(locale, "membersJoinedLabel"))}</dt><dd>${joined}</dd>
+</dl>
+<form method="post" action="/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(member.speakerId)}/remove${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(csrf)}">
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, "removeMemberAction"))}</button></p>
+</form>
+</article></li>`;
+  })
+  .join("\n")}
+</ul>`;
+  const selected = state.selectedScopes ?? new Set<string>();
+  const scopeBoxes = SCOPES.map(
+    (scope) =>
+      `<label><input type="checkbox" name="scope" value="${escapeHtml(scope)}"${selected.has(scope) ? " checked" : ""}> <code>${escapeHtml(scope)}</code></label>`,
+  ).join("\n");
+  const content = `<p><a href="/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}">${escapeHtml(t(locale, "backToTimeline"))}</a></p>
+<h1>${escapeHtml(t(locale, "membersTitle"))}</h1>
+${error}${list}
+<h2>${escapeHtml(t(locale, "addMemberTitle"))}</h2>
+<form class="project-form" method="post" action="/projects/${encodeURIComponent(projectId)}/members${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(csrf)}">
+<p class="filter-field"><label for="member-speaker-id">${escapeHtml(t(locale, "addMemberSpeakerLabel"))}</label>
+<input id="member-speaker-id" name="speaker_id" type="text" maxlength="128" required value="${escapeHtml(state.speakerIdValue ?? "")}"></p>
+<fieldset><legend>${escapeHtml(t(locale, "membersCapabilitiesLabel"))}</legend>
+${scopeBoxes}</fieldset>
+<p class="hint">${escapeHtml(t(locale, "addMemberHint"))}</p>
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, "addMemberAction"))}</button></p>
+</form>`;
+  return htmlResponse(
+    status,
+    renderPage(locale, url, t(locale, "membersTitle"), content),
+  );
+}
+
+async function membersPageResponse(
+  deps: ServiceDeps,
+  viewer: Principal,
+  locale: Locale,
+  url: URL,
+  request: Request,
+  projectId: string,
+  status: number,
+  state: MembersPageState = {},
+): Promise<Response> {
+  const members = await listProjectMembers(deps, viewer, projectId);
+  return renderMembersPage(
+    locale,
+    url,
+    projectId,
+    members,
+    cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+    status,
+    state,
+  );
+}
+
+async function handleMembers(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  return membersPageResponse(deps, viewer, locale, url, request, projectId, 200);
+}
+
+async function handleMemberAdd(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  // Authorize and resolve the viewer before parsing the body, so a foreign or
+  // unreadable project is the uniform 404 regardless of payload shape.
+  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  const form = await readForm(request);
+  const speakerIds = form.getAll("speaker_id");
+  const scopes = form.getAll("scope");
+  const state: MembersPageState = {
+    speakerIdValue: speakerIds.length === 1 ? (speakerIds[0] ?? "") : "",
+    selectedScopes: new Set(scopes),
+  };
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+      ...state,
+      errorKey: "formExpired",
+    });
+  }
+  if (speakerIds.length !== 1) {
+    return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+      ...state,
+      errorKey: "addMemberError",
+    });
+  }
+  try {
+    await addProjectMember(deps, viewer, projectId, {
+      speakerId: speakerIds[0] ?? "",
+      capabilities: scopes,
+    });
+    return redirect(
+      303,
+      `/projects/${encodeURIComponent(projectId)}/members${localeQuery(locale)}`,
+    );
+  } catch (error) {
+    if (error instanceof AppError && error.code === "CONFLICT") {
+      return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+        ...state,
+        errorKey: "memberDuplicate",
+      });
+    }
+    if (error instanceof AppError && error.code === "VALIDATION_ERROR") {
+      return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+        ...state,
+        errorKey: "addMemberError",
+      });
+    }
+    throw error;
+  }
+}
+
+async function handleMemberRemove(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+  speakerId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  const form = await readForm(request);
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+      errorKey: "formExpired",
+    });
+  }
+  try {
+    await removeProjectMember(deps, viewer, projectId, speakerId);
+    return redirect(
+      303,
+      `/projects/${encodeURIComponent(projectId)}/members${localeQuery(locale)}`,
+    );
+  } catch (error) {
+    if (error instanceof AppError && error.code === "CONFLICT") {
+      return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+        errorKey: "memberLastOwner",
+      });
+    }
+    throw error;
+  }
+}
+
 function displaySpeakerName(speaker: {
   id: string;
   display_name: string | null;
@@ -1557,6 +1791,8 @@ function webError(locale: Locale, url: URL, error: unknown): Response {
         return renderError(locale, url, 410, "bodyExpired", "bodyExpiredBody");
       case "VALIDATION_ERROR":
         return renderError(locale, url, 400, "invalidRequest", "invalidRequestBody");
+      case "CONFLICT":
+        return renderError(locale, url, 409, "invalidRequest", "invalidRequestBody");
       case "REQUEST_TOO_LARGE":
         return renderError(locale, url, 413, "invalidRequest", "invalidRequestBody");
       case "UNAVAILABLE":
@@ -1589,6 +1825,21 @@ export function isWebPath(segments: readonly string[]): boolean {
     segments.length === 3 &&
     segments[0] === "projects" &&
     segments[2] === "edit"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 3 &&
+    segments[0] === "projects" &&
+    segments[2] === "members"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 5 &&
+    segments[0] === "projects" &&
+    segments[2] === "members" &&
+    segments[4] === "remove"
   ) {
     return true;
   }
@@ -1666,6 +1917,35 @@ export async function handleWebRoute(
     ) {
       if (method !== "GET") return methodNotAllowed(locale, url, "GET");
       return await handleEditProject(deps, request, url, locale, segments[1] ?? "");
+    }
+    if (
+      segments.length === 3 &&
+      segments[0] === "projects" &&
+      segments[2] === "members"
+    ) {
+      if (method === "GET") {
+        return await handleMembers(deps, request, url, locale, segments[1] ?? "");
+      }
+      if (method === "POST") {
+        return await handleMemberAdd(deps, request, url, locale, segments[1] ?? "");
+      }
+      return methodNotAllowed(locale, url, "GET, POST");
+    }
+    if (
+      segments.length === 5 &&
+      segments[0] === "projects" &&
+      segments[2] === "members" &&
+      segments[4] === "remove"
+    ) {
+      if (method !== "POST") return methodNotAllowed(locale, url, "POST");
+      return await handleMemberRemove(
+        deps,
+        request,
+        url,
+        locale,
+        segments[1] ?? "",
+        segments[3] ?? "",
+      );
     }
     if (
       segments.length === 5 &&

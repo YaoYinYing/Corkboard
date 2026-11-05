@@ -176,6 +176,15 @@ written) is not prevented; no stronger guarantee is claimed. See
 - `remove-member` deletes that speaker's grants for the project. It writes the
   `credential.project.revoke` audit row only when at least one grant was actually
   deleted; `membership.remove` is always audited.
+- The dashboard membership editor applies the same grant-deletion rule, but an
+  **active** duplicate is rejected (`400`, `CONFLICT` internally) instead of a no-op.
+  It requires an explicit, non-empty subset of the seven capabilities and may add only
+  an active speaker owned by the signed-in account; a foreign, unknown, inactive, or
+  other-account speaker is the same `400` form error and writes nothing. It refuses to
+  remove the last non-removed membership whose speaker is owned by the project's
+  `owner_account_id` (speaker status does not affect the count), so the owning account
+  always retains a membership it can manage the project through. Membership
+  management for other accounts' speakers remains CLI-only.
 
 ## Human account sessions
 
@@ -208,7 +217,10 @@ written) is not prevented; no stronger guarantee is claimed. See
   active project without its owner membership. It cannot
   call the `/api/v1` data routes, including send, mark read, and expiry, or call MCP,
   and it is not accepted as a bearer token. Speaker write operations still require a
-  separately issued scoped credential.
+  separately issued scoped credential. A session whose viewer holds `project.edit`
+  may also use the dashboard membership editor to add an active speaker owned by the
+  same account and to remove memberships, subject to the last-owner rule and the same
+  CSRF/body limits as the other HTML forms.
 - **Lifetime and revocation.** A session expires after **12 hours absolute** and after
   **30 minutes idle** (refreshed lazily by accepted session-using requests:
   `GET /api/v1/session` and authenticated dashboard requests, including page GETs and
@@ -283,10 +295,14 @@ or as authority to act as a speaker.
   /projects/:projectId` updates title/summary after a `project.edit` authorization;
   `POST /speakers/:speakerId/key` inserts one credential plus one grant per
   explicitly selected project after the session-account owner check and the same
-  in-transaction membership/scope re-check. The two form families require the
+  in-transaction membership/scope re-check; `POST /projects/:projectId/members`
+  inserts or reactivates one membership after `project.edit` and the same
+  in-transaction re-check, and `POST /projects/:projectId/members/:speakerId/remove`
+  soft-deletes the membership and deletes that speaker's grants for the project in
+  one transaction. The two form families require the
   session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
   `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message send/expiry,
-  receipts, membership editing, credential rotation/revocation, registration,
+  receipts, credential rotation/revocation and grant editing, registration,
   recovery, and administrative capability remain absent.
 
 ## OAuth 2.1 authorization server
@@ -840,9 +856,10 @@ operator snapshot or to any unauthenticated aggregate.
   implemented (dynamic public clients, PKCE, rotating refresh tokens, revocation), but
   the ChatGPT Web plugin experience is not implemented or verified. Slice L
   provides the dashboard (project list, timeline, explicit body reveal), slice T
-  adds project create/edit, and slice X adds the account-scoped speaker directory
-  and one-time project-scoped credential issuance on the same session auth. Message
-  send, expiry, membership editing, and credential rotation/revocation remain
+  adds project create/edit, slice X adds the account-scoped speaker directory
+  and one-time project-scoped credential issuance on the same session auth, and the
+  membership-editor slice adds the per-project member list, add, and remove routes.
+  Message send, expiry, credential rotation/revocation, and grant editing remain
   CLI/API-only. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not
   perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.

@@ -1,19 +1,20 @@
 # Human web dashboard
 
 **Status: implemented locally for Node.js + SQLite (vertical slices L and M plus
-dashboard project create/edit and speaker credential issuance, with the approved
-design system tokens applied).**
+dashboard project create/edit, speaker credential issuance, and the per-project
+membership editor, with the approved design system tokens applied).**
 The dashboard is server-rendered HTML for a signed-in **account**. Message reads,
 filters, replay, and body reveal remain read-only. The writes are project create,
-project title/summary edit, and issuing one speaker credential with explicit project
-grants. There is no message send, expiry, membership editor, credential
-rotation/revocation, moderation, or administrative action. It is not a SPA and ships
+project title/summary edit, issuing one speaker credential with explicit project
+grants, and adding/removing a project membership with an explicit capability set.
+There is no message send, expiry, credential rotation/revocation or grant editing,
+moderation, or administrative action. It is not a SPA and ships
 no frontend framework, build step, or client script. Slice M adds metadata filters, a
 summary-only search, bounded cursor replay, and a CSS-only responsive layout.
 
 Cloudflare Workers/D1 parity, account registration/recovery, and the remaining
-write/admin surfaces (messages, membership, credential rotation/revocation, expiry)
-remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
+write/admin surfaces (messages, credential rotation/revocation, expiry) remain
+unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 
 ## Routes
 
@@ -27,6 +28,9 @@ remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/projects/:projectId` | `GET` | Message timeline in ascending server `seq`, with filters, summary search, and cursor replay. |
 | `/projects/:projectId` | `POST` | Form-encoded project edit; redirects after POST. |
 | `/projects/:projectId/edit` | `GET` | Edit form for an owner. |
+| `/projects/:projectId/members` | `GET` | Active membership list and add form; requires `project.edit`. |
+| `/projects/:projectId/members` | `POST` | Form-encoded add of an active owned speaker with an explicit capability set; `303` to the list. |
+| `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; deletes that speaker's grants for the project; `303` to the list. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
 | `/speakers` | `GET` | Speakers owned by the signed-in account, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active speaker owned by the account. |
@@ -277,6 +281,59 @@ as SHA-256 digests in constant time, plus the `Sec-Fetch-Site`/`Origin` checks. 
 form body is bounded to 64 KiB. Session authentication has already run and may refresh
 `sessions.last_seen_at`; the authorization and CSRF checks come before any credential,
 grant, or audit write.
+
+## Membership editor
+
+`GET /projects/:projectId/members` lists the project's **active** (non-removed)
+memberships, ordered by `joined_at`, then speaker ID. Each entry shows the speaker ID,
+display name (or the ID when the name is empty), the membership's capability codes in
+canonical order, the joined date, and a remove form. The page also carries the add form.
+Access requires `project.edit` through the same `resolveSessionViewer` decision as
+project edit: an unknown, foreign, inactive, non-member, or capability-insufficient
+project is the uniform `404` page, and the route resolves the viewer **before** parsing
+a POST body so a malformed payload cannot probe project existence.
+
+**Add.** `POST /projects/:projectId/members` requires one `speaker_id` field and an
+explicit, non-empty `scope` set. Only an **active speaker owned by the signed-in
+account** (with an active owning account) may be added. A foreign, unknown, inactive,
+or other-account speaker is the same HTML `400` form error and writes nothing, so the
+form is not a cross-account speaker oracle. Every submitted capability must be one of
+the seven identifiers (`project.read`, `message.read`, `message.send`,
+`receipt.write`, `project.edit`, `member.read`, `member.manage`); duplicate values
+collapse and an unknown value rejects the whole request. An active duplicate is
+rejected as an already-active member without changing its capabilities. A previously
+removed membership is **reactivated** with the submitted capability set and a fresh
+`joined_at`; its old credential grants are not restored. Adding writes only the
+membership: no credential, credential grant, or implicit capability is created, and a
+membership still grants no credential. The one `membership.grant` audit event records
+the actor account, target speaker, project, capabilities, and whether the row was
+reactivated.
+
+**Remove.** `POST /projects/:projectId/members/:speakerId/remove` soft-deletes the
+membership (`removed_at`) and, mirroring the CLI `remove-member`, deletes every
+`credential_project_grants` row that any credential of that speaker held for the
+project. A removed credential therefore cannot revive if the speaker is added again;
+it needs a new explicit grant. The exact last-owner rule: an **owner membership** is a
+non-removed membership whose speaker is owned by `projects.owner_account_id`; removing
+the last remaining owner membership is refused with the HTML `400` "last owner
+membership" error so the owning account always keeps a membership it can manage the
+project through. Speaker status does not affect that count. The `membership.remove`
+audit row is always written; `credential.project.revoke` is written only when at least
+one grant row was actually deleted.
+
+**Transactions and CSRF.** Both writes use one `SqlDatabase.transaction` and re-read
+the caller's `project.edit` membership under active project/speaker/account checks
+inside it, so a membership removed or downgraded after the request check aborts the
+write. Remove re-reads the target membership and the owner count inside the same
+transaction; both the membership update and grant deletion roll back together on
+failure. Both routes use the session double-submit (`corkboard_csrf` cookie plus exactly
+one hidden `csrf_token`), the `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap.
+Forms preserve `?lang=zh`; the page renders English or Simplified Chinese.
+
+Membership management for **other accounts' speakers**, invitation/acceptance, bulk
+editing, capability presets, and cross-account provisioning remain CLI-only
+(`add-member`, `remove-member`). Credential issuance is available here; credential
+rotation, revocation, and per-credential grant editing remain CLI-only.
 
 ## Authorization model
 
