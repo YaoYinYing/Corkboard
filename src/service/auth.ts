@@ -9,7 +9,7 @@ import {
 import { AppError } from "../domain/errors.ts";
 import type { KeyProvider } from "../crypto/keys.ts";
 import type { BlobStore } from "../storage/blobs.ts";
-import type { SqlDatabase } from "../storage/db.ts";
+import type { SqlDatabase, SqlTransaction } from "../storage/db.ts";
 
 export interface ServiceDeps {
   db: SqlDatabase;
@@ -296,6 +296,135 @@ export async function authorizeProject(
 
   authorizeProjectAccess({ isMember: true, membershipRemovedAt: null, rights, scope });
   return { rights, capabilities };
+}
+
+export interface SessionSendSpeaker {
+  speakerId: string;
+  displayName: string | null;
+}
+
+// The single session-send authority. A session may send only as a speaker
+// owned by its own account whose active membership on the active project
+// carries `message.send`. It is deliberately separate from `authorizeProject`:
+// that function's session branch never authorizes a message write, and adding
+// one there would widen every other session route. Every failure is the same
+// NOT_FOUND so a foreign project or speaker is indistinguishable from a
+// missing one.
+async function sessionSendMembership(
+  db: Pick<SqlTransaction, "first">,
+  projectId: string,
+  accountId: string,
+  speakerId: string,
+): Promise<{ display_name: string | null } | undefined> {
+  const row = await db.first<{ display_name: string | null; capabilities: string }>(
+    `SELECT s.display_name, m.capabilities
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+       JOIN projects p ON p.id = m.project_id
+      WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
+        AND s.owner_account_id = ? AND s.status = 'active'
+        AND a.status = 'active' AND p.status = 'active'`,
+    [projectId, speakerId, accountId],
+  );
+  if (row === undefined) return undefined;
+  if (!parseScopeJson(row.capabilities).has("message.send")) return undefined;
+  return { display_name: row.display_name };
+}
+
+// Re-validates the send authority against the supplied database handle. The
+// publish path passes its transaction handle, so the ownership, status, and
+// capability checks run in the same transaction as the finalize UPDATE.
+export async function authorizeSessionSend(
+  db: Pick<SqlTransaction, "first">,
+  principal: Principal,
+  projectId: string,
+): Promise<ProjectAccess> {
+  if (principal.sessionViewer !== true) throw new AppError("NOT_FOUND");
+  // The request must have been resolved for message.send; this is never the
+  // membership's broader capability set.
+  if (!principal.scopes.has("message.send")) throw new AppError("NOT_FOUND");
+  if (principal.speakerId === "") throw new AppError("NOT_FOUND");
+  const membership = await sessionSendMembership(
+    db,
+    projectId,
+    principal.accountId,
+    principal.speakerId,
+  );
+  if (membership === undefined) throw new AppError("NOT_FOUND");
+  return {
+    rights: new Set<Scope>(["message.send"]),
+    capabilities: new Set<Scope>(["message.send"]),
+  };
+}
+
+// Send authorization used by the message service. A bearer principal keeps the
+// existing credential/grant/scope decision unchanged; a session viewer can only
+// use the dedicated ownership + membership path above.
+export async function authorizeMessageSend(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+): Promise<ProjectAccess> {
+  if (principal.sessionViewer === true) {
+    return authorizeSessionSend(deps.db, principal, projectId);
+  }
+  return authorizeProject(deps, principal, projectId, "message.send");
+}
+
+// Resolves the selected speaker to the narrow send principal. Unknown, foreign,
+// inactive, removed, or `message.send`-less speakers are the uniform NOT_FOUND.
+export async function resolveSessionSendPrincipal(
+  deps: ServiceDeps,
+  session: { sessionId: string; accountId: string },
+  projectId: string,
+  speakerId: string,
+): Promise<Principal> {
+  const membership = await sessionSendMembership(
+    deps.db,
+    projectId,
+    session.accountId,
+    speakerId,
+  );
+  if (membership === undefined) throw new AppError("NOT_FOUND");
+  return {
+    credentialId: `session:${session.sessionId}`,
+    speakerId,
+    accountId: session.accountId,
+    scopes: new Set<Scope>(["message.send"]),
+    sessionViewer: true,
+  };
+}
+
+// The sender choices for the compose form: active speakers owned by the
+// account with an active membership on this active project that carries
+// message.send. This is a UI read only; the write re-validates independently.
+export async function listSessionSendSpeakers(
+  deps: ServiceDeps,
+  session: { sessionId: string; accountId: string },
+  projectId: string,
+): Promise<SessionSendSpeaker[]> {
+  const rows = await deps.db.all<{
+    speaker_id: string;
+    display_name: string | null;
+    capabilities: string;
+  }>(
+    `SELECT m.speaker_id, s.display_name, m.capabilities
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+       JOIN projects p ON p.id = m.project_id
+      WHERE m.project_id = ? AND s.owner_account_id = ? AND m.removed_at IS NULL
+        AND s.status = 'active' AND a.status = 'active' AND p.status = 'active'
+      ORDER BY s.created_at ASC, s.id ASC`,
+    [projectId, session.accountId],
+  );
+  return rows
+    .filter((row) => parseScopeJson(row.capabilities).has("message.send"))
+    .map((row) => ({
+      speakerId: row.speaker_id,
+      displayName: row.display_name,
+    }));
 }
 
 // Builds the listing principal for a session. It has no speakerId because the

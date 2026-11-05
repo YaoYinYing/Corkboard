@@ -20,9 +20,19 @@ import {
   validateType,
   verifySenderDigest,
 } from "../domain/validation.ts";
-import { NotFoundError, finalizeMessage, insertIdempotency } from "../storage/sqlite.ts";
+import {
+  NotFoundError,
+  finalizeMessage,
+  finalizeSessionMessage,
+  insertIdempotency,
+} from "../storage/sqlite.ts";
 import type { SqlValue } from "../storage/db.ts";
-import { authorizeProject, type Principal, type ServiceDeps } from "./auth.ts";
+import {
+  authorizeMessageSend,
+  authorizeProject,
+  type Principal,
+  type ServiceDeps,
+} from "./auth.ts";
 
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
@@ -274,10 +284,11 @@ function envelopeCipherLength(envelope: Uint8Array): number {
 // Publishes a pending message and returns the committed row. A concurrent
 // finalize of the same message is treated as success and reloaded.
 //
-// Authorization is re-evaluated immediately before the finalization UPDATE so a
-// revocation that landed while the body was being written prevents publication.
-// A revocation after this check but before the UPDATE itself is not prevented;
-// see docs/architecture.md.
+// A session send re-checks the full predicate inside the conditional finalize
+// UPDATE, so a revocation that landed while the body was being written prevents
+// publication atomically. A bearer send re-authorizes immediately before the
+// finalization UPDATE; a revocation after that check but before the statement
+// is not prevented (see docs/architecture.md).
 async function publish(
   deps: ServiceDeps,
   principal: Principal,
@@ -285,14 +296,49 @@ async function publish(
   messageId: string,
   bodyObjectId: string,
 ): Promise<{ row: MessageRow; finalized: boolean }> {
-  await authorizeProject(deps, principal, projectId, "message.send");
   let finalized = false;
+  if (principal.sessionViewer === true) {
+    await deps.db.transaction(async (tx) => {
+      // Write-only, result-independent callback: the entire session predicate
+      // (ownership, active account/speaker/project, non-removed membership,
+      // message.send) is part of one conditional UPDATE, so a removal cannot
+      // land between an authorization read and the publication write. No
+      // SELECT and no affected-row count is observed; a D1 adapter can submit
+      // this callback as one batch without returning results.
+      await finalizeSessionMessage(tx, {
+        projectId,
+        messageId,
+        bodyObjectId,
+        committedAt: deps.now().toISOString(),
+        speakerId: principal.speakerId,
+        accountId: principal.accountId,
+      });
+    });
+    // Infer the outcome only from committed row state. Ready/expired is a
+    // successful publish or an already-finalized replay; still-pending or
+    // missing is denied with the uniform NOT_FOUND and no committed message or
+    // audit state (the provisional row/blob stay reclaimable).
+    const row = await loadMessage(deps, projectId, messageId);
+    if (row === undefined || (row.body_state !== "ready" && row.body_state !== "expired")) {
+      throw new AppError("NOT_FOUND");
+    }
+    // A fresh publish and a replay are indistinguishable without observing the
+    // UPDATE result, so a session send is never reported as a new finalization
+    // (no queue-delay sample).
+    return { row, finalized: false };
+  }
+
+  // Bearer sends keep the existing pre-finalize re-authorization. A revocation
+  // after this check but before the UPDATE is not prevented; see
+  // docs/architecture.md.
+  await authorizeMessageSend(deps, principal, projectId);
   try {
     await finalizeMessage(deps.db, {
       projectId,
       messageId,
       bodyObjectId,
       committedAt: deps.now().toISOString(),
+      speakerId: principal.speakerId,
     });
     finalized = true;
   } catch (error) {
@@ -394,8 +440,10 @@ export async function sendMessage(
 ): Promise<SendMessageResult> {
   // Decision order is UNAUTHENTICATED (done by the caller) -> NOT_FOUND for a
   // non-member -> FORBIDDEN for a member lacking scope, then payload validation
-  // and sender-digest verification. All of it precedes every write.
-  await authorizeProject(deps, principal, projectId, "message.send");
+  // and sender-digest verification. All of it precedes every write. A session
+  // viewer uses the dedicated owner/membership send path, never the read-only
+  // `authorizeProject` session branch.
+  await authorizeMessageSend(deps, principal, projectId);
 
   const key = validateIdempotencyKey(idempotencyKey);
   const summary = validateSummary(input.summary);

@@ -151,8 +151,14 @@ from storage on every authorization decision; there is no authorization cache. E
 path authorizes at request start, and the four paths with a durable effect or a
 plaintext return re-evaluate immediately before that effect:
 
-- **Send.** `message.send` is re-authorized before the finalization `UPDATE` that
-  assigns `seq`. If access was revoked, no sequence is allocated and no message is
+- **Send.** A session send uses the dedicated owner/membership authority (never
+  `authorizeProject`'s read-only session branch) and re-runs it inside the
+  write-only publication callback (the predicate is part of the finalize
+  `UPDATE`); a bearer send keeps the credential/grant check.
+  `message.send` is re-authorized before the finalization `UPDATE` that assigns
+  `seq`. Both finalize statements also bind the authenticated principal's
+  `sender_speaker_id`, so a pending row belonging to another speaker cannot be
+  published. If access was revoked, no sequence is allocated and no message is
   published; the provisional row/blob is reclaimable, and a retry with the same
   idempotency key after an explicit re-grant resumes normally.
 - **Read receipt.** `message.read` is re-authorized and `receipt.write` re-checked
@@ -320,6 +326,10 @@ or as authority to act as a speaker.
   `sessionViewer` flag is set in code only, never from request input. The session
   principal's scopes and the authorization result's rights are exactly the
   requested `project.read`/`message.read` scope, so receipt or write checks fail.
+  Dashboard message send does not use that read branch: it resolves the selected
+  owned speaker and requires an active membership with `message.send`, re-checked
+  inside the publication transaction. The raw body is never logged and the
+  server computes the digest itself.
 - **State-changing dashboard routes.** `POST /login` inserts a session row and
   authenticated page requests refresh `sessions.last_seen_at`. `POST /projects`
   inserts a project plus its owner membership in one transaction; `POST
@@ -335,10 +345,13 @@ or as authority to act as a speaker.
   /speakers/:speakerId/credentials/:credentialId/revoke` soft-revokes one credential
   (sets `revoked_at`; the row and its grants are retained)
   after the session-account owner check and the same in-transaction ownership
-  re-check. The HTML form routes require the
+  re-check; and `POST /projects/:projectId/messages/new` sends one message through
+  the existing `sendMessage` path after the dedicated session-send authority, with
+  the final ownership/membership check inside the publication transaction. The
+  HTML form routes require the
   session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
-  `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message send/expiry,
-  receipts, credential rotation, grant editing, registration,
+  `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message-expiry
+  management, receipts, credential rotation, grant editing, registration,
   recovery, and administrative capability remain absent.
 
 ## OAuth 2.1 authorization server
@@ -446,11 +459,14 @@ or as authority to act as a speaker.
   queued statement at a time; a concurrent `transaction()` on the same connection
   while that manual transaction is open fails with `cannot start a transaction within
   a transaction` rather than joining or waiting. This is CLI-only and not reachable in
-  the shipped server. A crash before commit is rolled back by the WAL. Project creation
-  is the only current `transaction()` caller. D1 has no
-  interactive transaction: a future adapter must buffer the write-only callback and
-  submit it as one `batch()`, and must pass the shared storage contract. No D1
-  adapter ships or is verified here.
+  the shipped server. A crash before commit is rolled back by the WAL. Only project
+  creation (two inserts) and session message-send publication (one conditional
+  `UPDATE` carrying its authorization predicate) are write-only, result-independent
+  callbacks. Credential issuance, credential revocation, and membership add/remove
+  are read-then-write callbacks; D1 cannot emulate them without a documented
+  read-snapshot strategy, recorded as pre-existing debt. A future D1 adapter must
+  execute a write-only callback as one `batch()` with no callback-visible results and
+  must pass the shared storage contract. No D1 adapter ships or is verified here.
 - **Production mode verifies these modes instead of assuming them.** Production is
   selected by `NODE_ENV=production` or by the explicit `CORKBOARD_REQUIRE_PRIVATE_FS=1`.
   Paths are normalized (`resolve`, so trailing separators, `.` and `..` cannot disguise
@@ -923,8 +939,10 @@ shows no traffic or error summary, because there is no per-tenant source. See
   membership-editor slice adds the per-project member list, add, and remove routes,
   the credential-inventory slice adds per-speaker listing and soft revocation, and
   the service-overview slice adds the authorized read-only `GET /overview` (counts,
-  stored-byte totals, credential states, and 20 sanitized audit rows).
-  Message send, expiry, credential rotation, and per-credential grant editing remain
+  stored-byte totals, credential states, and 20 sanitized audit rows), and the
+  compose slice adds dashboard message send as a selected owned speaker.
+  Message-expiry management (the compose form's optional body-expiry timestamp is
+  the only expiry UI), credential rotation, and per-credential grant editing remain
   CLI/API-only. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not
   perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.

@@ -22,12 +22,13 @@ endpoint at `/mcp`, **human account sessions** (password sign-in, session read,
 sign-out), a **human web dashboard** (project list, project create/edit, speaker
 directory, one-time project-scoped credential issuance, per-project membership
 editor, authorized account service overview, ascending timeline, explicit
-body reveal, English and Simplified Chinese), and an **OAuth 2.1
+body reveal, dashboard message send as a selected owned speaker, English and
+Simplified Chinese), and an **OAuth 2.1
 authorization-server core** (dynamic public clients, PKCE, consent, rotating refresh
 tokens, revocation) are implemented and tested locally. Cloudflare Workers/D1/R2, the
 ChatGPT Web plugin installation/linking experience, and the remaining dashboard
-administration (message send/expiry, credential rotation) remain planned; dashboard
-credential inventory and soft revocation are implemented locally. Only capabilities
+administration (message-expiry management, credential rotation) remain planned;
+dashboard credential inventory and soft revocation are implemented locally. Only capabilities
 marked *implemented* in
 [`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; the OAuth core does not
 verify ChatGPT Web integration.
@@ -66,9 +67,11 @@ reverse proxy outside loopback development). The dashboard supports project crea
 and edit, a speaker directory, one-time issuance of a project-scoped speaker
 credential, per-speaker credential inventory and soft revocation, a project-owner
 membership editor, an authorized read-only service overview, the message timeline,
-and explicit body reveal, in English or
-Simplified Chinese (`?lang=zh`). Messages and read state remain read-only; there is
-no message send, credential rotation, or admin action. See
+compose-and-send as one of the account's owned speakers with `message.send`,
+explicit body reveal, and English or
+Simplified Chinese (`?lang=zh`). Read state remains read-only; the compose form can
+set an optional body-expiry timestamp, but there is no expiry management or cleanup
+UI, credential rotation, or admin action. See
 [`docs/web-ui.md`](docs/web-ui.md) for the authorization model, CSP, accessibility,
 and limitations.
 

@@ -41,9 +41,15 @@ export interface SqlDatabase extends SqlTransaction {
   /**
    * Runs `fn` inside one transaction and commits only when it resolves; any
    * throw rolls back. The callback must use only the supplied handle. D1 has
-   * no interactive transactions, so a future adapter must buffer the handle's
-   * writes and submit them with `batch()` (the only current caller is
-   * write-only) and pass the shared storage contract.
+   * no interactive transactions, so a future adapter must buffer a write-only
+   * callback and submit it with `batch()`, with no callback-visible results.
+   * Only project creation (two inserts) and session message-send publication
+   * (one conditional UPDATE carrying its authorization predicate) are
+   * write-only, result-independent callers today. Credential issuance,
+   * credential revocation, and membership add/remove are read-then-write
+   * callbacks; a D1 adapter cannot emulate them without a documented
+   * read-snapshot strategy, which remains pre-existing debt. No batch-emulated
+   * result may depend on an in-transaction read or affected-row count.
    */
   transaction<T>(fn: (tx: SqlTransaction) => Promise<T>): Promise<T>;
 }

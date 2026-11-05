@@ -387,6 +387,7 @@ export function runStorageContract(
       projectId: "proj_1",
       messageId: "msg_1",
       bodyObjectId: "obj_1",
+      speakerId: "spk_1",
       committedAt,
     });
     assert.equal(seq, 1);
@@ -448,6 +449,7 @@ export function runStorageContract(
             projectId: "proj_1",
             messageId,
             bodyObjectId: `obj_${messageId}`,
+            speakerId: "spk_1",
             committedAt: now(),
           }),
         ),
@@ -551,6 +553,7 @@ export function runStorageContract(
       projectId: "proj_1",
       messageId: "msg_1",
       bodyObjectId: "obj_1",
+      speakerId: "spk_1",
       committedAt: now(),
     });
 
@@ -593,6 +596,7 @@ export function runStorageContract(
         projectId: "proj_1",
         messageId: "msg_1",
         bodyObjectId: "obj_1",
+        speakerId: "spk_1",
         committedAt: now(),
       }),
       NotFoundError,
@@ -625,6 +629,7 @@ export function runStorageContract(
         projectId: "proj_off",
         messageId: "msg_1",
         bodyObjectId: "obj_1",
+        speakerId: "spk_1",
         committedAt: now(),
       }),
       NotFoundError,
@@ -658,6 +663,7 @@ export function runStorageContract(
         projectId: "proj_1",
         messageId: "msg_1",
         bodyObjectId: "obj_1",
+        speakerId: "spk_1",
         committedAt: now(),
       }),
       ConflictError,
@@ -771,6 +777,7 @@ export function runStorageContract(
         projectId: "proj_1",
         messageId: "msg_1",
         bodyObjectId: "obj_1",
+        speakerId: "spk_1",
         committedAt: now(),
       });
 
@@ -819,6 +826,7 @@ export function runStorageContract(
         projectId: "proj_1",
         messageId: "msg_2",
         bodyObjectId: "obj_2",
+        speakerId: "spk_1",
         committedAt: now(),
       }),
       8,

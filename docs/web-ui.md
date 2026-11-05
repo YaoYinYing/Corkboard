@@ -2,23 +2,27 @@
 
 **Status: implemented locally for Node.js + SQLite (vertical slices L and M plus
 dashboard project create/edit, speaker credential issuance, per-speaker credential
-inventory and revocation, the per-project membership editor, and the authorized
-account service overview, with the approved design system tokens applied).**
+inventory and revocation, the per-project membership editor, the authorized account
+service overview, and dashboard message send, with the approved design system tokens
+applied).**
 The dashboard is server-rendered HTML for a signed-in **account**. Message reads,
-filters, replay, and body reveal remain read-only. The writes are project create,
-project title/summary edit, issuing one speaker credential with explicit project
-grants, revoking one speaker credential, and adding/removing a project membership
-with an explicit capability set. There is no message send, expiry, credential
-rotation or grant editing, moderation, or administrative action. It is not a SPA and
-ships no frontend framework, build step, or client script. Slice M adds metadata
-filters, a summary-only search, bounded cursor replay, and a CSS-only responsive
-layout.
+filters, replay, and body reveal remain read-only; the timeline gains a compose link
+and a new-message form. The writes are project create, project title/summary edit,
+issuing one speaker credential with explicit project grants, revoking one speaker
+credential, adding/removing a project membership with an explicit capability set, and
+sending one message as a selected owned speaker. There is no message-expiry
+management or cleanup UI (the compose form optionally sets one body-expiry timestamp),
+credential rotation or grant editing, moderation, or administrative action. It is not
+a SPA and ships no frontend framework, build step, or client script. Slice M adds
+metadata filters, a summary-only search, bounded cursor replay, and a CSS-only
+responsive layout.
 
 Cloudflare Workers/D1 parity, account registration/recovery, and the remaining
-write/admin surfaces (messages, credential rotation, expiry) remain
-unimplemented. **Rotation is not implemented:** revoking a credential and issuing a
-new one through the existing issuance flow is the replacement path, not an atomic
-rotate operation. See `IMPLEMENTATION_STATE.md` for the current evidence.
+write/admin surfaces (message-expiry management, credential rotation, per-credential
+grant editing) remain unimplemented. **Rotation is not implemented:** revoking a
+credential and issuing a new one through the existing issuance flow is the
+replacement path, not an atomic rotate operation. See
+`IMPLEMENTATION_STATE.md` for the current evidence.
 
 ## Routes
 
@@ -36,6 +40,8 @@ rotate operation. See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/projects/:projectId/members` | `GET` | Active membership list and add form; requires the signed-in account to own the project. |
 | `/projects/:projectId/members` | `POST` | Form-encoded add of an active owned speaker with an explicit capability set; `303` to the list. |
 | `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; deletes that speaker's grants for the project; `303` to the list. |
+| `/projects/:projectId/messages/new` | `GET` | Compose form when the account can read the project; sender choices are its own send-capable speakers. |
+| `/projects/:projectId/messages/new` | `POST` | Form-encoded send as the selected owned speaker; `303` to the timeline; requires the session CSRF check. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
 | `/speakers` | `GET` | Speakers owned by the signed-in account, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active speaker owned by the account. |
@@ -422,6 +428,75 @@ membership; an already removed row returns `NOT_FOUND`. Credential issuance is
 available here, and the credential inventory and soft revocation are described
 above; credential rotation and per-credential grant editing remain CLI-only.
 
+## Message send
+
+`GET /projects/:projectId/messages/new` renders a no-JavaScript compose form for a
+project the signed-in account can read (`message.read`). The timeline links to it as
+"New message" only when the account owns at least one eligible sender for that
+project. The form fields are the **sender speaker** (a `<select>`), **summary**,
+**body text**, **type**, **language**, an optional **reply-to message ID**, and an
+optional **body expiry** timestamp. English and Simplified Chinese labels and errors
+are provided; `lang` is preserved by the form action, the cancel link, and the
+successful redirect.
+
+**Sender policy (explicit and separate from read authorization).** A session may send
+only as a speaker where all of the following hold:
+
+1. `speakers.owner_account_id` is the signed-in session's account;
+2. the account, speaker, and project are active;
+3. the speaker has a non-removed (`removed_at IS NULL`) membership in that project;
+4. that membership's parsed capabilities include `message.send`.
+
+The sender options are exactly those speakers, ordered by `(speakers.created_at,
+speakers.id)`. Another account's speaker is never offered even if it is a project
+member with `message.send`, and an owned speaker without `message.send`, an inactive
+speaker or account, or a removed membership is not offered. The sender identity is
+the **selected speaker**: the principal used for the write names that speaker, and the
+server derives the stored `sender_speaker_id` from it. The form never accepts a
+client-asserted sender beyond that selection, and a client-supplied speaker that does
+not satisfy the policy is a uniform `404` with no write.
+
+This path does **not** reuse or widen `authorizeProject`'s session branch. That branch
+continues to permit only `project.read`, `message.read`, and `project.edit`. A
+dedicated `authorizeSessionSend` / `authorizeMessageSend` path re-reads ownership,
+actor/speaker/project status, membership removal, and the `message.send` capability.
+`sendMessage` is reused unchanged in semantics: the dedicated check runs at entry and
+again immediately before publication; for a session send the second check runs in the
+**conditional `UPDATE` itself** (a write-only publication callback with no
+in-transaction read), so a removal or ownership change cannot land between the
+check and publication. A bearer principal keeps the
+existing credential/grant/scope path and can never enter the session branch.
+
+**POST semantics.** `POST /projects/:projectId/messages/new` requires
+`application/x-www-form-urlencoded`; the 64 KiB body cap applies. The route resolves
+the readable project **before** parsing the body, then checks the session double-submit
+CSRF (`corkboard_csrf` cookie plus exactly one hidden `csrf_token`) and the
+`Sec-Fetch-Site`/`Origin` fetch-metadata defense. Exactly one value per field is
+accepted; duplicates are a malformed form. The request never carries a sender digest:
+the server computes `sha256:` over the exact UTF-8 body text and passes it to
+`sendMessage`, which independently verifies it like any other send. The existing
+summary (1–140 graphemes, ≤1024 bytes), text (1–2000 graphemes, ≤8192 UTF-8 bytes),
+type, language, reply-reference (same project, committed row), and body-expiry
+(RFC 3339 UTC `Z`, strictly in the future, ≤366 days) limits apply unchanged. The
+optional expiry is a single timestamp on the new message; this UI does not list,
+change, or delete expired bodies, and expiry cleanup still requires the operator
+command.
+
+The form carries a server-generated `idempotency_key` in a hidden field. A validation
+failure re-renders the same form (HTTP `400`) with the same key and the entered values
+escaped, so an unchanged retry is an idempotent replay and creates no duplicate. A
+repeated submission after success also replays. Reusing the key with a different
+payload is a `409` conflict rendered in the form with a **fresh** key so the corrected
+message can be sent; the conflict path writes nothing. An unknown, foreign, inactive,
+or removed speaker, a speaker without `message.send`, and an unreadable project are all
+the same uniform `404` page with no write.
+
+On success the route returns `303` to `/projects/:projectId` (preserving `?lang=zh`);
+the new message is immediately visible in ascending server `seq` order. The form is
+bounded and every echoed value is escaped; the request logger records only
+method/path/status/duration/actor and never logs the summary or body. No audit detail
+contains message content.
+
 ## Service overview
 
 `GET /overview` is a read-only, session-only page linked from the project list.
@@ -514,7 +589,11 @@ its membership has that capability. The session branch permits `project.read`,
 `message.send`, `receipt.write`, `member.read`, or `member.manage`, and it does
 not substitute a speaker credential or its scopes. The `sessionViewer` flag is
 set in code only and is never read from request input; a bearer principal never
-has it.
+has it. Message send does not use this branch: the compose route and
+`sendMessage` call a dedicated session-send authority that re-validates the
+selected speaker's ownership, status, active membership, and `message.send`
+capability, and returns only that scope. A session viewer resolved for
+`message.read` therefore still cannot authorize a send through the read branch.
 
 Timeline filters, search, and cursors add no authorization decision. The viewer
 is resolved and the project is authorized before any query parameter is parsed;
@@ -552,8 +631,11 @@ requests, `POST /projects` (project plus owner-membership insert),
 selected project), `POST /speakers/:speakerId/credentials/:credentialId/revoke` (one
 `credentials.revoked_at` transition; grants and the row are retained),
 `POST /projects/:projectId/members` (one membership insert or
-reactivation), and `POST /projects/:projectId/members/:speakerId/remove` (the
-membership soft delete plus that speaker's grant deletions). Read receipt identities
+reactivation), `POST /projects/:projectId/members/:speakerId/remove` (the
+membership soft delete plus that speaker's grant deletions), and `POST
+/projects/:projectId/messages/new` (the blob, `body_objects` row, provisional
+`messages` row, idempotency record, and final sequence-bearing publication through
+the existing `sendMessage` path). Read receipt identities
 are displayed only through
 `listReadReceipts`, which authorizes `message.read` and re-applies the project filter.
 The speaker directory is an account-level read; it is not a project-scoped route and
@@ -674,9 +756,12 @@ bounded form before checking CSRF.
 
 - Dashboard writes are project create/edit, one credential issuance for a
   selected subset of an owned speaker's active projects, one soft credential
-  revocation (no rotation), and project-owner membership add/remove. There is no
-  message send, expiry, credential rotation, grant editor, expiry
-  selection, speaker creation, registration, or admin action. Creating a project does
+  revocation (no rotation), project-owner membership add/remove, and one message
+  send as an eligible owned speaker. There is no message-expiry management or
+  cleanup UI: the compose form may set one optional body-expiry timestamp, but
+  listing, changing, or deleting expiry state remains unimplemented. There is no
+  credential rotation, grant editor, per-credential expiry selection, speaker
+  creation, registration, or admin action. Creating a project does
   not create a speaker or credential; an account without an active owned speaker
   cannot create one from this UI. A speaker's credential project grants can be
   changed only through the CLI, and rotation is the revoke-then-issue flow above,

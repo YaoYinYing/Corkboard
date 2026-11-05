@@ -102,14 +102,22 @@ path (`src/service/retention.ts`, CLI-only) opens a manual `BEGIN IMMEDIATE` thr
 same connection while that manual transaction is open therefore fails with `cannot
 start a transaction within a transaction`; it neither joins nor waits. The shipped
 server never invokes retention. A crash before commit is rolled back by SQLite's WAL. D1 exposes
-no interactive transaction; a future adapter must buffer the callback's writes and
-submit them as one `batch()` (sufficient for the only current caller, which issues two
-unconditional inserts) and must pass the shared storage contract. No D1 adapter exists
-or is exercised here.
+no interactive transaction. A future adapter must execute a write-only callback — two
+inserts for project creation, or one conditional `UPDATE` for session message-send
+publication — as one `batch()` with no callback-visible results, and must pass the
+shared storage contract. Credential issuance, credential revocation, and membership
+add/remove are read-then-write callbacks (`tx.first` before writes); they are
+**pre-existing debt** for D1 because they require a documented read-snapshot strategy
+that does not yet exist. No batch-emulated result may depend on an in-transaction
+read or affected-row count. No D1 adapter exists or is exercised here.
 
 Sequence allocation happens at **finalization**, not at acceptance. Provisional rows
 carry `seq = NULL` and are invisible. One UPDATE assigns the next sequence and publishes
-the row; an `AFTER UPDATE` trigger advances `projects.next_seq` and completes the
+the row; both finalize statements (`FINALIZE_SQL` and `FINALIZE_SESSION_SQL`,
+parameterized SQLite/D1 SQL) also bind the authenticated principal's
+`sender_speaker_id = ?`, so a pending row belonging to another speaker cannot be
+published even if an idempotency record is tampered out-of-band. An `AFTER UPDATE`
+trigger advances `projects.next_seq` and completes the
 idempotency row in the same atomic statement. Publication order therefore equals
 sequence order, and a cursor reader cannot advance past an unpublished lower sequence.
 
@@ -289,7 +297,11 @@ Authorization is evaluated in two places, deliberately:
      `UPDATE` that assigns `seq` and publishes the row. A revocation or membership
      removal in that window prevents publication; the provisional row and blob stay
      reclaimable, and a later retry with the same idempotency key after an explicit
-     re-grant resumes normally.
+     re-grant resumes normally. For a session send the dedicated owner/membership
+     full predicate is part of the finalize `UPDATE` itself, run in a write-only
+     callback transaction with no in-transaction read, so a removal or ownership
+     change cannot land between the check and the write; a bearer send keeps the
+     existing check immediately before the statement.
    - `markRead` re-authorizes `message.read` and re-checks `receipt.write` immediately
      before the receipt `INSERT`. A revocation in that window creates no receipt.
    - `getMessageBody` re-authorizes `message.read` after decryption and immediately
@@ -369,6 +381,7 @@ with the existing service functions.
   (`POST`), `/projects/new`, `/projects/:projectId` (`GET` and `POST`),
   `/projects/:projectId/edit`, `/projects/:projectId/members` (`GET` and `POST`),
   `/projects/:projectId/members/:speakerId/remove` (`POST`),
+  `/projects/:projectId/messages/new` (`GET` and `POST`),
   `/projects/:projectId/messages/:messageId/body`,
   `/speakers`, `/speakers/:speakerId/key` (`GET` and `POST`),
   `/speakers/:speakerId/credentials` (`GET`),
@@ -382,7 +395,7 @@ with the existing service functions.
   under the same 64 KiB cap and streaming limit as the API. That is the form
   routes `/login`, `/projects`, `/projects/:projectId`,
   `/projects/:projectId/members`, `/projects/:projectId/members/:speakerId/remove`,
-  `/speakers/:speakerId/key`, and
+  `/projects/:projectId/messages/new`, `/speakers/:speakerId/key`, and
   `/speakers/:speakerId/credentials/:credentialId/revoke`, plus POSTs to the
   GET-only paths `isWebPath` also names (`/overview`, `/projects/new`,
   `/projects/:projectId/edit`,
@@ -410,6 +423,20 @@ with the existing service functions.
   or consult a credential or grant. The `sessionViewer` flag is set only by
   the resolver and is never derived from request input; bearer authentication never
   sets it. Bearer authorization is unchanged.
+- **Session message send.** A separate `authorizeSessionSend` path (dispatched by
+  `authorizeMessageSend`) authorizes a session send only for the selected speaker:
+  the account, speaker, and project must be active, the membership non-removed, and
+  the parsed capabilities must include `message.send`. It returns only that scope
+  and never consults a credential or grant. `resolveSessionSendPrincipal` builds the
+  narrow principal from the form's selected `speaker_id`; unknown, foreign, inactive,
+  removed, and `message.send`-less speakers are a uniform `NOT_FOUND`. The same
+  predicate is folded into the final publication `UPDATE` (stored-JSON
+  `instr(capabilities, '"message.send"')` plus the ownership/status predicates), so
+  the publish callback is write-only and result-independent. The quoted `instr` test
+  is equivalent to the strict scope parser for every JSON scope array this
+  application writes (quotes prevent matching a longer scope name); the strict entry
+  check remains the gate for malformed or non-array JSON. Bearer principals keep the
+  existing credential/grant decision and cannot enter this branch.
 - **Membership administration.** The membership editor uses
   `sessionAccountPrincipal` plus a direct `projects.owner_account_id = session
   account` check (project and account active), re-read inside the write transaction.
@@ -439,8 +466,12 @@ with the existing service functions.
   grants only. `POST /speakers/:speakerId/key` resolves an active owned speaker,
   checks the selected projects and scopes, re-reads each membership inside the write
   transaction, and inserts one credential plus one grant per explicitly selected
-  project; the raw token is returned only in the no-store response. No dashboard
-  route writes a message or receipt. Credential writes are the explicit issuance
+  project; the raw token is returned only in the no-store response.
+  `POST /projects/:projectId/messages/new` calls the existing `sendMessage`
+  (server-computed digest, validation, idempotency, blob write, provisional row,
+  atomic finalization) under the dedicated session-send authority; the compose
+  route itself writes no message row. No dashboard route writes a receipt.
+  Credential writes are the explicit issuance
   transaction and the single `credentials.revoked_at` soft-revocation transition
   (the credential row and its grants are retained). Grant writes occur through
   explicit issuance, and dashboard membership removal also deletes that speaker's

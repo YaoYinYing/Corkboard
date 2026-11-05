@@ -1,8 +1,9 @@
 // Human dashboard. Server-rendered HTML only: no inline script, no script at
-// all, no message HTML. Message reads are read-only; the only writes are project
-// create and title/summary edit. Authorization is derived from the account
-// session through `resolveSessionViewer` and then the existing service functions
-// run unchanged.
+// all, no message HTML. Message reads are read-only; the writes are project
+// create/edit, credential issuance and soft revocation, membership add/remove,
+// and one session message send as a selected owned speaker (its own dedicated
+// authority, not the read viewer). Authorization is derived from the account
+// session and then the existing service functions run unchanged.
 import { randomBase64url } from "../auth/credentials.ts";
 import { SCOPES } from "../domain/authz.ts";
 import { digestsEqual, sha256Hex } from "../domain/digest.ts";
@@ -10,14 +11,18 @@ import { AppError, RateLimitError } from "../domain/errors.ts";
 import { normalizeEmail, validateLoginPassword } from "../domain/validation.ts";
 import type { Principal, ServiceDeps } from "../service/auth.ts";
 import {
+  listSessionSendSpeakers,
+  resolveSessionSendPrincipal,
   resolveSessionViewer,
   sessionAccountPrincipal,
+  type SessionSendSpeaker,
 } from "../service/auth.ts";
 import {
   getMessageBody,
   listMessages,
   listReadReceipts,
   MAX_QUERY_CHARS,
+  sendMessage,
   type ListMessagesQuery,
   type MessageMetadata,
   type ReadReceipt,
@@ -203,6 +208,28 @@ const EN = {
   memberDuplicate: "That speaker is already an active member.",
   memberLastOwner: "The last owner membership cannot be removed.",
   removeMemberAction: "Remove",
+  composeMessageAction: "New message",
+  newMessageTitle: "New message",
+  messageSenderLabel: "Send as",
+  messageSenderHint:
+    "Only speakers owned by your account with message.send on this project are listed.",
+  messageSummaryLabel: "Summary",
+  messageSummaryHint: "Required, up to 140 characters.",
+  messageTextLabel: "Message body",
+  messageTextHint: "Required, up to 2000 characters and 8192 UTF-8 bytes.",
+  messageTypeLabel: "Type",
+  messageTypeHint: "Lowercase identifier, for example note or request.",
+  messageLanguageLabel: "Language",
+  messageLanguageHint: "BCP 47 language tag, for example en or zh-Hans.",
+  messageReplyToLabel: "Reply to message ID (optional)",
+  messageReplyToHint: "Must be an existing message in this project.",
+  messageExpiryLabel: "Body expiry (optional)",
+  messageExpiryHint: "RFC 3339 UTC with Z, for example 2026-12-31T23:59:59Z, within 366 days.",
+  sendMessageAction: "Send message",
+  messageFormError: "Check the message details and try again.",
+  messageConflict:
+    "This form was already used for different content. Review the message and send it again.",
+  messageNoSender: "No speaker owned by this account can send to this project.",
   overviewLink: "Service overview",
   overviewTitle: "Service overview",
   overviewProjectCountLabel: "Readable projects",
@@ -341,6 +368,26 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   memberDuplicate: "该说话者已经是活跃成员。",
   memberLastOwner: "无法移除最后一个所有者成员。",
   removeMemberAction: "移除",
+  composeMessageAction: "新建消息",
+  newMessageTitle: "新建消息",
+  messageSenderLabel: "发送者",
+  messageSenderHint: "仅列出由你的账户拥有且在此项目具有 message.send 的说话者。",
+  messageSummaryLabel: "摘要",
+  messageSummaryHint: "必填，最多 140 个字符。",
+  messageTextLabel: "消息正文",
+  messageTextHint: "必填，最多 2000 个字符且不超过 8192 个 UTF-8 字节。",
+  messageTypeLabel: "类型",
+  messageTypeHint: "小写标识符，例如 note 或 request。",
+  messageLanguageLabel: "语言",
+  messageLanguageHint: "BCP 47 语言标签，例如 en 或 zh-Hans。",
+  messageReplyToLabel: "回复消息 ID（可选）",
+  messageReplyToHint: "必须是此项目中已存在的消息。",
+  messageExpiryLabel: "正文过期时间（可选）",
+  messageExpiryHint: "RFC 3339 UTC（带 Z），例如 2026-12-31T23:59:59Z，最多 366 天后。",
+  sendMessageAction: "发送消息",
+  messageFormError: "请检查消息信息后重试。",
+  messageConflict: "此表单已用于不同的内容。请检查消息后重新发送。",
+  messageNoSender: "此账户没有可向该项目发送消息的说话者。",
   overviewLink: "服务概览",
   overviewTitle: "服务概览",
   overviewProjectCountLabel: "可查看的项目",
@@ -1450,6 +1497,308 @@ async function handleMemberRemove(
   }
 }
 
+interface MessageFormValues {
+  speakerId: string;
+  summary: string;
+  text: string;
+  type: string;
+  language: string;
+  replyToId: string;
+  bodyExpiresAt: string;
+  idempotencyKey: string;
+}
+
+const MESSAGE_FORM_FIELDS = [
+  "speaker_id",
+  "summary",
+  "text",
+  "type",
+  "language",
+  "reply_to_id",
+  "body_expires_at",
+  "idempotency_key",
+] as const;
+
+function newIdempotencyKey(): string {
+  return `web_${randomBase64url(16)}`;
+}
+
+// A per-render key: printable ASCII within the service's 1-128 character
+// bound. Anything else is replaced so a malformed hidden field cannot pin the
+// form to an unusable key.
+function usableIdempotencyKey(value: string): boolean {
+  return /^[\x21-\x7e]{1,128}$/.test(value);
+}
+
+function defaultMessageFormValues(): MessageFormValues {
+  return {
+    speakerId: "",
+    summary: "",
+    text: "",
+    type: "note",
+    language: "en",
+    replyToId: "",
+    bodyExpiresAt: "",
+    idempotencyKey: newIdempotencyKey(),
+  };
+}
+
+// A duplicated field is a malformed form, not a silently chosen value.
+function messageFormValuesFrom(form: URLSearchParams): MessageFormValues | null {
+  const values: Record<string, string> = {};
+  for (const name of MESSAGE_FORM_FIELDS) {
+    const all = form.getAll(name);
+    if (all.length > 1) return null;
+    values[name] = all[0] ?? "";
+  }
+  return {
+    speakerId: values.speaker_id ?? "",
+    summary: values.summary ?? "",
+    text: values.text ?? "",
+    type: values.type ?? "",
+    language: values.language ?? "",
+    replyToId: values.reply_to_id ?? "",
+    bodyExpiresAt: values.body_expires_at ?? "",
+    idempotencyKey: values.idempotency_key ?? "",
+  };
+}
+
+function renderNewMessageForm(
+  locale: Locale,
+  url: URL,
+  projectId: string,
+  speakers: readonly SessionSendSpeaker[],
+  options: {
+    values: MessageFormValues;
+    csrf: string;
+    status: number;
+    errorKey?: MessageKey;
+  },
+): Response {
+  const timelineHref = `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`;
+  const heading = `<h1>${escapeHtml(t(locale, "newMessageTitle"))}</h1>
+<p><a href="${escapeHtml(timelineHref)}">${escapeHtml(t(locale, "backToTimeline"))}</a></p>`;
+  const error =
+    options.errorKey === undefined
+      ? ""
+      : `<p class="error" role="alert">${escapeHtml(t(locale, options.errorKey))}</p>`;
+  if (speakers.length === 0) {
+    return htmlResponse(
+      options.status,
+      renderPage(
+        locale,
+        url,
+        t(locale, "newMessageTitle"),
+        `${heading}
+${error}<p class="empty">${escapeHtml(t(locale, "messageNoSender"))}</p>`,
+      ),
+    );
+  }
+  const senderOptions = speakers
+    .map(
+      (speaker) =>
+        `<option value="${escapeHtml(speaker.speakerId)}"${speaker.speakerId === options.values.speakerId ? " selected" : ""}>${escapeHtml(displaySpeakerName({ id: speaker.speakerId, display_name: speaker.displayName }))} <code>${escapeHtml(speaker.speakerId)}</code></option>`,
+    )
+    .join("\n");
+  const content = `${heading}
+${error}<form class="project-form" method="post" action="/projects/${escapeHtml(encodeURIComponent(projectId))}/messages/new${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
+<input type="hidden" name="idempotency_key" value="${escapeHtml(options.values.idempotencyKey)}">
+<p class="filter-field"><label for="message-speaker">${escapeHtml(t(locale, "messageSenderLabel"))}</label>
+<select id="message-speaker" name="speaker_id" required aria-describedby="message-speaker-hint">
+${senderOptions}
+</select>
+<span class="hint" id="message-speaker-hint">${escapeHtml(t(locale, "messageSenderHint"))}</span></p>
+<p class="filter-field"><label for="message-summary">${escapeHtml(t(locale, "messageSummaryLabel"))}</label>
+<input id="message-summary" name="summary" type="text" maxlength="140" required value="${escapeHtml(options.values.summary)}" aria-describedby="message-summary-hint">
+<span class="hint" id="message-summary-hint">${escapeHtml(t(locale, "messageSummaryHint"))}</span></p>
+<p class="filter-field"><label for="message-text">${escapeHtml(t(locale, "messageTextLabel"))}</label>
+<textarea id="message-text" name="text" rows="8" required aria-describedby="message-text-hint">${escapeHtml(options.values.text)}</textarea>
+<span class="hint" id="message-text-hint">${escapeHtml(t(locale, "messageTextHint"))}</span></p>
+<p class="filter-field"><label for="message-type">${escapeHtml(t(locale, "messageTypeLabel"))}</label>
+<input id="message-type" name="type" type="text" maxlength="32" required value="${escapeHtml(options.values.type)}" aria-describedby="message-type-hint">
+<span class="hint" id="message-type-hint">${escapeHtml(t(locale, "messageTypeHint"))}</span></p>
+<p class="filter-field"><label for="message-language">${escapeHtml(t(locale, "messageLanguageLabel"))}</label>
+<input id="message-language" name="language" type="text" maxlength="35" required value="${escapeHtml(options.values.language)}" aria-describedby="message-language-hint">
+<span class="hint" id="message-language-hint">${escapeHtml(t(locale, "messageLanguageHint"))}</span></p>
+<p class="filter-field"><label for="message-reply-to">${escapeHtml(t(locale, "messageReplyToLabel"))}</label>
+<input id="message-reply-to" name="reply_to_id" type="text" maxlength="128" value="${escapeHtml(options.values.replyToId)}" aria-describedby="message-reply-to-hint">
+<span class="hint" id="message-reply-to-hint">${escapeHtml(t(locale, "messageReplyToHint"))}</span></p>
+<p class="filter-field"><label for="message-expiry">${escapeHtml(t(locale, "messageExpiryLabel"))}</label>
+<input id="message-expiry" name="body_expires_at" type="text" maxlength="40" value="${escapeHtml(options.values.bodyExpiresAt)}" aria-describedby="message-expiry-hint">
+<span class="hint" id="message-expiry-hint">${escapeHtml(t(locale, "messageExpiryHint"))}</span></p>
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, "sendMessageAction"))}</button>
+<a href="${escapeHtml(timelineHref)}">${escapeHtml(t(locale, "cancelAction"))}</a></p>
+</form>`;
+  return htmlResponse(
+    options.status,
+    renderPage(locale, url, t(locale, "newMessageTitle"), content),
+  );
+}
+
+function newMessagePageResponse(
+  request: Request,
+  locale: Locale,
+  url: URL,
+  projectId: string,
+  speakers: readonly SessionSendSpeaker[],
+  status: number,
+  values: MessageFormValues,
+  errorKey?: MessageKey,
+): Response {
+  return renderNewMessageForm(locale, url, projectId, speakers, {
+    values,
+    csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+    status,
+    ...(errorKey === undefined ? {} : { errorKey }),
+  });
+}
+
+async function handleNewMessage(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  // The compose form exists only for a project this account can read. A
+  // project without an eligible read viewer is the uniform 404.
+  await resolveSessionViewer(deps, session, projectId, "message.read");
+  const speakers = await listSessionSendSpeakers(deps, session, projectId);
+  return newMessagePageResponse(
+    request,
+    locale,
+    url,
+    projectId,
+    speakers,
+    200,
+    defaultMessageFormValues(),
+  );
+}
+
+async function handleMessageCreate(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  // Authorize the readable project before parsing the body, so an unreadable
+  // project is the uniform 404 regardless of payload shape.
+  await resolveSessionViewer(deps, session, projectId, "message.read");
+  const form = await readForm(request);
+  const parsed = messageFormValuesFrom(form);
+  const speakers = await listSessionSendSpeakers(deps, session, projectId);
+  const fallback = defaultMessageFormValues();
+  const values = parsed ?? fallback;
+  // Exactly one hidden key is generated per render. A validation failure
+  // repeats the submitted key, so a retry of the same payload is idempotent.
+  const idempotencyKey = usableIdempotencyKey(values.idempotencyKey)
+    ? values.idempotencyKey
+    : fallback.idempotencyKey;
+
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return newMessagePageResponse(
+      request,
+      locale,
+      url,
+      projectId,
+      speakers,
+      400,
+      { ...values, idempotencyKey },
+      "formExpired",
+    );
+  }
+  if (parsed === null) {
+    return newMessagePageResponse(
+      request,
+      locale,
+      url,
+      projectId,
+      speakers,
+      400,
+      fallback,
+      "messageFormError",
+    );
+  }
+  if (values.speakerId === "") {
+    return newMessagePageResponse(
+      request,
+      locale,
+      url,
+      projectId,
+      speakers,
+      400,
+      { ...values, idempotencyKey },
+      "messageFormError",
+    );
+  }
+  // Dedicated send authority: the selected speaker must be owned by this
+  // session account with an active membership carrying message.send. Every
+  // failure is NOT_FOUND (uniform 404) and nothing is written.
+  const principal = await resolveSessionSendPrincipal(
+    deps,
+    session,
+    projectId,
+    values.speakerId,
+  );
+
+  // The server computes the plaintext digest; a client-supplied digest is
+  // neither read nor trusted.
+  const bodyDigest = `sha256:${await sha256Hex(ENCODER.encode(values.text))}`;
+  try {
+    await sendMessage(deps, principal, projectId, idempotencyKey, {
+      summary: values.summary,
+      type: values.type,
+      language: values.language,
+      text: values.text,
+      bodyDigest,
+      replyToId: values.replyToId === "" ? null : values.replyToId,
+      bodyExpiresAt: values.bodyExpiresAt === "" ? null : values.bodyExpiresAt,
+    });
+    return redirect(
+      303,
+      `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`,
+    );
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VALIDATION_ERROR") {
+      return newMessagePageResponse(
+        request,
+        locale,
+        url,
+        projectId,
+        speakers,
+        400,
+        { ...values, idempotencyKey },
+        "messageFormError",
+      );
+    }
+    if (error instanceof AppError && error.code === "CONFLICT") {
+      // Same key, different payload. Re-render with a fresh key so the
+      // corrected message can be sent, and keep the conflict visible.
+      return newMessagePageResponse(
+        request,
+        locale,
+        url,
+        projectId,
+        speakers,
+        409,
+        { ...values, idempotencyKey: newIdempotencyKey() },
+        "messageConflict",
+      );
+    }
+    throw error;
+  }
+}
+
 function displaySpeakerName(speaker: {
   id: string;
   display_name: string | null;
@@ -2057,7 +2406,15 @@ async function handleTimeline(
     if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
   }
 
-  const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a>${editLink}</p>
+  // Show the compose link only when the account owns at least one sender for
+  // this project. The compose route (and the send itself) re-authorizes.
+  const senders = await listSessionSendSpeakers(deps, session, projectId);
+  const composeLink =
+    senders.length === 0
+      ? ""
+      : ` <span aria-hidden="true">·</span> <a href="/projects/${escapeHtml(projectId)}/messages/new${localeQuery(locale)}">${escapeHtml(t(locale, "composeMessageAction"))}</a>`;
+
+  const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a>${composeLink}${editLink}</p>
 <h1>${escapeHtml(project.title)}</h1>
 ${renderFilterForm(locale, projectId, url, filters, limit)}
 <h2>${escapeHtml(t(locale, "timelineTitle"))}</h2>
@@ -2178,6 +2535,14 @@ export function isWebPath(segments: readonly string[]): boolean {
     segments.length === 3 &&
     segments[0] === "projects" &&
     segments[2] === "members"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 4 &&
+    segments[0] === "projects" &&
+    segments[2] === "messages" &&
+    segments[3] === "new"
   ) {
     return true;
   }
@@ -2320,6 +2685,20 @@ export async function handleWebRoute(
         segments[1] ?? "",
         segments[3] ?? "",
       );
+    }
+    if (
+      segments.length === 4 &&
+      segments[0] === "projects" &&
+      segments[2] === "messages" &&
+      segments[3] === "new"
+    ) {
+      if (method === "GET") {
+        return await handleNewMessage(deps, request, url, locale, segments[1] ?? "");
+      }
+      if (method === "POST") {
+        return await handleMessageCreate(deps, request, url, locale, segments[1] ?? "");
+      }
+      return methodNotAllowed(locale, url, "GET, POST");
     }
     if (
       segments.length === 5 &&

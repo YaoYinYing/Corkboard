@@ -8,16 +8,18 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) at `48b5a86`/state `5ca3067`, audit fix `4110a43` (tree `31d84ac`), final docs/tests `499a772` on `main`; supply-chain audit/license/SBOM (slice Z) pushed on `main` at `f7e62be` (tree `06f664e`); the docs/state amendment is `1dfa284` (tree `bc6a82b`), which was `origin/main` before slice AA; dashboard credential inventory and revocation (slice AA) pushed on `main` at `dbb2a46` (tree `837ee76`); authorized account service overview (slice AB) pushed on `main` at `058e34f` (tree `4ae5dfa`) |
-| Last pushed checkpoint | `058e34f` (slice AB authorized account service overview, tree `4ae5dfa5b7a99e2f44b1eddb2da397ae92204194`) is `origin/main`; `dbb2a46` (slice AA dashboard credential inventory and revocation, tree `837ee765298a921eae5b2d9430cdf07c800e2bbc`) precedes it; the slice-Z docs/state amendment is `1dfa284` (tree `bc6a82b`) and slice-Z code is `f7e62be` (supply-chain audit/license/SBOM, tree `06f664e5bca840ce7719cdb5ff31daa5b85d9c51`). Earlier pushed checkpoints include `499a772` (slice-Y membership-editor docs/tests, tree `fe60450`), `15cdf62` (slice X speaker directory and project-scoped credential issuance, tree `3260e71`), `0f81877` (slice W atomic project creation, tree `b7a1653`), `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
-| Branch | `origin/main` at `058e34f`; completed slice branches remain locally, including squashed variants shown by `git branch --no-merged main`; none was rewritten or deleted |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) at `48b5a86`/state `5ca3067`, audit fix `4110a43` (tree `31d84ac`), final docs/tests `499a772` on `main`; supply-chain audit/license/SBOM (slice Z) pushed on `main` at `f7e62be` (tree `06f664e`); the docs/state amendment is `1dfa284` (tree `bc6a82b`), which was `origin/main` before slice AA; dashboard credential inventory and revocation (slice AA) pushed on `main` at `dbb2a46` (tree `837ee76`); authorized account service overview (slice AB) pushed on `main` at `058e34f` (tree `4ae5dfa`), with the docs/state tail `30cf884` as `origin/main`; dashboard message send (slice AC) is a candidate on this branch and is not pushed |
+| Last pushed checkpoint | `30cf884` (slice-AB docs/state tail) is `origin/main`; slice-AB code is `058e34f` (authorized account service overview, tree `4ae5dfa5b7a99e2f44b1eddb2da397ae92204194`); `dbb2a46` (slice AA dashboard credential inventory and revocation, tree `837ee765298a921eae5b2d9430cdf07c800e2bbc`) precedes it; the slice-Z docs/state amendment is `1dfa284` (tree `bc6a82b`) and slice-Z code is `f7e62be` (supply-chain audit/license/SBOM, tree `06f664e5bca840ce7719cdb5ff31daa5b85d9c51`). Earlier pushed checkpoints include `499a772` (slice-Y membership-editor docs/tests, tree `fe60450`), `15cdf62` (slice X speaker directory and project-scoped credential issuance, tree `3260e71`), `0f81877` (slice W atomic project creation, tree `b7a1653`), `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `origin/main` at `30cf884`; completed slice branches remain locally, including squashed variants shown by `git branch --no-merged main`; none was rewritten or deleted |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success. Slice Z: first audits on tree `2b7e38e` returned security BLOCKED (P1: `sbom.ts` resolved `npm` through `PATH`, which `npm run` prepends with `node_modules/.bin`; P2: lock paths were checked only with `startsWith("node_modules/")`) and contract BLOCKED (missing `Tree-SHA` trailer, lockfile-driven scan and lock fallback undocumented, CLI exit-code tests absent). Fixes were reviewed at tree `3c05987`: security PASS + contract PASS. A residual security round removed bare `npm` from the `check`/`audit` chain, made absolute/traversal lock keys exit `2`, handled legacy `{type}` license objects, and routed the two pre-existing `dist`-build test helpers through `process.execPath` + `npm_execpath`. A contract audit then BLOCKED the same shim class via bare `node`/`tsc` in package scripts; all scripts now use `$npm_node_execpath` with a fail-closed `${npm_node_execpath:?...}` guard, and `tsc` is `node_modules/typescript/lib/tsc.js`. The final `Tree-SHA` is in the final commit trailer. Final audits on tree `06f664e` (commit `f7e62be`) returned **security PASS + contract PASS** with three non-blocking P2s (POSIX-only scripts understated by "as before"; `git` still PATH-resolved in the secret scans; the shim test's `tsc` assertion is static, not functional). Fast-forwarded and pushed on `origin/main`; CI run 42055915268 success. Slice AA: first candidate `fcd9d23` (tree `afb54d1`) had security PASS on the code but security BLOCK on a false Candidate-SHA and contract BLOCK on stale contract docs (README, api, architecture, threat-model, web-ui, security-operations); fix tree `4b3a712` passed security but was contract-BLOCKED because the inventory GET used the write transaction (`BEGIN IMMEDIATE`) against the documented D1 batch port; final tree `837ee76` security PASS + contract PASS (delta audits). Pushed on `origin/main` at `dbb2a46`; CI run 42073815812 success. Remaining P2s: the transaction-contract docs still describe a single write-only `transaction()` caller (recorded as debt). Slice AB: first tree `9b2c72d` (tree `9419a1c`) security PASS + contract BLOCK (stale "only per-project count surface" claims); fix tree `244bbe2` (tree `e01cffb`) security PASS + contract BLOCK (remaining "no audit read API/UI" statements and the TODO count-surface claim); final tree `4ae5dfa` security PASS + contract PASS (delta audits), with three wording P2s corrected in this tail (architecture "only read" scope, credential rows returned vs scanned, LESSIONS bound-parameter wording). Pushed on `origin/main` at `058e34f`; CI run 42091068724 success |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (message send/expiry, credential rotation and grant editing), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (message-expiry management, credential rotation and grant editing), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
+| Candidate branch | `worktree-agent-ac66496232b17135b` from `30cf884c080184ccdf7a01e6123c5a70283b432f`: dashboard message send (slice AC). Round 1 (`06e072f`/`c7847be`) security PASS + contract BLOCK; round 2 (`7a0ae29`/`f8108b2`) security PASS with only contract-accuracy BLOCKs; round 3 (`fa9147b`/`26774c6`) passed both audits. This hardening round binds `sender_speaker_id` in both finalize statements, adds a tampered-idempotency cross-speaker test, and tightens the batch-emulation wording. Re-audit pending; not pushed |
 
 ## Checkpoint history
 
 | Commit | Tree | Capability | Reviews |
 | --- | --- | --- | --- |
+| this checkpoint | commit trailer `Tree-SHA` | Slice AC: dashboard message send — `GET`/`POST /projects/:projectId/messages/new`, sender select restricted to active account-owned speakers with an active membership carrying `message.send`, summary/text/type/language, optional same-project reply and optional RFC 3339 body expiry, server-computed digest, per-render hidden idempotency key (same payload replays, different payload `409`), session CSRF/fetch-metadata and 64 KiB adapter buffering, uniform `404` for unreadable project/foreign or ineligible speaker, `303` to the timeline; dedicated `authorizeSessionSend`/`authorizeMessageSend` path (never `authorizeProject`'s read branch); the session predicate is folded into the one write-only, result-independent finalize `UPDATE`, and the outcome is inferred only from the post-commit row (ready/expired = success/replay; pending/missing = uniform `404`) | Base `30cf884c080184ccdf7a01e6123c5a70283b432f`; round-1 audits on `06e072f`/`c7847be` were security PASS and contract BLOCK; round-2 on `7a0ae29`/`f8108b2` was security PASS with only contract-accuracy BLOCKs; round-3 on `fa9147b`/`26774c6` passed both audits, and this hardening round adds the sender-bound finalize predicate and wording fixes; re-audit PENDING; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (496 tests: 495 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; not pushed |
 | `df99e90` | `0459cfb` | Phase 0 docs, toolchain, secret hygiene | security PASS; contract PASS |
 | `b5c421d` | `048065f` | Vertical slice A: encrypted messaging, ordered replay, REST API, CLI | security PASS; contract PASS |
 | `7b5a63b` | `2bfaa9b` | Vertical slice B: body expiry tombstones, audited expiry endpoint, cleanup worker | security PASS; contract PASS |
@@ -1605,6 +1607,80 @@ pushed.
   and automatic cleanup remain absent. D1/R2 parity and a real-browser pass are
   unexecuted. Independent security and contract review is PENDING.
 
+## Vertical slice AC — dashboard message send (candidate, base `30cf884`)
+
+- **Scope.** `GET`/`POST /projects/:projectId/messages/new` as a server-rendered,
+  no-JavaScript compose form and send path for a signed-in account. The form fields
+  are the sender speaker, summary, body text, type, language, an optional same-project
+  reply-to message ID, and an optional body-expiry timestamp. The timeline links to
+  the form only when the account owns at least one eligible sender. No message-expiry
+  listing/management/cleanup UI, receipts, credential rotation, or admin action is
+  added.
+- **Sender policy.** A session may send only as a speaker where
+  `speakers.owner_account_id` is the session account, the account/speaker/project are
+  active, the membership is non-removed, and its parsed capabilities include
+  `message.send`. The stored sender is the selected speaker. This uses a dedicated
+  `authorizeSessionSend`/`authorizeMessageSend` path, not `authorizeProject`'s
+  session branch (which continues to permit only `project.read`, `message.read`, and
+  `project.edit`). Bearer principals keep the existing credential/grant decision and
+  cannot enter the session path. Foreign speakers, inactive speakers/accounts,
+  removed memberships, and speakers lacking `message.send` are the uniform `404`,
+  as is an unreadable/unknown project.
+- **Send reuse.** The route calls the existing `sendMessage`: server-computed
+  plaintext SHA-256, existing validation limits, idempotency, blob write, provisional
+  row, and atomic finalization. A per-render hidden `idempotency_key` repeats on a
+  validation retry; same payload replays with no duplicate and different payload is
+  `409` with a fresh key on the re-render. The route resolves the readable project
+  before parsing the body and applies the standard session double-submit CSRF,
+  `Sec-Fetch-Site`/`Origin`, `application/x-www-form-urlencoded`, and 64 KiB body
+  limits. The Node adapter buffers the new POST because `isWebPath` names it.
+- **Mid-request re-check.** For a session send, the publication callback is
+  **write-only and result-independent**: `finalizeSessionMessage` issues one
+  conditional `UPDATE` whose `EXISTS` clause carries the whole session predicate
+  (account-owned active speaker, active account/speaker/project, non-removed
+  membership, stored `message.send`), performs no SELECT, and its affected-row count
+  is never observed (a buffered D1 batch cannot return it). Both finalize statements
+  (bearer and session) also bind `sender_speaker_id = ?` to the authenticated
+  principal, so neither can publish a pending row belonging to another speaker. The outcome is inferred
+  only by reloading after commit: an already-committed `ready`/`expired` row is
+  success or the existing replay/resume case; a still-pending or missing row is the
+  uniform `NOT_FOUND` with no committed message/audit state (the provisional row and
+  blob remain reclaimable). `instr(capabilities, '"message.send"')` is the quoted
+  stored-JSON test, equivalent to the strict parser for application-written arrays;
+  the strict entry check remains the gate for malformed/non-array JSON. Bearer sends
+  keep the existing pre-statement re-authorization. Only project creation and the
+  session publication are write-only, result-independent `transaction()` callers;
+  credential issuance/revocation and membership add/remove are read-then-write and
+  remain D1 debt. The publication retry backoff sleeps while the transaction is open,
+  which would hold a write lock across retries on a multi-connection adapter.
+- **Success/failure.** Success is a `303` to `/projects/:projectId` (preserving
+  `?lang=zh`) and the message is visible in ascending `seq`. Validation failures
+  re-render `400` with the same key and escaped values; conflicts re-render `409` with
+  a fresh key. CSRF/content-type/size/validation failures perform no
+  message/idempotency/blob/audit writes; the shared authenticated-page
+  `sessions.last_seen_at` refresh still applies.
+  Summaries and bodies never enter request logs or audit detail.
+- **Tests.** New `tests/integration/message-send-web.test.ts` (15 tests) covers the
+  eligible-sender list and en/zh labels, uniform 404 for unreadable/unknown/inactive
+  projects and foreign/inactive/removed/no-`message.send` speakers, an inactive
+  session account through `authorizeSessionSend`, success ordering/visibility and
+  body reveal, membership removal between provisional write and publication,
+  a concurrent publication replayed with no duplicate
+  (`a concurrent publication is a successful replay with no duplicate`), an atomic
+  project deactivation with no committed row
+  (`deactivating the project during a session send prevents publication`), a
+  tampered idempotency record pointing at another speaker's pending row, a
+  matching-speaker publish, accepted/stored positive body expiry and same-project
+  reply, duplicate form fields,
+  a missing session, a missing CSRF cookie, a wrong CSRF value, and cross-site fetch
+  metadata, wrong content type,
+  oversized body, invalid summary/text/type/language/expiry and cross-project reply,
+  idempotent replay and same-key conflict, escaped XSS-shaped summary/text, bearer
+  rejection and dedicated branch refusal, log/audit secrecy, and the real Node
+  adapter flow.
+- **Commands.** `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (496 tests:
+  495 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -1966,11 +2042,19 @@ Do not infer any of these from local MCP behavior or from another plan.
   written after the revocation transaction commits and is fail-open, so a crash or
   audit-insert failure between commit and audit loses the row while the revocation
   still takes effect (the pre-existing audit-sink rule; no behavior change here).
-  D1/R2 parity and a real-browser pass are unexecuted. Transaction-contract docs
-  (`docs/architecture.md`, `docs/security-operations.md`, `src/storage/db.ts`) still
-  describe a single write-only `transaction()` caller; current callers are project
-  creation, credential issuance, credential revocation, and membership add/remove.
-  Project title/summary edits use one `UPDATE`, not `transaction()`.
+  D1/R2 parity and a real-browser pass are unexecuted. Transaction-contract truth
+  (recorded in `docs/architecture.md`, `docs/security-operations.md`, and
+  `src/storage/db.ts`): only project creation (two inserts) and session message-send
+  publication (one conditional `UPDATE` carrying its authorization predicate) are
+  write-only, result-independent callbacks that a D1 adapter can submit as one
+  `batch()` with no callback-visible results. Credential issuance, credential
+  revocation, and membership add/remove read inside their transactions
+  (`tx.first`/`assertProjectOwner`) before writing; they are **pre-existing debt**
+  for D1 because they need a documented read-snapshot strategy that does not exist.
+  Bearer message sends re-check immediately before the statement without wrapping it.
+  Project title/summary edits use one `UPDATE`, not `transaction()`. Debt: the
+  session publication retry backoff sleeps while the transaction is open, which would
+  hold a write lock across retries on a future multi-connection adapter.
 - No Workers adapter.
 - Slice-I audit debt (P2, non-blocking): login rate limiting is process-local and keyed
   by email digest (an attacker who knows an address can consume that bucket); failure

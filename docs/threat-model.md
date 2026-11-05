@@ -64,12 +64,14 @@ history; audit records; administrative privilege; availability; metadata privacy
     SHA-256 is verified before decryption. Stored-content mismatch fails closed
     (`INTEGRITY_FAILURE`) with no content and no read receipt.
 
-## Human account sessions (slice I; dashboard project writes in slice T)
+## Human account sessions (slice I; dashboard project writes in slice T; session message send implemented)
 
 A session authenticates an account to the `/api/v1/session` routes, the OAuth
 sign-in/consent pages, and the HTML dashboard pages. It is **not** a speaker
-credential: it cannot call the bearer REST data routes or `/mcp`, and it grants no
-message, receipt, member-administration, MCP, or global administrative authority.
+credential: it cannot call the bearer REST data routes or `/mcp`. It grants no
+message authority **except the dedicated selected-owned-speaker send path
+described below**, and it grants no receipt, member-administration, MCP, or
+global administrative authority.
 The dashboard derives an owned-speaker viewer for `project.read`/`message.read`,
 and, only on the project edit/update routes, for `project.edit`. Create is an
 account operation that also requires an active owned speaker.
@@ -136,8 +138,11 @@ account operation that also requires an active owned speaker.
 The dashboard adds an HTML rendering surface, not a new authorization system. It
 composes the slice-I session with the existing service authorization. Message
 reads remain read-only; the project writes are create (`POST /projects`) and
-title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
-(`POST /speakers/:speakerId/key`) is the only credential write.
+title/summary edit (`POST /projects/:projectId`). Dashboard message send
+(`POST /projects/:projectId/messages/new`) writes one message as the selected
+owned speaker through the dedicated session-send authority above. Dashboard
+credential issuance (`POST /speakers/:speakerId/key`) is the only credential
+write.
 
 - **Stored XSS through titles, summaries, or display names.** Project titles and
   summaries, speaker display names, message summaries, reply references, and read
@@ -164,8 +169,9 @@ title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
   The other cookie-authenticated state changes are `DELETE /api/v1/session` with
   its `X-CSRF-Token`, the OAuth consent form `POST /oauth/consent` with the same
   session-CSRF check, and the dashboard forms `POST /projects`,
-  `POST /projects/:projectId`, and `POST /speakers/:speakerId/key`, which use the
-  session-cookie double-submit and fetch-metadata checks described above.
+  `POST /projects/:projectId`, `POST /speakers/:speakerId/key`, and
+  `POST /projects/:projectId/messages/new`, which use the session-cookie
+  double-submit and fetch-metadata checks described above.
 - **Session fixation.** Sign-in always generates a new random session token and
   ignores any pre-existing session cookie value; the dashboard never accepts a
   session id from input.
@@ -184,6 +190,18 @@ title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
   `message.send`, or member capabilities, but those scopes are rejected for a
   session viewer. Tests assert a `message.read` viewer cannot authorize
   `project.edit`, write a receipt, send a message, or run expiry.
+- **Dashboard message send identity.** The compose form is the one session path
+  that writes a message. It does not use the viewer branch above; a dedicated
+  authority re-validates, from storage and again inside the publication
+  transaction, that the selected speaker is owned by the session account, the
+  account/speaker/project are active, the membership is non-removed, and the
+  membership capabilities include `message.send`. The stored sender is that
+  selected speaker. A foreign speaker (even a project member with
+  `message.send`), an inactive speaker or account, a removed membership, a
+  speaker without `message.send`, and an unreadable project are the same uniform
+  `404` with no write. A bearer credential cannot enter the session path. The
+  server computes the plaintext digest; the hidden idempotency key makes retries
+  idempotent and different content under the same key a conflict.
 - **Service overview.** `GET /overview` is session-only and read-only for
   project/message/credential/audit data; the shared authenticated-page
   `sessions.last_seen_at` refresh still applies. Its

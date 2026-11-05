@@ -931,6 +931,24 @@ prevented regression; when to remove the advice.
 - **Remove when:** The scripts use a cross-platform wrapper (for example one Node
   entry script) and the secret scans invoke `git` by absolute path.
 
+## 2026-11-05 — read authorization is not a send authorization
+
+- **Failure:** Recycling the dashboard's `authorizeProject` session branch for
+  message send would have required adding `message.send` to the branch that every
+  read/edit route uses. The branch deliberately returns only the requested scope and
+  refuses send/receipt/member capabilities; widening it would let any future session
+  route that asks for `message.send` inherit send authority.
+- **Fix:** A dedicated `authorizeSessionSend` path re-checks the selected speaker's
+  ownership, active account/speaker/project, non-removed membership, and
+  `message.send` capability. `sendMessage` dispatches to it only when
+  `sessionViewer === true`; bearer principals keep their existing decision. The
+  publication path folds the session check into the finalize `UPDATE`.
+- **Prevents:** A read-viewer principal authorizing a write, and a bearer credential
+  entering a session-only write path.
+- **Remove when:** There is one reviewed policy engine that expresses every actor,
+  scope, and resource relation without per-route branches, with tests proving the
+  session read branch still cannot write.
+
 ## 2026-11-05 — a write transaction is not a read-snapshot tool
 
 - **Failure:** Wrapping the credential-inventory GET in `SqlDatabase.transaction`

@@ -6,7 +6,8 @@ authorization-server core (slice J), the human web dashboard (slice L, with
 metadata filters, summary search, and bounded replay in slice M; English and
 Simplified Chinese), dashboard project create/edit (slice T), the operator
 observability slice (queue-to-commit histogram and authorized per-project
-counts), and the authorized account service overview.** Cloudflare
+counts), the authorized account service overview, and dashboard message send.**
+Cloudflare
 Workers/D1, the ChatGPT Web plugin experience, the remaining dashboard write/admin
 actions, and the "Planned, not implemented" section below are not implemented. See
 `IMPLEMENTATION_STATE.md` for the current evidence,
@@ -37,7 +38,8 @@ A human session authenticates an **account**, never a speaker and never a creden
 It is accepted only by the three `/api/v1/session` routes, the OAuth sign-in/consent
 pages (which may create a session), and the HTML dashboard pages (which derive an
 owned-speaker viewer for reads and for `project.edit` on the project edit/update
-routes; see below). It cannot call `/api/v1/me`, project,
+routes, and a dedicated selected-owned-speaker principal for message send; see
+below). It cannot call `/api/v1/me`, project,
 message, or `/mcp` routes, and a session token is not a valid bearer token. Conversely,
 bearer routes never accept a session cookie. An OAuth access token is a speaker
 credential, not a session.
@@ -204,6 +206,8 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | `/projects/:projectId/members` | `GET` | Active membership list and add form; requires the signed-in account to own the project (not merely `project.edit`) and is otherwise the same uniform `404`. |
 | `/projects/:projectId/members` | `POST` | Form-encoded add of an active speaker owned by the session account with an explicit capability set; requires project ownership plus the session CSRF check. `303` to the list. |
 | `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; soft-deletes the membership and its credential grants. Requires project ownership plus the session CSRF check. `303` to the list. |
+| `/projects/:projectId/messages/new` | `GET` | Compose form for a project the session account can read. Sender choices are active speakers owned by the account with an active membership carrying `message.send`. |
+| `/projects/:projectId/messages/new` | `POST` | Form-encoded send as the selected owned speaker. Requires the session CSRF check and every existing message validation limit. The server computes the plaintext digest; a per-render hidden `idempotency_key` makes retries idempotent and different content under the same key a `409`. `303` to the timeline. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
 | `/speakers` | `GET` | Speakers owned by the session account only, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active owned speaker. |
@@ -219,7 +223,12 @@ Filters and cursors are parsed only after that authorization; blank or
 whitespace-only values are dropped as absent before the remaining values are
 passed to `listMessages`; the page adds no SQL and never searches message bodies.
 A project the account cannot read or edit is a uniform `404` even when filters or
-form fields are malformed. Project title and summary reuse the 140-grapheme /
+form fields are malformed. Dashboard message send does not use that read viewer or
+`authorizeProject`'s session branch: a dedicated session-send authority requires the
+selected speaker to be owned by the session account, active, and have a non-removed
+active membership carrying `message.send`; the same check runs inside the
+publication transaction. A bearer credential can never use it. The sender is the
+selected speaker. Project title and summary reuse the 140-grapheme /
 1024-byte summary bounds; a blank summary is `NULL`. Project create provisions an
 owner membership for the account's deterministic first active owned speaker; it
 does not create a speaker, credential, or credential-to-project grant. The project
@@ -289,8 +298,11 @@ speaker or one lacking `project.edit` neither counts nor is protected). Both wri
 are one transaction with an in-transaction ownership re-check. Cross-account
 addition/provisioning of other accounts' speakers remains CLI-only; removal may
 target any active (non-removed) membership; an already removed row returns
-`NOT_FOUND`. No message send, expiry, credential rotation, grant editing, or
-admin action exists.
+`NOT_FOUND`. Dashboard message send is implemented as described above and in
+[`web-ui.md`](./web-ui.md): the compose form optionally sets one body-expiry
+timestamp, but there is no expiry listing/management/cleanup UI. Credential
+rotation, per-credential grant and expiry editing, project deletion/status change,
+and administrative actions remain unimplemented.
 
 ## Endpoints
 
@@ -807,9 +819,10 @@ bounded cursor replay, body reveal, English/Simplified Chinese) is implemented p
 [`web-ui.md`](./web-ui.md); the speaker directory, credential issuance, and the
 per-project HTML membership editor and the authorized service overview are
 implemented; the dashboard credential inventory and soft revocation are
-implemented; credential rotation and
+implemented; dashboard message send is implemented; credential rotation and
 per-credential grant editing, project deletion/status changes, and
-message/expiry writes remain deferred or CLI-only. The
+message-expiry management remain deferred or CLI-only (the compose form's optional
+body-expiry field is the only expiry UI). The
 bearer-authenticated `/mcp` surface is implemented
 (see above and `mcp.md`);
 the OAuth 2.1 authorization-server core is implemented (see above and `oauth.md`), but
