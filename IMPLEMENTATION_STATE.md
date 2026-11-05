@@ -53,6 +53,7 @@ as the work it describes.
 | this checkpoint | commit-trailer `Tree-SHA` | Slice Y: dashboard per-project membership editor — `GET`/`POST /projects/:projectId/members`, `POST /projects/:projectId/members/:speakerId/remove`; **project-owner-only** (not `project.edit`) with uniform `404`, explicit seven-scope capability set (owner may grant any), account-owned active speaker rule, duplicate conflict, manageable-owner removal refusal, grant deletion with membership removal, in-transaction ownership re-validation, adapter-level POST tests, en/zh | Base `15cdf62717626a07ccbe52c243f895a60064e298`; on `slice-members`, not pushed; security-audit P1 (owner gate) and P2/docs corrections in the fix commit; `npm ci` exit 0; `npm run check` exit 0 (440 tests: 439 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; D1/R2 parity remains unverified; cross-account provisioning, invitation/acceptance, bulk editing, credential rotation/revocation, and grant editing are not implemented or CLI-only |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
+| this checkpoint | commit-trailer `Tree-SHA` | Slice Z: offline license/notice report over installed metadata (runtime/dev labeled, missing/unknown/non-permissive flagged), CycloneDX SBOM via `npm sbom`, license scan in `npm run check`, CI runs license scan + SBOM + uploads `reports/`, network `npm audit` stays separate | Base `499a772620d2caa3f0eb3f8a224fac9bfef47d10`; on `slice-supply`, not pushed; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (443 tests: 442 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run licenses` exit 0 (98 dependencies: 95 runtime, 3 dev; 0 flagged); `npm run sbom` exit 0 (95 components); `npm run audit` exit 0 (0 vulnerabilities); no independent review yet |
 
 ## GitHub Issue coordination
 
@@ -1439,6 +1440,42 @@ pushed.
   `docs/security-operations.md`; it grants no access while the membership is removed
   but can leave a stale grant that revives on reactivation. D1/R2 parity and a
   real-browser visual pass are unexecuted.
+
+## Vertical slice Z — dependency audit, license report, and SBOM (base `499a772`)
+
+- **Checkpoint.** Feature commit `09eb061` (tree `2b7e38e`) on `slice-supply`,
+  based on `499a772620d2caa3f0eb3f8a224fac9bfef47d10`; not pushed. This state/lessons
+  commit is the second half of the slice. Independent review is not claimed.
+- **Scope.** Adds `npm run licenses` (`scripts/license-report.ts`) and
+  `npm run sbom` (`scripts/sbom.ts`), adds the license scan to `npm run check`, and
+  documents the policy and limits in `docs/supply-chain.md`. `package-lock.json`
+  remains the pinning baseline; CI still installs with `npm ci --ignore-scripts`.
+- **Automated now.** The offline license scan reads `package-lock.json` plus every
+  installed `node_modules/*/package.json`, labels runtime/dev from the lock's
+  `dev`/`devOptional` flags, accepts simple SPDX `AND`/`OR` expressions composed only
+  of `0BSD`, `Apache-2.0`, `BlueOak-1.0.0`, `BSD-2-Clause`, `BSD-3-Clause`,
+  `CC0-1.0`, `ISC`, `MIT`, and `Unlicense`, and exits `1` on `notice`/`missing`/
+  `unknown` entries. It writes stable `reports/licenses.txt` and
+  `reports/licenses.json`; `reports/` is git-ignored. The SBOM runs npm's built-in
+  CycloneDX generator after install and writes `reports/sbom.cdx.json`; it works
+  offline from the installed tree and lockfile. CI runs the license scan and SBOM,
+  uploads `reports/`, and keeps `npm run audit` (`--audit-level=high`) as a separate
+  network-dependent step.
+- **Counts at this tree.** 98 installed dependencies (95 runtime, 3 dev), 0 flagged;
+  report sizes 4,284 bytes (text) and 18,711 bytes (JSON); SBOM 95 components,
+  107,828 bytes. Repeated runs produce identical license files; the SBOM differs only
+  in its CycloneDX `serialNumber` and `metadata.timestamp`.
+- **Documented, not automated.** The vulnerability audit depends on the npm registry
+  advisory database and is not part of the offline `npm run check`. The license report
+  trusts declared metadata and does not produce a NOTICE file or scan license texts.
+  The SBOM has no signature, provenance attestation, or vulnerability data. There is
+  no update bot and no reproducible-build proof.
+- **Tests run.** `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (443 tests:
+  442 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run licenses`
+  exit 0; `npm run sbom` exit 0; `npm run audit` exit 0 (0 vulnerabilities). New
+  `tests/supply-chain/license-report.test.ts` covers license classification,
+  expression parsing, missing/notice/unknown flagging, dev labeling, stable ordering,
+  and unreadable package metadata with no network.
 
 ## Implemented and verified at this tree
 

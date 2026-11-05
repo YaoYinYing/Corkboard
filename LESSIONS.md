@@ -785,6 +785,26 @@ prevented regression; when to remove the advice.
   an active membership" and grant deletion is expressed in the same statement, or
   every adapter ships a verified transaction implementation.
 
+## 2026-11-05 — `npm sbom` names the root from the working directory
+
+- **Failure:** Running `npm sbom --sbom-format cyclonedx` inside a worktree named
+  `corkboard-supply` emitted `metadata.component.name = "corkboard-supply"` while the
+  purl and package metadata said `corkboard`. The display name therefore depends on
+  the containing folder, so the same tree produces different SBOM identity.
+- **Reproducer:** From a worktree whose directory name differs from `package.json`
+  `name`, run `npm sbom --sbom-format cyclonedx` and compare
+  `metadata.component.name` with `package.json`. npm (11.19.1) derives the root node
+  name from the folder before falling back to the package name.
+- **Fix:** `scripts/sbom.ts` rewrites the root component `name` and `version` from
+  `package.json` before writing `reports/sbom.cdx.json`; the purl was already correct.
+  The SBOM's `serialNumber` and `metadata.timestamp` remain per-run values and are
+  documented as artifact-only, not reproducible build input.
+- **Prevents:** An SBOM that identifies the project by an arbitrary worktree path.
+- **Remove when:** npm derives the root component name from `package.json` first, or
+  the SBOM is emitted by a generator that does. Keep the separate `npm run audit`
+  step: advisory lookups need the registry, so they must not make the offline check
+  fail or silently pass.
+
 ## 2026-11-05 — `project.edit` is not project administration
 
 - **Failure:** Gating the membership editor on `project.edit` lets a non-owner
