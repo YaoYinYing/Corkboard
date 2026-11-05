@@ -144,6 +144,10 @@ key      = "mcp_" + lowercase hex SHA-256(UTF-8(material))
   message.
 - The same derived key with a different payload returns `CONFLICT` (the service compares
   its keyed payload digest).
+- The service validates before its replay/resume decision. A message committed with
+  blank content before this rule existed therefore cannot be replayed with its old
+  key: the call returns `VALIDATION_ERROR`. The same-key replay guarantee applies
+  only to payloads valid under the current validation rules.
 - The session id is part of the derivation so unrelated sessions that reuse small
   JSON-RPC ids (`0`, `1`, `2`, ...) do not collide.
 - `v2` in the domain prefix is a derivation version. It is not persisted, migrated, or
@@ -204,7 +208,13 @@ is returned before session creation and carries `Retry-After`.
 The tool accepts the same service limits as REST: summary ≤140 graphemes and ≤1024 UTF-8
 bytes; text ≤2000 graphemes and ≤8192 UTF-8 bytes; canonical BCP 47 language; type
 matching `^[a-z][a-z0-9_.-]{0,31}$`; `reply_to_id` must be a committed message in the
-same project. `limit` is 1–100. The HTTP request **body** is capped at 64 KiB.
+same project. A message summary or text is blank, and is rejected, when it consists
+only of Unicode `White_Space` and/or `Default_Ignorable_Code_Point` characters (for
+example tabs, newlines, NBSP, NEL, ideographic space, ZWSP, ZWJ/ZWNJ, word joiner,
+variation selectors, and BOM); any character outside those categories makes it
+non-blank, internal spaces and newlines remain valid, and values are not trimmed or
+normalized. `limit` is
+1–100. The HTTP request **body** is capped at 64 KiB.
 
 ## Local client configuration
 

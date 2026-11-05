@@ -3,6 +3,47 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — A length limit is not a content rule; blank text passes both grapheme and byte caps
+
+- **Failure:** Real-browser evidence at `2a17a75` (Issue #6) showed a message whose
+  summary and body were only spaces committed successfully on every surface. The
+  shared validators checked only grapheme counts and UTF-8 byte caps, so a
+  whitespace-only value satisfied "1–140" and "1–2000". Project titles were already
+  protected by a separate blank check, which hid the gap for message content.
+- **Fix:** Message summary and text are checked by message-specific wrappers,
+  `validateMessageSummary`/`validateMessageText`, which call the length-only
+  `validateSummary`/`validateText` and then reject a blank value with
+  `VALIDATION_ERROR` ("summary must not be blank" / "text must not be blank").
+  Blank means only Unicode `White_Space` and/or `Default_Ignorable_Code_Point`
+  characters, so it covers ordinary whitespace plus NBSP, NEL, ideographic space,
+  ZWSP, ZWJ/ZWNJ, word joiner, variation selectors, and BOM; any character outside
+  those categories makes the value non-blank (for example U+2800, controls, or a
+  lone combining mark). The check runs in addition to, and after, the existing
+  length checks, so an over-limit blank value still reports the length error first.
+  Values are rejected, never trimmed or normalized; internal spaces and newlines
+  remain valid and stored as entered. Because REST, MCP, and the dashboard all call
+  `sendMessage`, one change covers every surface. The wrappers are deliberately
+  message-only: project title/summary keep their base `trim()`-based behavior and
+  `validateSummary` stays length-only. The service validates before its
+  replay/resume decision, so a historically blank payload cannot be replayed with
+  its old key.
+- **Reproducer / test:** Unit tests cover spaces/tabs/newlines-only values plus
+  NBSP, U+3000, U+FEFF, NEL U+0085, ZWSP U+200B, and an all-default-ignorable
+  string, assert the grapheme and UTF-8 byte errors take precedence (a
+  U+E0100 selector run is one grapheme but 8196 bytes), and assert a lone combining
+  mark and U+2800 are accepted. A project-metadata test pins the base behavior:
+  ZWSP-only title/summary remain accepted, a `trim()`-blank title reports the title
+  field, and a `trim()`-blank summary is `NULL`. REST, MCP, and dashboard POST tests
+  reject blank message values and capture message/idempotency/blob/audit counts
+  before and after to prove no write; acceptance tests send `"a b"` and multi-line
+  content through REST, MCP, and the dashboard.
+- **Prevents:** Treating a size bound as a required-content rule, equating "blank"
+  with ASCII spaces only, calling the rule visual-blank detection (it is a
+  Unicode-category test), and leaking a message rule into project metadata by reusing
+  a shared length validator.
+- **Remove when:** A shared content-policy helper covers every text field and the
+  per-validator check becomes redundant.
+
 ## 2026-11-05 — A tenant aggregate must start from the authorized row set, not from a global count
 
 - **Failure avoided:** An overview page invites `SELECT COUNT(*) FROM projects` or

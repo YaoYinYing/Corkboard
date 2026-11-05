@@ -15,8 +15,8 @@ import {
   validateBodyExpiresAtWindow,
   validateIdempotencyKey,
   validateLanguage,
-  validateSummary,
-  validateText,
+  validateMessageSummary,
+  validateMessageText,
   validateType,
   verifySenderDigest,
 } from "../domain/validation.ts";
@@ -446,8 +446,8 @@ export async function sendMessage(
   await authorizeMessageSend(deps, principal, projectId);
 
   const key = validateIdempotencyKey(idempotencyKey);
-  const summary = validateSummary(input.summary);
-  const text = validateText(input.text);
+  const summary = validateMessageSummary(input.summary);
+  const text = validateMessageText(input.text);
   const type = validateType(input.type);
   const language = validateLanguage(input.language);
   const bodyDigest = validateBodyDigest(input.bodyDigest);

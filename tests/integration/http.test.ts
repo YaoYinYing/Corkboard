@@ -339,6 +339,57 @@ test("send requires an Idempotency-Key", async (t) => {
   assert.equal((await fx.db.all("SELECT id FROM messages")).length, 0);
 });
 
+test("send rejects whitespace-only summary and text but accepts internal whitespace", async (t) => {
+  const { fx, app } = await withApp(t);
+  const alice = await addActor(fx, "alice");
+  await fx.addProject("proj_1", alice.accountId);
+  await fx.addMembership("proj_1", alice.speakerId);
+
+  const rejected = [
+    { key: "blank-summary-key", body: payload("body", { summary: " \t\n " }) },
+    { key: "blank-text-key", body: payload("\r\n\t ", { summary: "summary" }) },
+    { key: "ignorable-summary-key", body: payload("body", { summary: "\u200b" }) },
+    { key: "ignorable-text-key", body: payload("\ufeff", { summary: "summary" }) },
+  ];
+  for (const { key, body } of rejected) {
+    const response = await call(app, "/api/v1/projects/proj_1/messages", {
+      method: "POST",
+      token: alice.token,
+      headers: { "idempotency-key": key },
+      body,
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await jsonBody(response)).error.code, "VALIDATION_ERROR");
+  }
+  // A rejected payload writes no message, idempotency record, blob, or audit row.
+  for (const table of ["messages", "idempotency_keys", "body_objects", "audit_events"]) {
+    const row = await fx.db.first<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`);
+    assert.equal(row?.n, 0, table);
+  }
+
+  // Non-blank internal spaces and newlines remain valid and are stored as entered.
+  const accepted: ReadonlyArray<readonly [string, string]> = [
+    ["a b", "a b"],
+    ["line1\nline2", "line1\nline2"],
+  ];
+  for (const [index, [summary, text]] of accepted.entries()) {
+    const response = await call(app, "/api/v1/projects/proj_1/messages", {
+      method: "POST",
+      token: alice.token,
+      headers: { "idempotency-key": `valid-whitespace-${index}` },
+      body: payload(text, { summary }),
+    });
+    assert.equal(response.status, 201, JSON.stringify({ summary, text }));
+  }
+  const stored = await fx.db.all<{ summary: string }>(
+    "SELECT summary FROM messages ORDER BY seq ASC",
+  );
+  assert.deepEqual(
+    stored.map((row) => row.summary),
+    ["a b", "line1\nline2"],
+  );
+});
+
 test("send, list, get, body and read roundtrip", async (t) => {
   const { fx, app } = await withApp(t);
   const alice = await addActor(fx, "alice");

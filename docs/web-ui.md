@@ -185,7 +185,10 @@ rejected with `413` by the adapter before the handler runs. The
 `title` field is required and must be 1–140 Unicode graphemes and at most 1024
 UTF-8 bytes; a title that is empty or whitespace-only is rejected. The optional
 `summary` uses the same bounds; an empty or whitespace-only summary is stored as
-`NULL`. Project name and summary text are otherwise preserved as entered. Title
+`NULL`. Project metadata is not subject to the message blank rule: a `trim()`-blank
+title is rejected, a `trim()`-blank summary is `NULL`, and other length-valid values
+(for example ZWSP-only) are preserved. Project name and summary text are otherwise
+preserved as entered. Title
 and summary validation lives in the service, using the domain validators in
 `src/domain/validation.ts`; the route maps a service `VALIDATION_ERROR` to the
 safe form error. The HTML `maxlength="140"` is only a convenience and is not the
@@ -477,14 +480,25 @@ the server computes `sha256:` over the exact UTF-8 body text and passes it to
 `sendMessage`, which independently verifies it like any other send. The existing
 summary (1–140 graphemes, ≤1024 bytes), text (1–2000 graphemes, ≤8192 UTF-8 bytes),
 type, language, reply-reference (same project, committed row), and body-expiry
-(RFC 3339 UTC `Z`, strictly in the future, ≤366 days) limits apply unchanged. The
+(RFC 3339 UTC `Z`, strictly in the future, ≤366 days) limits apply unchanged. A
+message summary or text is rejected as blank when it consists only of Unicode
+`White_Space` and/or `Default_Ignorable_Code_Point` characters (for example tabs,
+newlines, NBSP, NEL, ideographic space, ZWSP, ZWJ/ZWNJ, word joiner, variation
+selectors, and BOM); any character outside those categories makes it non-blank, and
+internal spaces/newlines remain valid. A
+rejected value is not trimmed or normalized: a non-blank submitted value is stored
+exactly as entered. The
 optional expiry is a single timestamp on the new message; this UI does not list,
 change, or delete expired bodies, and expiry cleanup still requires the operator
 command.
 
 The form carries a server-generated `idempotency_key` in a hidden field. A validation
 failure re-renders the same form (HTTP `400`) with the same key and the entered values
-escaped, so an unchanged retry is an idempotent replay and creates no duplicate. A
+escaped, so an unchanged retry is an idempotent replay and creates no duplicate. The
+service validates before its replay/resume decision; the REST adapter's read-only
+status probe does not replay an invalid payload, which still returns `400`, and the
+same-key replay guarantee applies only to payloads valid under the current validation
+rules. A
 repeated submission after success also replays. Reusing the key with a different
 payload is a `409` conflict rendered in the form with a **fresh** key so the corrected
 message can be sent; the conflict path writes nothing. An unknown, foreign, inactive,

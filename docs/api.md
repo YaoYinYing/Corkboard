@@ -229,7 +229,10 @@ selected speaker to be owned by the session account, active, and have a non-remo
 active membership carrying `message.send`; the same check runs inside the
 publication transaction. A bearer credential can never use it. The sender is the
 selected speaker. Project title and summary reuse the 140-grapheme /
-1024-byte summary bounds; a blank summary is `NULL`. Project create provisions an
+1024-byte summary bounds but are not subject to the message blank rule: a
+`trim()`-blank title is rejected as `title must not be blank`, a `trim()`-blank
+summary is `NULL`, and other length-valid metadata (for example a ZWSP-only value)
+is preserved. Project create provisions an
 owner membership for the account's deterministic first active owned speaker; it
 does not create a speaker, credential, or credential-to-project grant. The project
 and owner membership are written in one database transaction (`BEGIN IMMEDIATE` on
@@ -579,11 +582,20 @@ Body:
 }
 ```
 
-- `summary`: required, ≤140 Unicode grapheme clusters and ≤1024 UTF-8 bytes.
+- `summary`: required, 1–140 Unicode grapheme clusters and ≤1024 UTF-8 bytes. A
+  message summary must not be blank: blank means only Unicode `White_Space` and/or
+  `Default_Ignorable_Code_Point` characters (for example tabs, newlines, NBSP, NEL,
+  ideographic space, ZWSP, ZWJ/ZWNJ, word joiner, variation selectors, and BOM); any
+  character outside those categories makes it non-blank. Internal spaces and
+  newlines are valid, and the value is not trimmed or normalized.
 - `type`: required, lowercase identifier `^[a-z][a-z0-9_.-]{0,31}$`; v1 attaches no
   behavior to any type.
 - `language`: required, canonical BCP 47 via `Intl.getCanonicalLocales`.
-- `text`: required for the first slice, ≤2000 grapheme clusters and ≤8192 UTF-8 bytes.
+- `text`: required for the first slice, 1–2000 grapheme clusters and ≤8192 UTF-8
+  bytes. A message text must not be blank under the same definition (only Unicode
+  `White_Space` and/or `Default_Ignorable_Code_Point` characters); any character
+  outside those categories makes it non-blank, and non-blank content is preserved as
+  sent, not trimmed or normalized.
 - `body_digest`: required; SHA-256 of the exact original `text` bytes, encoded
   `sha256:<lowercase hex>`. The server recomputes it over the received bytes and
   rejects a mismatch with `INTEGRITY_MISMATCH` **before** allocating a sequence,
@@ -616,6 +628,12 @@ Repeating the same key with the same payload returns `200` with the same
 `message_id`, `seq`, `committed_at`, and `digest`; `body_state` reflects the current
 committed state (for example `expired`), not a cached `ready`. A different payload
 under the same key, including a different `body_expires_at`, returns `CONFLICT`.
+The service validates before its replay/resume decision; the REST adapter's
+read-only status probe does not replay an invalid payload, which still returns
+`400`. A message committed with blank content before this rule existed therefore
+cannot be replayed with its old key: the request returns `VALIDATION_ERROR` (400).
+The same-key replay guarantee applies only to payloads valid under the current
+validation rules.
 
 ### `GET /api/v1/projects/:projectId/messages`
 
@@ -788,8 +806,8 @@ only and are separate from the per-credential API bucket.
 
 | Field | Limit |
 | --- | --- |
-| `summary` | 140 graphemes, 1024 UTF-8 bytes |
-| `text` | 2000 graphemes, 8192 UTF-8 bytes |
+| `summary` | message summary: 1–140 graphemes, 1024 UTF-8 bytes; blank (only Unicode `White_Space` and/or `Default_Ignorable_Code_Point` characters) rejected |
+| `text` | message text: 1–2000 graphemes, 8192 UTF-8 bytes; blank (same definition) rejected |
 | `type` | 32 ASCII chars, `^[a-z][a-z0-9_.-]{0,31}$` |
 | `language` | canonical BCP 47 |
 | `body_digest` | `sha256:` + 64 lowercase hex characters |

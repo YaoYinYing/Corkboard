@@ -17,6 +17,10 @@ export const MAX_TEXT_BYTES = 8192;
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 254;
 const MAX_LOGIN_PASSWORD_BYTES = 1024;
+// "Blank" means only Unicode White_Space and/or Default_Ignorable_Code_Point
+// characters (NBSP, NEL, ideographic space, ZWSP, ZWJ/ZWNJ, word joiner,
+// variation selectors, BOM, ...). A lone combining mark is not blank.
+const BLANK_CONTENT = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}]*$/u;
 
 function isLeapYear(year: number): boolean {
   return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
@@ -121,6 +125,24 @@ export function validateText(value: unknown): string {
   }
   if (utf8ByteLength(text) > MAX_TEXT_BYTES) {
     throw new AppError("VALIDATION_ERROR", `text must be at most ${MAX_TEXT_BYTES} UTF-8 bytes`);
+  }
+  return text;
+}
+
+// Message content only. Project title/summary keep the length-only
+// `validateSummary` behavior documented for project metadata.
+export function validateMessageSummary(value: unknown): string {
+  const summary = validateSummary(value);
+  if (BLANK_CONTENT.test(summary)) {
+    throw new AppError("VALIDATION_ERROR", "summary must not be blank");
+  }
+  return summary;
+}
+
+export function validateMessageText(value: unknown): string {
+  const text = validateText(value);
+  if (BLANK_CONTENT.test(text)) {
+    throw new AppError("VALIDATION_ERROR", "text must not be blank");
   }
   return text;
 }

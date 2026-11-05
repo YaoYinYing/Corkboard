@@ -99,6 +99,15 @@ function errorCode(result: JsonObject): string {
   return parsed["error"]["code"] as string;
 }
 
+async function writeRowCounts(fx: ServiceFixture): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const table of ["messages", "idempotency_keys", "body_objects", "audit_events"]) {
+    const row = await fx.db.first<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`);
+    counts[table] = row?.n ?? 0;
+  }
+  return counts;
+}
+
 function rawPost(
   app: App,
   body: unknown,
@@ -641,6 +650,64 @@ test("invalid tool arguments are schema errors, not service calls", async (t) =>
   const listed = value(await call(client, "corkboard_list_messages", { project_id: "proj_schema" }));
   assert.equal(listed["messages"].length, 1);
   assert.equal(listed["messages"][0]["message_id"], sent["message_id"]);
+});
+
+test("send rejects whitespace-only summary and text but accepts internal whitespace", async (t) => {
+  const { fx, app } = await withApp(t);
+  const actor = await addActor(fx, "blank");
+  await fx.addProject("proj_blank", actor.accountId);
+  await fx.addMembership("proj_blank", actor.speakerId, ALL_SCOPES);
+  await fx.grantProject("cred_blank", "proj_blank");
+  const { client } = await connect(app, actor.token);
+  t.after(() => client.close());
+  const writesBefore = await writeRowCounts(fx);
+
+  const blankSummary = await call(client, "corkboard_send_message", {
+    project_id: "proj_blank",
+    summary: " \t\n ",
+    type: "request",
+    language: "en",
+    text: "body",
+  });
+  assert.equal(errorCode(blankSummary), "VALIDATION_ERROR");
+
+  const blankText = await call(client, "corkboard_send_message", {
+    project_id: "proj_blank",
+    summary: "summary",
+    type: "request",
+    language: "en",
+    text: "\r\n\t ",
+  });
+  assert.equal(errorCode(blankText), "VALIDATION_ERROR");
+
+  const blankIgnorable = await call(client, "corkboard_send_message", {
+    project_id: "proj_blank",
+    summary: "\u200b",
+    type: "request",
+    language: "en",
+    text: "body",
+  });
+  assert.equal(errorCode(blankIgnorable), "VALIDATION_ERROR");
+
+  // Validation precedes every write: the four write tables are unchanged.
+  assert.deepEqual(await writeRowCounts(fx), writesBefore);
+
+  const empty = value(await call(client, "corkboard_list_messages", { project_id: "proj_blank" }));
+  assert.equal(empty["messages"].length, 0);
+
+  const sent = value(
+    await call(client, "corkboard_send_message", {
+      project_id: "proj_blank",
+      summary: "line1\nline2",
+      type: "request",
+      language: "en",
+      text: "a b",
+    }),
+  );
+  const listed = value(await call(client, "corkboard_list_messages", { project_id: "proj_blank" }));
+  assert.equal(listed["messages"].length, 1);
+  assert.equal(listed["messages"][0]["message_id"], sent["message_id"]);
+  assert.equal(listed["messages"][0]["summary"], "line1\nline2");
 });
 
 async function endpointApp(

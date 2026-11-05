@@ -232,10 +232,10 @@ export function registerCorkboardTools(
         `idempotency key; the caller cannot set sender or timestamps. ${DATA_NOT_AUTHORITY}`,
       inputSchema: z.strictObject({
         project_id: z.string().min(1),
-        summary: z.string().describe("Short metadata summary, at most 140 graphemes."),
+        summary: z.string().describe("Short metadata summary, at most 140 graphemes; must not be blank."),
         type: z.string().describe("Lowercase message type identifier; no executable behavior."),
         language: z.string().describe("BCP 47 language tag."),
-        text: z.string().describe("Message body, at most 2000 graphemes / 8192 UTF-8 bytes."),
+        text: z.string().describe("Message body, at most 2000 graphemes / 8192 UTF-8 bytes; must not be blank."),
         reply_to_id: z.string().min(1).optional().describe("Message id in the same project."),
       }),
     },

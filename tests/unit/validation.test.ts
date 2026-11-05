@@ -6,6 +6,10 @@ import {
   validateBodyDigest,
   validateIdempotencyKey,
   validateLanguage,
+  validateMessageSummary,
+  validateMessageText,
+  validateProjectSummary,
+  validateProjectTitle,
   validateSummary,
   validateText,
   validateType,
@@ -75,6 +79,41 @@ test("summary rejects empty and non-string input", () => {
   }
 });
 
+test("message summary rejects blank values but preserves non-blank content", () => {
+  for (const blank of [
+    " ",
+    "   ",
+    "\t",
+    "\n",
+    "\r\n",
+    " \t\n ",
+    "\u00a0", // NBSP
+    "\u3000", // ideographic space
+    "\ufeff", // BOM / zero-width no-break space
+    "\u0085", // NEL
+    "\u200b", // zero-width space
+    "\u200b\u200c\u200d\u2060\ufe0f", // all default-ignorable
+  ]) {
+    assert.throws(
+      () => validateMessageSummary(blank),
+      (error: unknown) =>
+        error instanceof AppError &&
+        error.code === "VALIDATION_ERROR" &&
+        error.message === "summary must not be blank",
+    );
+  }
+  // Length errors keep precedence over the blank rule.
+  assert.throws(() => validateMessageSummary(" ".repeat(141)), /1-140 graphemes/);
+  // A lone combining mark is outside both blank categories.
+  assert.equal(validateMessageSummary("\u0301"), "\u0301");
+  // Characters outside the blank categories are accepted as-is.
+  assert.equal(validateMessageSummary("\u2800"), "\u2800"); // braille blank
+  // Values are rejected, never trimmed: non-blank content is returned as entered.
+  for (const valid of ["a b", "line1\nline2", " a ", "\ta\t"]) {
+    assert.equal(validateMessageSummary(valid), valid);
+  }
+});
+
 test("text counts graphemes and enforces both caps", () => {
   assert.equal(validateText("x"), "x");
   assert.equal(validateText("😀"), "😀");
@@ -88,6 +127,51 @@ test("text counts graphemes and enforces both caps", () => {
   const heavyCluster = "𠀀́"; // 1 grapheme, 6 bytes
   assert.throws(() => validateText(heavyCluster.repeat(2000)), hasCode("VALIDATION_ERROR")); // 12000 bytes
   assert.throws(() => validateText(42), hasCode("VALIDATION_ERROR"));
+});
+
+test("message text rejects blank values but preserves non-blank content", () => {
+  for (const blank of [
+    " ",
+    "   ",
+    "\t",
+    "\n",
+    "\r\n",
+    " \t\n ",
+    "\u00a0", // NBSP
+    "\u3000", // ideographic space
+    "\ufeff", // BOM / zero-width no-break space
+    "\u0085", // NEL
+    "\u200b", // zero-width space
+    "\u200b\u200c\u200d\u2060\ufe0f", // all default-ignorable
+  ]) {
+    assert.throws(
+      () => validateMessageText(blank),
+      (error: unknown) =>
+        error instanceof AppError &&
+        error.code === "VALIDATION_ERROR" &&
+        error.message === "text must not be blank",
+    );
+  }
+  // Length errors keep precedence over the blank rule: a selector run is one
+  // grapheme but 8196 UTF-8 bytes.
+  assert.throws(() => validateMessageText(" ".repeat(2001)), /1-2000 graphemes/);
+  assert.throws(() => validateMessageText("\u{E0100}".repeat(2049)), /at most 8192 UTF-8 bytes/);
+  // A lone combining mark is outside both blank categories.
+  assert.equal(validateMessageText("\u0301"), "\u0301");
+  // Values are rejected, never trimmed: non-blank content is returned as entered.
+  for (const valid of ["a b", "line1\nline2", " a ", "\ta\t"]) {
+    assert.equal(validateMessageText(valid), valid);
+  }
+});
+
+test("project metadata keeps its base blank handling, not the message rule", () => {
+  // A ZWSP-only title/summary remains non-blank under the prior length rules.
+  assert.equal(validateProjectTitle("\u200b"), "\u200b");
+  assert.equal(validateProjectSummary("\u200b"), "\u200b");
+  assert.equal(validateSummary("\u200b"), "\u200b");
+  // A trim()-blank title still reports the title field; a blank summary is NULL.
+  assert.throws(() => validateProjectTitle("\u00a0"), /title must not be blank/);
+  assert.equal(validateProjectSummary("\u00a0"), null);
 });
 
 test("type follows the documented identifier pattern", () => {

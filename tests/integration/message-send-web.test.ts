@@ -173,6 +173,15 @@ async function committedMessages(
   );
 }
 
+async function writeRowCounts(fx: ServiceFixture): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const table of ["messages", "idempotency_keys", "body_objects", "audit_events"]) {
+    const row = await fx.db.first<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`);
+    counts[table] = row?.n ?? 0;
+  }
+  return counts;
+}
+
 function sendFields(
   csrf: string,
   idempotencyKey: string,
@@ -653,10 +662,17 @@ test("invalid message fields re-render safely and write nothing", async (t) => {
 
   const form = await getPage(app, "/projects/proj_a/messages/new", cookie);
   const key = idempotencyKeyFrom(form.html);
+  const writesBefore = await writeRowCounts(fx);
   const invalidCases: Array<Record<string, string>> = [
     { summary: "" },
+    { summary: "   " },
+    { summary: "\t\n" },
+    { summary: "\u200b" },
     { summary: "x".repeat(141) },
     { text: "" },
+    { text: "   " },
+    { text: "\r\n\t" },
+    { text: "\ufeff" },
     { type: "Not Valid" },
     { language: "not a language" },
     { body_expires_at: "not-a-timestamp" },
@@ -678,6 +694,7 @@ test("invalid message fields re-render safely and write nothing", async (t) => {
     assert.equal(idempotencyKeyFrom(html), key);
   }
   assert.deepEqual(await committedMessages(fx), []);
+  assert.deepEqual(await writeRowCounts(fx), writesBefore);
 
   // The same payload with the same key is idempotent; a different payload with
   // the same key is a conflict.
@@ -700,6 +717,34 @@ test("invalid message fields re-render safely and write nothing", async (t) => {
   // The re-render carries a fresh key so the corrected message can be sent.
   assert.notEqual(idempotencyKeyFrom(conflictHtml), key);
   assert.equal((await committedMessages(fx)).length, 1);
+});
+
+test("non-blank internal spaces and newlines send and are stored as entered", async (t) => {
+  const { fx, app } = await withApp(t);
+  await createProjectAccount(fx);
+  const { cookie, csrf } = await loginProjectAccount(app);
+  const composePath = "/projects/proj_a/messages/new";
+  const accepted: ReadonlyArray<readonly [string, string]> = [
+    ["a b", "a b"],
+    ["line1\nline2", "line1\nline2"],
+  ];
+  for (const [summary, text] of accepted) {
+    const form = await getPage(app, composePath, cookie);
+    const key = idempotencyKeyFrom(form.html);
+    const response = await postForm(
+      app,
+      composePath,
+      cookie,
+      sendFields(csrf, key, { summary, text }),
+    );
+    assert.equal(response.status, 303, JSON.stringify({ summary, text }));
+  }
+  // Values are stored as entered; they are never trimmed or normalized.
+  const committed = await committedMessages(fx);
+  assert.deepEqual(
+    committed.map((message) => message.summary),
+    ["a b", "line1\nline2"],
+  );
 });
 
 test("project status, positive expiry/reply, and boundary form failures", async (t) => {
