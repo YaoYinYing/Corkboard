@@ -1,0 +1,286 @@
+// Account-scoped speaker directory and explicit credential issuance for the
+// human dashboard. These functions never authorize a project by ID alone: the
+// speaker must be owned by the session account, and every selected project must
+// grant the selected scopes to that speaker through an active membership.
+import { generateSpeakerToken, hashSecret, randomBase64url } from "../auth/credentials.ts";
+import { SCOPES, type Scope } from "../domain/authz.ts";
+import { AppError } from "../domain/errors.ts";
+import { writeAudit } from "./audit.ts";
+import { parseScopeJson, type Principal, type ServiceDeps } from "./auth.ts";
+
+const MAX_SPEAKER_ID_CHARS = 128;
+const MAX_PROJECT_ID_CHARS = 128;
+const MAX_SELECTED_PROJECTS = 100;
+// `boundAuditDetail` caps arrays at 32 elements. Keep the audit honest by
+// sending at most that many IDs plus the full count rather than relying on the
+// silent truncation.
+const MAX_AUDIT_PROJECT_IDS = 32;
+
+export interface SpeakerProject {
+  id: string;
+  title: string;
+  capabilities: Scope[];
+}
+
+export interface OwnedSpeaker {
+  id: string;
+  display_name: string | null;
+  status: string;
+  projects: SpeakerProject[];
+}
+
+export interface OwnedSpeakerForKey {
+  id: string;
+  display_name: string | null;
+  status: string;
+  projects: SpeakerProject[];
+}
+
+export interface CredentialIssueInput {
+  projectIds: readonly string[];
+  scopes: readonly string[];
+}
+
+export interface IssuedCredential {
+  credentialId: string;
+  /** Displayed once in the POST response; never persisted or logged. */
+  token: string;
+  projects: string[];
+  scopes: Scope[];
+}
+
+// Only a human session may read the directory or mint a credential. A bearer
+// principal has its own speaker and must not manage account speakers.
+function requireSessionAccount(principal: Principal): string {
+  if (principal.sessionViewer !== true) throw new AppError("FORBIDDEN");
+  return principal.accountId;
+}
+
+function isScope(value: string): value is Scope {
+  return (SCOPES as readonly string[]).includes(value);
+}
+
+interface SpeakerRow {
+  id: string;
+  display_name: string | null;
+  status: string;
+}
+
+interface ProjectRow {
+  id: string;
+  title: string;
+  capabilities: string;
+}
+
+async function loadSpeakerProjects(
+  deps: ServiceDeps,
+  accountId: string,
+  speakerId: string,
+): Promise<SpeakerProject[]> {
+  const rows = await deps.db.all<ProjectRow>(
+    `SELECT p.id, p.title, m.capabilities
+       FROM project_memberships m
+       JOIN projects p ON p.id = m.project_id
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE m.speaker_id = ? AND s.owner_account_id = ? AND m.removed_at IS NULL
+        AND p.status = 'active' AND s.status = 'active' AND a.status = 'active'
+      ORDER BY p.created_at ASC, p.id ASC`,
+    [speakerId, accountId],
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    capabilities: SCOPES.filter((scope) => parseScopeJson(row.capabilities).has(scope)),
+  }));
+}
+
+// The directory lists every speaker owned by the account, including inactive
+// ones (with status shown). Projects are only active memberships, so the page
+// never advertises access the existing authorization rules would deny.
+export async function listOwnedSpeakers(
+  deps: ServiceDeps,
+  principal: Principal,
+): Promise<OwnedSpeaker[]> {
+  const accountId = requireSessionAccount(principal);
+  const rows = await deps.db.all<SpeakerRow & { project_id: string | null; project_title: string | null; capabilities: string | null }>(
+    `SELECT s.id, s.display_name, s.status,
+            p.id AS project_id, p.title AS project_title, m.capabilities
+       FROM speakers s
+       JOIN accounts a ON a.id = s.owner_account_id
+       LEFT JOIN project_memberships m
+         ON m.speaker_id = s.id AND m.removed_at IS NULL AND s.status = 'active'
+       LEFT JOIN projects p ON p.id = m.project_id AND p.status = 'active'
+      WHERE s.owner_account_id = ? AND a.status = 'active'
+      ORDER BY s.created_at ASC, s.id ASC, p.created_at ASC, p.id ASC`,
+    [accountId],
+  );
+
+  const speakers = new Map<string, OwnedSpeaker>();
+  for (const row of rows) {
+    let speaker = speakers.get(row.id);
+    if (speaker === undefined) {
+      speaker = {
+        id: row.id,
+        display_name: row.display_name,
+        status: row.status,
+        projects: [],
+      };
+      speakers.set(row.id, speaker);
+    }
+    if (row.project_id === null || row.capabilities === null) continue;
+    speaker.projects.push({
+      id: row.project_id,
+      title: row.project_title ?? row.project_id,
+      capabilities: SCOPES.filter((scope) => parseScopeJson(row.capabilities ?? "").has(scope)),
+    });
+  }
+  return [...speakers.values()];
+}
+
+// The owner check lives in the WHERE clause. A foreign, unknown, or inactive
+// speaker is the same NOT_FOUND, so the key form cannot probe another account's
+// speakers. The route authorizes before parsing the request body.
+export async function getOwnedSpeakerForKey(
+  deps: ServiceDeps,
+  principal: Principal,
+  speakerId: string,
+): Promise<OwnedSpeakerForKey> {
+  const accountId = requireSessionAccount(principal);
+  if (speakerId === "" || speakerId.length > MAX_SPEAKER_ID_CHARS) {
+    throw new AppError("NOT_FOUND");
+  }
+  const speaker = await deps.db.first<SpeakerRow>(
+    `SELECT s.id, s.display_name, s.status
+       FROM speakers s
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE s.id = ? AND s.owner_account_id = ?
+        AND s.status = 'active' AND a.status = 'active'`,
+    [speakerId, accountId],
+  );
+  if (speaker === undefined) throw new AppError("NOT_FOUND");
+  return {
+    ...speaker,
+    projects: await loadSpeakerProjects(deps, accountId, speakerId),
+  };
+}
+
+// Explicit issuance only. Every selected project needs an active membership for
+// this speaker, and every requested scope must already be one of that
+// membership's capabilities; a scope is checked against every selected project,
+// matching the CLI. Grants are written only for the selected projects. The raw
+// token is returned to the caller for one display and is never stored: only the
+// public prefix and keyed HMAC verifier reach the database.
+export async function issueProjectCredential(
+  deps: ServiceDeps,
+  principal: Principal,
+  speakerId: string,
+  input: CredentialIssueInput,
+): Promise<IssuedCredential> {
+  const accountId = requireSessionAccount(principal);
+  const speaker = await getOwnedSpeakerForKey(deps, principal, speakerId);
+
+  const requestedScopes = new Set<Scope>();
+  for (const raw of input.scopes) {
+    if (typeof raw !== "string" || !isScope(raw)) throw new AppError("VALIDATION_ERROR");
+    requestedScopes.add(raw);
+  }
+  if (requestedScopes.size === 0) throw new AppError("VALIDATION_ERROR");
+  const scopes = SCOPES.filter((scope) => requestedScopes.has(scope));
+
+  const projectIds = new Set<string>();
+  for (const raw of input.projectIds) {
+    if (typeof raw !== "string" || raw === "" || raw.length > MAX_PROJECT_ID_CHARS) {
+      throw new AppError("VALIDATION_ERROR");
+    }
+    projectIds.add(raw);
+  }
+  if (projectIds.size === 0 || projectIds.size > MAX_SELECTED_PROJECTS) {
+    throw new AppError("VALIDATION_ERROR");
+  }
+
+  const allowed = new Map(speaker.projects.map((project) => [project.id, project]));
+  for (const projectId of projectIds) {
+    const project = allowed.get(projectId);
+    if (project === undefined) throw new AppError("VALIDATION_ERROR");
+    for (const scope of scopes) {
+      if (!project.capabilities.includes(scope)) throw new AppError("VALIDATION_ERROR");
+    }
+  }
+
+  const { token, publicPrefix } = generateSpeakerToken();
+  const credentialId = `cred_${randomBase64url(16)}`;
+  const selected = [...projectIds];
+  const now = deps.now().toISOString();
+  await deps.db.transaction(async (tx) => {
+    // Re-read every selected membership inside the write transaction. The
+    // pre-check above rejects invalid selections quickly, but a membership
+    // removed (or a speaker/project deactivated) between that check and this
+    // write must roll back the whole issuance instead of leaving a credential
+    // or grant for access the authorization rules would now deny.
+    for (const projectId of selected) {
+      const membership = await tx.first<{ capabilities: string }>(
+        `SELECT m.capabilities
+           FROM project_memberships m
+           JOIN projects p ON p.id = m.project_id
+           JOIN speakers s ON s.id = m.speaker_id
+           JOIN accounts a ON a.id = s.owner_account_id
+          WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
+            AND p.status = 'active' AND s.status = 'active'
+            AND s.owner_account_id = ? AND a.status = 'active'`,
+        [projectId, speakerId, accountId],
+      );
+      if (membership === undefined) throw new AppError("VALIDATION_ERROR");
+      const capabilities = parseScopeJson(membership.capabilities);
+      for (const scope of scopes) {
+        if (!capabilities.has(scope)) throw new AppError("VALIDATION_ERROR");
+      }
+    }
+    await tx.run(
+      `INSERT INTO credentials
+         (id, speaker_id, public_prefix, secret_verifier, scope_json, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+      [
+        credentialId,
+        speakerId,
+        publicPrefix,
+        await hashSecret(token, deps.pepper),
+        JSON.stringify(scopes),
+        now,
+      ],
+    );
+    for (const projectId of selected) {
+      await tx.run(
+        `INSERT INTO credential_project_grants (credential_id, project_id, granted_at)
+         VALUES (?, ?, ?)`,
+        [credentialId, projectId, now],
+      );
+    }
+  });
+
+  // Identifiers and scope names only; never the token, its prefix, or verifier.
+  // `boundAuditDetail` caps arrays at 32 and drops a detail document over 2048
+  // characters, so record the IDs that fit plus the true count instead of
+  // letting the sink silently truncate a 100-project selection.
+  const auditProjects: string[] = [];
+  let auditChars = 0;
+  for (const projectId of selected.slice(0, MAX_AUDIT_PROJECT_IDS)) {
+    if (auditChars + projectId.length + 3 > 1600) break;
+    auditProjects.push(projectId);
+    auditChars += projectId.length + 3;
+  }
+  await writeAudit(deps, {
+    operation: "credential.issue",
+    outcome: "success",
+    actorAccountId: accountId,
+    actorSpeakerId: speakerId,
+    projectId: selected.length === 1 ? (selected[0] ?? null) : null,
+    detail: {
+      projects: auditProjects,
+      project_count: selected.length,
+      scopes,
+    },
+  });
+
+  return { credentialId, token, projects: selected, scopes };
+}

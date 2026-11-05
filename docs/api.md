@@ -201,6 +201,9 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | `/projects/:projectId` | `POST` | Form-encoded title/summary update; requires `project.edit` plus the same CSRF check. Unknown, foreign, and non-owner projects are a uniform `404`. `303` to the timeline. |
 | `/projects/:projectId/edit` | `GET` | Edit form; requires `project.edit` and is otherwise the same uniform `404`. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
+| `/speakers` | `GET` | Speakers owned by the session account only, with status and active project grants. |
+| `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active owned speaker. |
+| `/speakers/:speakerId/key` | `POST` | Form-encoded issuance for explicitly selected projects and scopes; requires the session CSRF check. The raw token is displayed once in a `no-store` `200` response and is never placed in a URL, state, or log. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet. |
 
 Authorization derives a viewer from active, non-removed memberships of speakers
@@ -225,8 +228,23 @@ storage contract; D1 is not exercised in this environment. Every page is `no-sto
 CSP and no inline script or style. `?lang=zh` selects Simplified Chinese; unknown
 locales fall back to English and `lang` is preserved across filters, pager links,
 and project forms. Filter, search, replay, project form, CSRF, and authorization
-behavior is specified in [`web-ui.md`](./web-ui.md). No message send, expiry,
-member, credential, key, or admin action exists.
+behavior is specified in [`web-ui.md`](./web-ui.md).
+
+The speaker directory is account-scoped: `GET /speakers` lists only rows whose
+`owner_account_id` is the session account, and shows active project grants (active,
+non-removed memberships on active projects). `GET /speakers/:speakerId/key` and
+`POST` to the same path require an active speaker owned by the account; a foreign,
+unknown, or inactive speaker is a uniform `404`. `POST` requires at least one selected
+project and one selected scope, at most 100 projects, and every scope must already be
+a capability of that speaker's active membership in **every** selected project (the
+`issue-key` CLI rule). Unknown/foreign/non-member projects, scope mismatches, and
+over-limit selections return the HTML `400` form error and write nothing. A successful
+issue writes one credential and only the selected project grants in one transaction,
+re-reading each membership under active checks before the writes, and audits up to 32
+project IDs plus the true `project_count` and scopes, without the token. The raw token appears exactly once in the `200` `no-store` POST response; it is
+not in a redirect, URL, cookie, database column, or log. There is no rotation,
+revocation, grant-editing, or expiry UI; those remain CLI-only. No message send,
+expiry, membership editor, or admin action exists.
 
 ## Endpoints
 

@@ -364,17 +364,19 @@ with the existing service functions.
 - **Routes and rendering.** `handlers.ts` sends `/`, `/login`, `/projects`
   (`POST`), `/projects/new`, `/projects/:projectId` (`GET` and `POST`),
   `/projects/:projectId/edit`, `/projects/:projectId/messages/:messageId/body`,
-  and `/static/app.css` to `handleWebRoute`. Pages are rendered on the server from
+  `/speakers`, `/speakers/:speakerId/key` (`GET` and `POST`), and
+  `/static/app.css` to `handleWebRoute`. Pages are rendered on the server from
   string templates. `src/app/html.ts` owns the single `escapeHtml` boundary and
   the strict dashboard CSP. There is no client script or inline style, and the
   stylesheet is a constant same-origin body.
 - **Body buffering.** For `POST` only, the Node adapter buffers any non-root path
   that `isWebPath` assigns to this router before building the Web `Request`,
   under the same 64 KiB cap and streaming limit as the API. That is the form
-  routes `/login`, `/projects`, and `/projects/:projectId`, plus POSTs to the
-  GET-only paths `isWebPath` also names (`/projects/new`,
-  `/projects/:projectId/edit`, `/projects/:projectId/messages/:messageId/body`,
-  and `/static/app.css`). Those GET-only POSTs still receive the router's `405`,
+  routes `/login`, `/projects`, `/projects/:projectId`, and
+  `/speakers/:speakerId/key`, plus POSTs to the GET-only paths `isWebPath` also
+  names (`/projects/new`, `/projects/:projectId/edit`,
+  `/projects/:projectId/messages/:messageId/body`, `/speakers`, and
+  `/static/app.css`). Those GET-only POSTs still receive the router's `405`,
   but their body is buffered up to the cap first. The root `/` is excluded by
   the `segments.length` guard. `GET`, `HEAD`, and `DELETE` requests are never
   buffered. The route set lives in the web router, so a dashboard form added
@@ -412,8 +414,14 @@ with the existing service functions.
   `create-project` inserts a project without a membership (invisible and denied until
   one is added), and `remove-member` can remove the last membership, so an active
   project without memberships can exist outside this path. `POST /projects/:projectId`
-  updates title and summary after re-authorizing `project.edit`. No dashboard route
-  writes a message, credential, grant, or receipt.
+  updates title and summary after re-authorizing `project.edit`. `GET /speakers` is
+  an account-scoped directory (`speakers.owner_account_id`) showing active project
+  grants only. `POST /speakers/:speakerId/key` resolves an active owned speaker,
+  checks the selected projects and scopes, re-reads each membership inside the write
+  transaction, and inserts one credential plus one grant per explicitly selected
+  project; the raw token is returned only in the no-store response. No dashboard
+  route writes a message or receipt, and credential/grant writes occur only through
+  that explicit issuance transaction.
   `POST /login` inserts the session row and authenticated page requests refresh
   `sessions.last_seen_at`.
 - **Uniform denial.** The resolver and the session authorization branch return

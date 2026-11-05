@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) on `slice-atomic-final`, not pushed |
-| Last pushed checkpoint | `4b1ba53` (slice V dashboard form adapter body buffering, tree `41d9bfb`) on `origin/main`; earlier pushed checkpoints include `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
-| Branch | `main` at `4b1ba53` (`origin/main`); slice-W atomic project creation on `slice-atomic-final`, not pushed |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) at pre-squash feature `21a5fdf` and state tail `24cebb3` (tree `46f1e62`), squashed to one commit on `slice-speakers`, not pushed |
+| Last pushed checkpoint | `0f81877` (slice W atomic project creation, tree `b7a1653`) on `origin/main`; earlier pushed checkpoints include `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `main` at `0f81877` (`origin/main`); slice-X speaker directory/credential issuance squashed to one commit on `slice-speakers`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, membership, credentials, keys, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, membership, credential rotation/revocation and grant editing, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
 ## Checkpoint history
 
@@ -46,7 +46,9 @@ as the work it describes.
 | this checkpoint | commit trailer | Slice T: dashboard project create/edit (`GET /projects/new`, `POST /projects`, `GET /projects/:projectId/edit`, `POST /projects/:projectId`), session double-submit CSRF, owner-only `project.edit`, en/zh forms, 303 redirects | independent review PENDING; `npm ci` exit 0; `npm run check` exit 0 (402 tests: 401 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; on `slice-admin`, not pushed |
 | this checkpoint | commit trailer | Issue #7: backup snapshot excludes documented in-progress `.tmp-<32 lowercase hex>` blob entries instead of copying them or failing when a concurrent writer renames them away; a non-regular entry with a temp name and every other entry still fail closed; verify remains strict about temp entries in a backup directory; docs state the exact rule, including that excluded temps still count toward the 100,000-entry enumeration cap | on `slice-backup-flake`, not pushed; independent review PASS (security zero findings; contract PASS with doc/test P2s addressed); reproduction before fix: 8/8 `createBackup` attempts failed with `BACKUP_BLOB_ENTRY_INVALID` on `.tmp-*` entries, after fix: 0/400; deterministic integration test (`documented in-progress temp blobs are excluded from the snapshot`, fails on base with `blobs` 5 vs 4) and security test (temp-named symlink rejected); renamed-away race branch covered by the out-of-tree concurrency reproducer, not a committed deterministic test; `npm ci` exit 0; `npm run check` exit 0 twice (404 tests: 403 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0 |
 | this checkpoint | commit trailer | Slice V: Node adapter buffers dashboard project form POST bodies (`POST /projects`, `POST /projects/:projectId`) via `isWebPath`; HTTP-level create/edit/CSRF/oversize/auth tests through `startServer` | independent review PENDING; Base-SHA `01538a0c78d553bdc36ab20a8769dfa5b9894e48`; `npm ci` exit 0; `npm run check` exit 0 (405 tests: 404 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; merged at `4b1ba53`; evidence: GitHub Issue #6 comment 6653112857 |
-| this checkpoint | commit trailer | Slice W, Issue #8: project creation writes the project and its owner membership in one SQLite `BEGIN IMMEDIATE` transaction, so a failed second insert or a pre-commit crash leaves neither row | Base `4b1ba53`; failure-injection test `a failed owner-membership insert rolls the project back` fails on base `01538a0` (orphan active project) and passes here; contract covers commit, rollback on the failing second insert, and concurrent serialization; `npm ci` exit 0; `npm run check` exit 0 (407 tests: 406 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; branch `slice-atomic-final`, not pushed: independent review PENDING; D1 batch semantics documented but not implemented or verified |
+| this checkpoint | commit trailer | Slice W, Issue #8: project creation writes the project and its owner membership in one SQLite `BEGIN IMMEDIATE` transaction, so a failed second insert or a pre-commit crash leaves neither row | Base `4b1ba53`; failure-injection test `a failed owner-membership insert rolls the project back` fails on base `01538a0` (orphan active project) and passes here; contract covers commit, rollback on the failing second insert, and concurrent serialization; `npm ci` exit 0; `npm run check` exit 0 (407 tests: 406 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; pushed on `origin/main` at `0f81877` (tree `b7a1653`); D1 batch semantics documented but not implemented or verified |
+| pre-squash `21a5fdf` + state tail `24cebb3` | `46f1e62` | Slice X pre-squash evidence: dashboard speaker directory (`GET /speakers`), explicit project-scoped credential issuance (`GET/POST /speakers/:speakerId/key`), owner-only uniform 404, session CSRF, in-transaction membership re-check, one-time `no-store` display | Base `0f81877`; independent review PASS on `24cebb3`; `npm ci` exit 0; `npm run check` exit 0 (417 tests: 416 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; superseded by the squashed checkpoint row below |
+| this checkpoint | commit-trailer `Tree-SHA` | Slice X final squashed capability: the same directory and issuance plus the in-transaction membership **and scope** re-check, 100-project cap, bounded `credential.issue` audit (`project_count` + up to 32 IDs), response-body logging correction, and README/architecture corrections | Base `0f81877`; one commit on `slice-speakers`, not pushed; `npm ci` exit 0; `npm run check` exit 0 (423 tests: 422 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; no rotation/revocation/grant-editor/expiry UI (CLI-only); D1/R2 parity and a real-browser pass remain unverified |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
@@ -1286,6 +1288,71 @@ pushed.
   (not reachable in the shipped server). A transaction callback that
   issues statements through the root handle instead of the supplied `tx` would wait
   behind its own transaction; the handle is the only documented and tested usage.
+
+## Vertical slice X — speaker directory and project-scoped credential issuance (base `0f81877`)
+
+- **Checkpoint.** Pre-squash feature `21a5fdf` (tree `c467080`) plus state tail
+  `24cebb3` (tree `46f1e62`) were audited as PASS (417 tests). The combined review
+  fixes (in-transaction scope re-check, inactive-speaker grants, audit bound, docs)
+  are included in the final squashed commit on `slice-speakers` (423 tests; its
+  `Tree-SHA` is in the commit trailer), based on `0f81877`. Not pushed.
+- **Scope.** Adds `GET /speakers` and `GET`/`POST /speakers/:speakerId/key` to the
+  server-rendered dashboard. The directory is account-scoped in SQL
+  (`speakers.owner_account_id = <session account>`) and shows each owned speaker's ID,
+  display name, status, and active project grants. The form lists active projects and
+  the union of their capabilities. POST requires explicit project and scope
+  selection; every scope must already be a capability of the speaker's active
+  membership in every selected project (the `issue-key` CLI rule). Unknown, foreign,
+  inactive, and non-member projects and unknown/insufficient scopes return the HTML
+  `400` form error with `role="alert"` and write nothing.
+- **Owner and CSRF boundary.** The service resolves the speaker with
+  `WHERE id = ? AND owner_account_id = ?` plus active speaker/account checks before
+  the body is parsed; foreign, unknown, and inactive speakers are a uniform `404`.
+  The POST uses the existing session-cookie double-submit (`corkboard_csrf` + hidden
+  `csrf_token`), constant-time digest comparison, and `Sec-Fetch-Site`/`Origin`
+  checks. The 64 KiB form cap is unchanged. A committed negative test logs in as
+  another account and asserts `404` plus no new credential, so removing the owner
+  predicate fails the suite.
+- **Issuance.** Reuses `generateSpeakerToken`/`hashSecret`: a fresh 256-bit `cb_`
+  token with only a 12-character public prefix and keyed HMAC verifier stored. The
+  credential row and one `credential_project_grants` row per selected project are
+  written in one `transaction`, and the transaction re-reads every selected membership
+  with `removed_at IS NULL` plus active speaker/project/account checks and re-checks
+  every requested scope against it before either insert. A membership removed or deactivated after the fast
+  pre-check fails the transaction and rolls the whole issuance back. Membership is
+  never converted into a grant, so an unselected project is denied even when the
+  speaker belongs to it. Selections are capped at 100 projects. `expires_at` is `NULL`
+  because this UI has no expiry control. A sanitized `credential.issue` audit event
+  records the actor account, speaker, at most 32 project IDs, `project_count` (the
+  true selected count), and scope names only; it never records the token, prefix, or
+  verifier.
+- **One-time display.** The raw token is returned only in the `200` POST body, which
+  is `Cache-Control: no-store` with the strict CSP. It is never placed in a redirect,
+  URL, cookie, hidden field, session state, database column, or application log. A
+  later GET of the directory or form contains no token. Because the token is not kept
+  in state, the POST is not redirected; re-submitting it creates a different
+  credential rather than recovering the earlier one.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (secret scan, history scan,
+  typecheck, 423 tests: 422 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0.
+  New integration tests cover the owner directory and happy path, cross-account
+  isolation, foreign/unknown/inactive speaker `404` (including authorization before
+  body parsing), unauthenticated redirects, CSRF missing/wrong/no-cookie/cross-origin/
+  unbound-pair failures, invalid/foreign/non-member project selection, per-project
+  scope restrictions, membership removal injected between validation and the write
+  (rollback leaves no credential/grant), a capability downgrade injected between
+  validation and the transaction (the in-transaction scope re-check rolls it back;
+  removing that re-check makes the test fail), a forced grant-insert failure (rollback
+  leaves no credential), directory escaping of display names and project titles, duplicate
+  project/scope collapse, a 40-project issuance (40 grants; audit `project_count` 40
+  with 32 IDs), rejection above 100 projects, inactive-speaker grants not rendered,
+  once-only display, no token in logs/subsequent HTML/database, en/zh rendering with
+  no script or inline style, and the Node adapter's HTTP form body path through
+  `startServer`.
+- **Limitations.** No credential listing, rotation, revocation, or grant-editing UI;
+  those remain CLI-only. No expiry selection, no speaker creation, no membership
+  editor. The directory shows active project grants only, not existing credentials or
+  prefixes, and renders no grants for inactive speakers (matching authorization). D1/R2
+  parity and a real-browser visual pass are unexecuted.
 
 ## Implemented and verified at this tree
 

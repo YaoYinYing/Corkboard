@@ -3,6 +3,27 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — A once-only secret belongs in the POST response, not in redirect state
+
+- **Failure avoided:** The obvious redirect-after-POST pattern has nowhere to put a
+  credential that must never be in a URL, cookie, hidden field, session store, or
+  database column. Storing it in any of those would turn a one-time display into a
+  durable or replayable secret; putting it in the `Location` query would leak it to
+  history, proxies, and logs.
+- **Decision:** Dashboard issuance returns the display page directly as the `200`
+  response to `POST /speakers/:speakerId/key`, with `Cache-Control: no-store` and the
+  strict CSP. The raw token exists only in that response body and the intended
+  recipient's process; only its public prefix and keyed HMAC verifier are stored. A
+  re-submit is a new credential, not recovery.
+- **Reproducer / test:** Issue a credential, capture the token from the POST body, then
+  GET `/speakers`, GET the form again, and read every credential row and request log;
+  none may contain the token. A Node-adapter HTTP test proves the POST body survives
+  the real server path.
+- **Prevents:** Redirect URLs, caches, browser history, application logs, or database
+  dumps becoming the recovery path for a credential that is supposed to be unrecoverable.
+- **Remove when:** The product intentionally provides a credential vault with an
+  explicit, audited reveal policy; that is a different security design, not a UI tweak.
+
 ## 2026-11-04 — Snapshot enumeration must skip only provable writer artifacts
 
 - **Failure:** `createBackup` listed a `LocalBlobStore` `.tmp-<32 hex>` file and then

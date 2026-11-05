@@ -93,6 +93,45 @@ survive a changed pepper.
 - Agents must receive their own token. Do not share one token between a parent and its
   subagents if attribution matters; sharing makes them indistinguishable.
 
+### Dashboard issuance
+
+The human dashboard can issue one credential for an active speaker owned by the
+signed-in account. It uses the same generation, prefix, and keyed HMAC verifier path as
+`issue-key`; the only stored forms are the 12-character prefix and the verifier. The
+operator-facing rules are:
+
+- The speaker must be owned by the session account (`owner_account_id`) and active;
+  a foreign, unknown, or inactive speaker is a uniform `404`. The route authorizes the
+  speaker before reading the form body.
+- The user must explicitly select at least one active project and at least one scope.
+  Every scope must already be one of the speaker's active membership capabilities in
+  **every** selected project, the same subset rule as `issue-key`. The credential and
+  one grant per selected project are inserted in a single transaction; selecting a
+  project is the only way to grant it, and membership alone grants nothing.
+- `expires_at` is `NULL` in this UI (no expiry selection). Revocation, rotation, and
+  later grant changes remain CLI-only (`revoke-key`, `grant-key-project`,
+  `revoke-key-project`). To replace a dashboard-issued credential, revoke it and issue
+  a new one.
+- The raw token is returned only in the `POST` response (HTTP `200`), which is
+  `Cache-Control: no-store`. It is never put in a redirect, URL, cookie, hidden form
+  field, session state, database column, or application log. The response is the only
+  display; later pages and form reloads never contain it. A browser re-submit creates a
+  different credential, it does not recover the previous token.
+- The successful issue writes a sanitized `credential.issue` audit event with the actor
+  account, speaker, project IDs, and scope names. The token, prefix, and verifier are
+  never audited. Failed CSRF or selection attempts write nothing. A selection may
+  contain up to 100 projects, but the audit records at most 32 project IDs plus
+  `project_count` (the true selected count), because the shared audit detail bound
+  caps arrays at 32 elements and 2,048 characters; the document is built to stay under
+  that bound, and it is dropped entirely if it would exceed it.
+- The form uses the dashboard CSRF double-submit (`corkboard_csrf` cookie plus hidden
+  `csrf_token`) and the `Sec-Fetch-Site`/`Origin` checks; the body is capped at 64 KiB.
+  The raw token is in the issuance POST's **response** body. Operators behind a reverse
+  proxy must not enable response-body logging/capture for authenticated dashboard
+  routes, because a captured issuance response contains the token. Request bodies for
+  this route contain only the CSRF value, project IDs, and scope names, but should not
+  be logged either.
+
 ### Revocation ordering
 
 Credential revocation, grant deletion, membership removal, and message expiry are read
@@ -238,11 +277,17 @@ or as authority to act as a speaker.
   `sessionViewer` flag is set in code only, never from request input. The session
   principal's scopes and the authorization result's rights are exactly the
   requested `project.read`/`message.read` scope, so receipt or write checks fail.
-- **Limits.** There are no project/message/membership/credential/receipt write
-  actions, so the only dashboard state-changing surface is the login form (which
-  inserts a session row); authenticated page requests also refresh
-  `sessions.last_seen_at`. The dashboard does not add registration, recovery, or
-  administrative capability.
+- **State-changing dashboard routes.** `POST /login` inserts a session row and
+  authenticated page requests refresh `sessions.last_seen_at`. `POST /projects`
+  inserts a project plus its owner membership in one transaction; `POST
+  /projects/:projectId` updates title/summary after a `project.edit` authorization;
+  `POST /speakers/:speakerId/key` inserts one credential plus one grant per
+  explicitly selected project after the session-account owner check and the same
+  in-transaction membership/scope re-check. The two form families require the
+  session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
+  `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message send/expiry,
+  receipts, membership editing, credential rotation/revocation, registration,
+  recovery, and administrative capability remain absent.
 
 ## OAuth 2.1 authorization server
 
@@ -794,8 +839,10 @@ operator snapshot or to any unauthenticated aggregate.
   idle expiry and per-session revocation. The OAuth 2.1 authorization-server core is
   implemented (dynamic public clients, PKCE, rotating refresh tokens, revocation), but
   the ChatGPT Web plugin experience is not implemented or verified. Slice L
-  provides the dashboard (project list, timeline, explicit body reveal) and slice
-  T adds project create/edit on the same session auth; message, membership,
-  credential, key, and expiry administration remain CLI/API-only. Registration, email
+  provides the dashboard (project list, timeline, explicit body reveal), slice T
+  adds project create/edit, and slice X adds the account-scoped speaker directory
+  and one-time project-scoped credential issuance on the same session auth. Message
+  send, expiry, membership editing, and credential rotation/revocation remain
+  CLI/API-only. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not
   perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.

@@ -1,17 +1,19 @@
 # Human web dashboard
 
 **Status: implemented locally for Node.js + SQLite (vertical slices L and M plus
-dashboard project create/edit, with the approved design system tokens applied).**
+dashboard project create/edit and speaker credential issuance, with the approved
+design system tokens applied).**
 The dashboard is server-rendered HTML for a signed-in **account**. Message reads,
-filters, replay, and body reveal remain read-only. The only project writes are create
-and edit; there is no message send, expiry, membership, credential, key, moderation,
-or administrative action. It is not a SPA and ships no frontend framework, build
-step, or client script. Slice M adds metadata filters, a summary-only search, bounded
-cursor replay, and a CSS-only responsive layout.
+filters, replay, and body reveal remain read-only. The writes are project create,
+project title/summary edit, and issuing one speaker credential with explicit project
+grants. There is no message send, expiry, membership editor, credential
+rotation/revocation, moderation, or administrative action. It is not a SPA and ships
+no frontend framework, build step, or client script. Slice M adds metadata filters, a
+summary-only search, bounded cursor replay, and a CSS-only responsive layout.
 
 Cloudflare Workers/D1 parity, account registration/recovery, and the remaining
-write/admin surfaces (messages, membership, credentials, keys, expiry) remain
-unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
+write/admin surfaces (messages, membership, credential rotation/revocation, expiry)
+remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 
 ## Routes
 
@@ -26,6 +28,9 @@ unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/projects/:projectId` | `POST` | Form-encoded project edit; redirects after POST. |
 | `/projects/:projectId/edit` | `GET` | Edit form for an owner. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
+| `/speakers` | `GET` | Speakers owned by the signed-in account, with status and active project grants. |
+| `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active speaker owned by the account. |
+| `/speakers/:speakerId/key` | `POST` | Form-encoded issuance for explicitly selected projects and scopes; one-time no-store display. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet; constant body, no user input. |
 
 `?lang=zh` selects Simplified Chinese. Unknown values fall back to English.
@@ -206,6 +211,73 @@ the CSRF check as the "form expired" page, not as an invalid field. Internal
 validation messages, SQL, and exception text are never rendered. A successful
 write is not a message send and creates no receipt.
 
+## Speaker directory and credential issuance
+
+`GET /speakers` is an account-scoped directory. It lists only speakers whose
+`speakers.owner_account_id` is the signed-in account, including inactive speakers
+(shown with an "Inactive" status). Each entry shows the speaker's opaque ID, display
+name (or the ID when the name is empty), status, and **active project grants**: the
+projects where the speaker has a non-removed membership and the speaker, account, and
+project are all active. A speaker owned by another account never appears, and the
+directory has no account selector or query parameter, so it cannot be used to
+enumerate another account's speakers. Existing credentials, prefixes, and tokens are
+not listed.
+
+The issue form is `GET /speakers/:speakerId/key`. It is available only for an active
+speaker owned by the session account. The service resolves the speaker with
+`WHERE id = ? AND owner_account_id = ?` plus active speaker/account checks; a foreign,
+unknown, or inactive speaker is the same uniform `404`, and the route resolves it
+before parsing the request body, so a malformed body cannot change that answer. The
+directory renders the issue link only for active speakers.
+
+The form lists the speaker's active projects as checkboxes and the union of the
+capabilities those memberships grant. `POST /speakers/:speakerId/key` requires at least one selected
+project and at least one selected scope, and at most **100** projects. Each selected
+project must be an active project where this speaker has an active membership, and
+**every requested scope must already be one of that project's membership
+capabilities** (the same rule as the `issue-key` CLI, applied to every selected
+project). An unknown, foreign, inactive, or non-member project, an unknown scope, an
+empty selection, more than 100 projects, or a scope missing from any selected project
+returns HTTP `400` with the localized `role="alert"` form error and performs no write.
+Duplicate form values are collapsed; selection order is not authoritative.
+
+Issuance reuses the existing generation/verifier path: a fresh 256-bit random
+`cb_` token, whose only stored forms are the 12-character public prefix and a keyed
+HMAC-SHA-256 verifier under the credential pepper. Inside the write transaction the
+service re-reads every selected membership with `removed_at IS NULL` and active
+speaker/project/account checks, and re-checks the requested scopes, before inserting
+the credential and grants. A membership removed or deactivated between the fast
+pre-check and the write therefore fails the transaction and rolls the whole issuance
+back; no credential or grant remains. The credential row and one
+`credential_project_grants` row per selected project are committed together. Grants
+are never inferred from membership: a project the speaker belongs to but the user did
+not select gets no grant, so the credential cannot use it. There is no expiry field in
+this UI, so `expires_at` is `NULL` (unlimited until revoked). A successful issue writes
+one sanitized `credential.issue` audit event containing the speaker, account, up to 32
+project IDs, `project_count` (the true selected count), and scope names only; the
+token, prefix, and verifier are never audited. The 32-ID/2,048-character audit detail
+bound is documented in `security-operations.md`.
+
+### One-time credential display
+
+The raw token is returned **only** in the `POST` response body. It is not placed in a
+URL, redirect, cookie, hidden field, database column, session state, or log, so the
+POST returns the display page directly (`200`) instead of a `303` redirect. That page
+is the only place the value is shown: it carries the usual `Cache-Control: no-store`
+and strict CSP, a `role="alert"` warning to copy the credential now, the speaker, the
+granted projects, and the scopes. Reopening `/speakers`, opening the form again,
+following any link, or loading any later page never renders the token again. A browser
+re-submit of the POST is a new issuance and creates a **different** credential; it
+does not reveal the earlier token. There is no recovery, rotation, or revocation view
+in this slice; operators use the CLI commands documented in `security-operations.md`.
+
+The credential forms use the same session CSRF defense as the project forms: the
+`corkboard_csrf` cookie plus exactly one non-empty hidden `csrf_token` field, compared
+as SHA-256 digests in constant time, plus the `Sec-Fetch-Site`/`Origin` checks. The
+form body is bounded to 64 KiB. Session authentication has already run and may refresh
+`sessions.last_seen_at`; the authorization and CSRF checks come before any credential,
+grant, or audit write.
+
 ## Authorization model
 
 A session authenticates an **account**, not a speaker. For every data read the
@@ -268,10 +340,13 @@ Fail-closed behavior:
 The message read surface performs no project, message, credential, or read-receipt
 write, and no page marks a message read. The writes are the session row inserted
 by `POST /login`, the `sessions.last_seen_at` refresh on authenticated page
-requests, `POST /projects` (project plus owner-membership insert), and
-`POST /projects/:projectId` (project title/summary update). Read receipt identities
-are displayed only through `listReadReceipts`, which authorizes `message.read` and
-re-applies the project filter.
+requests, `POST /projects` (project plus owner-membership insert),
+`POST /projects/:projectId` (project title/summary update), and
+`POST /speakers/:speakerId/key` (one credential row plus one grant per explicitly
+selected project). Read receipt identities are displayed only through
+`listReadReceipts`, which authorizes `message.read` and re-applies the project filter.
+The speaker directory is an account-level read; it is not a project-scoped route and
+does not use `authorizeProject`.
 
 ## Rendering and security
 
@@ -297,10 +372,10 @@ re-applies the project filter.
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, and
   `Content-Security-Policy: default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`.
-- The dashboard never logs bodies, summaries, tokens, cookies, CSRF values,
-  email addresses, or full IPs. The existing request logger records method, path,
-  status, duration, and actor identifiers only; dashboard routes do not set an
-  actor on the HTTP context.
+- The dashboard never logs bodies, summaries, tokens (including newly issued
+  credentials), CSRF values, email addresses, or full IPs. The existing request logger
+  records method, path, status, duration, and actor identifiers only; dashboard routes
+  do not set an actor on the HTTP context.
 - SQL is parameterized. Message and project identifiers come from the path and
   are bound as parameters; they are never interpolated.
 
@@ -330,9 +405,10 @@ login CSRF cookie, and returns `303` to the normalized target. Login attempts
 share the existing per-email-digest rate limiter and return `429` with
 `Retry-After` on the HTML error page.
 
-### Project form CSRF
+### Project and credential form CSRF
 
-The create and edit forms use the session CSRF value issued at sign-in: the
+The create, edit, and credential-issuance forms use the session CSRF value issued at
+sign-in: the
 non-`HttpOnly` `corkboard_csrf` cookie plus a hidden `csrf_token` field. `POST`
 requires the form media type, checks the same `Sec-Fetch-Site`/`Origin` fetch
 metadata as login, requires exactly one non-empty hidden value, compares the
@@ -372,17 +448,25 @@ bounded form before checking CSRF.
 - Every control has a visible label: the filter form has labeled `type`,
   `sender`, `q`, `unread`, and `limit` controls with `for`/`id` pairs and hints
   for the sender and search fields. Pager links are ordinary anchors inside a
-  labeled navigation landmark, and a skip link targets `main`.
+  labeled navigation landmark, and a skip link targets `main`. The project and
+  speaker forms use explicit `<label for>`/`id` pairs or implicit label wrapping.
+  Project and scope checkbox groups use `<fieldset>`/`<legend>`.
+- The one-time credential page presents the token as selectable text (no script-driven
+  copy control) and an assertive `role="alert"` warning; the accessible text also
+  states that the value is shown once.
 - Focus indicators are always visible on links, buttons, inputs, and preformatted
   body text. State is expressed with text (for example "expired", "Active",
   "Active filters"), never by color alone.
 
 ## Limits
 
-- Project write scope only: create and edit `title`/`summary`. No message send,
-  expiry, membership editor, credential/key management, registration, or admin
-  action. Creating a project does not create a speaker or credential; an account
-  without an active owned speaker cannot create one from this UI.
+- Dashboard writes are project create/edit and one credential issuance for a
+  selected subset of an owned speaker's active projects. There is no message send,
+  expiry, membership editor, credential rotation/revocation, grant editor, expiry
+  selection, speaker creation, registration, or admin action. Creating a project does
+  not create a speaker or credential; an account without an active owned speaker
+  cannot create one from this UI. A speaker's credential can be revoked or have its
+  project grants changed only through the CLI.
 - The project list is bounded to the API maximum (100 per request) and has no UI
   pagination; the REST API still paginates.
 - Search covers message **summaries only**. There is no body search, full-text
@@ -394,14 +478,17 @@ bounded form before checking CSRF.
   arbitrary chosen speaker. It never writes a receipt.
 - Replay offers bounded previous/next pages plus "jump to latest"; there is no
   time scrubber, date filter, infinite scroll, or client-side history.
-- No attachments, file previews, or image rendering; no speaker directory,
-  credential management, membership editor, project deletion/status change,
-  registration, email verification, password reset, or account settings.
+- No attachments, file previews, or image rendering; no credential listing,
+  rotation, or revocation UI, no membership editor, no project deletion/status change,
+  no speaker creation, no registration, email verification, password reset, or
+  account settings. The directory shows active project grants only, not existing
+  credentials or their prefixes.
 - No client-side navigation or live updates; every action is a full page load.
   Responsible JavaScript frameworks, bundlers, and frontend dependencies are not
   used.
-- Server-side rendering only. Login and the project create/edit forms are
-  `POST` and use the double-submit plus fetch-metadata checks above; the filter
+- Server-side rendering only. Login, the project create/edit forms, and the
+  credential issuance form are `POST` and use the double-submit plus fetch-metadata
+  checks above; the filter
   form is `GET` only. Project forms have no JavaScript validation, autosave,
   optimistic update, or client-side routing.
 - Accessibility evidence consists of committed DOM assertions, semantic markup,

@@ -131,12 +131,13 @@ account operation that also requires an active owned speaker.
   Workers isolates enforce their own buckets, and a restart clears them. Per-IP and
   volumetric controls remain the reverse proxy's responsibility.
 
-## Human web dashboard (slice L; project create/edit in slice T)
+## Human web dashboard (slice L; project create/edit in slice T; speaker issuance in slice X)
 
 The dashboard adds an HTML rendering surface, not a new authorization system. It
 composes the slice-I session with the existing service authorization. Message
-reads remain read-only; the only project writes are create (`POST /projects`) and
-title/summary edit (`POST /projects/:projectId`).
+reads remain read-only; the project writes are create (`POST /projects`) and
+title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
+(`POST /speakers/:speakerId/key`) is the only credential write.
 
 - **Stored XSS through titles, summaries, or display names.** Project titles and
   summaries, speaker display names, message summaries, reply references, and read
@@ -162,9 +163,9 @@ title/summary edit (`POST /projects/:projectId`).
   host; absent/`null` Origin falls back to the double-submit control.
   The other cookie-authenticated state changes are `DELETE /api/v1/session` with
   its `X-CSRF-Token`, the OAuth consent form `POST /oauth/consent` with the same
-  session-CSRF check, and the dashboard project forms `POST /projects` and
-  `POST /projects/:projectId`, which use the session-cookie double-submit and
-  fetch-metadata checks described above.
+  session-CSRF check, and the dashboard forms `POST /projects`,
+  `POST /projects/:projectId`, and `POST /speakers/:speakerId/key`, which use the
+  session-cookie double-submit and fetch-metadata checks described above.
 - **Session fixation.** Sign-in always generates a new random session token and
   ignores any pre-existing session cookie value; the dashboard never accepts a
   session id from input.
@@ -202,6 +203,25 @@ title/summary edit (`POST /projects/:projectId`).
   without a qualifying membership is a uniform `404`, whether it is missing,
   foreign, removed, inactive, or capability-insufficient; body and receipt routes
   use the same rule. The session never authenticates a REST data route or `/mcp`.
+- **Speaker directory and credential issuance.** `GET /speakers` is filtered by
+  `speakers.owner_account_id = <session account>` in SQL; there is no account
+  parameter, so another account's speakers and their project grants are never
+  rendered. The issue form and POST resolve the speaker with the same owner predicate
+  plus active speaker/account checks **before** parsing the body, so foreign, unknown,
+  and inactive speakers are one uniform `404` and cannot be probed. A missing owner
+  predicate would expose and mint credentials for another account's speaker; a
+  committed test logs in as the other account and asserts `404` and no new credential.
+  Issuance requires explicit project and scope selection; the service re-checks an
+  active membership and each requested scope against every selected project, and
+  writes only the selected grants. No membership is converted into a grant implicitly.
+- **One-time credential display.** The raw token has no durable representation (only
+  prefix + keyed verifier). It is returned only in the `200` POST body, which is
+  `no-store` with the strict CSP; it is never in a redirect, URL, cookie, hidden field,
+  database row, or log. Reopening the directory or form never shows it. A re-submitted
+  POST is a fresh credential, not recovery of the old one. Consequently there is no
+  rotation/revocation UI; leaked credentials are revoked through the CLI. The route
+  remains a cookie-authenticated POST and therefore needs the same CSRF defense; the
+  request logger records only the fixed path, never the token.
 - **Body reveal and integrity.** The body route calls the existing verified decrypt
   path, re-authorizes after decryption, and returns a generic error page on
   failure. It never returns ciphertext, partial plaintext, or an integrity error

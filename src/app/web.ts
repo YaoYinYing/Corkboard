@@ -4,6 +4,7 @@
 // session through `resolveSessionViewer` and then the existing service functions
 // run unchanged.
 import { randomBase64url } from "../auth/credentials.ts";
+import { SCOPES } from "../domain/authz.ts";
 import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 import { AppError, RateLimitError } from "../domain/errors.ts";
 import { normalizeEmail, validateLoginPassword } from "../domain/validation.ts";
@@ -27,6 +28,14 @@ import {
   listProjects,
   updateProject,
 } from "../service/projects.ts";
+import {
+  getOwnedSpeakerForKey,
+  issueProjectCredential,
+  listOwnedSpeakers,
+  type IssuedCredential,
+  type OwnedSpeaker,
+  type OwnedSpeakerForKey,
+} from "../service/speakers.ts";
 import {
   authenticateSession,
   loginAccount,
@@ -136,6 +145,26 @@ const EN = {
   tooManyRequests: "Too many attempts",
   tooManyRequestsBody: "Wait a moment and try again.",
   unknownSpeaker: "Unknown speaker",
+  speakersTitle: "Speakers",
+  speakersEmpty: "No speakers are available for this account.",
+  speakerProjectsLabel: "Project grants",
+  speakerNoProjects: "No active projects.",
+  speakerNoScopes: "No scopes are available.",
+  issueCredentialAction: "Issue credential",
+  issueCredentialTitle: "Issue credential",
+  backToSpeakers: "Back to speakers",
+  speakerNameLabel: "Speaker",
+  projectsLegend: "Projects",
+  scopesLegend: "Scopes",
+  issueCredentialHint: "Select at least one project and one scope.",
+  issueCredentialError: "Check the selected projects and scopes and try again.",
+  credentialIssuedTitle: "Credential issued",
+  credentialOnceWarning:
+    "Copy this credential now. It is shown only once and cannot be recovered.",
+  credentialLabel: "New credential",
+  credentialProjectsLabel: "Granted projects",
+  credentialScopesLabel: "Scopes",
+  statusInactive: "Inactive",
 } as const;
 
 type MessageKey = keyof typeof EN;
@@ -207,6 +236,25 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   tooManyRequests: "尝试次数过多",
   tooManyRequestsBody: "请稍后重试。",
   unknownSpeaker: "未知发送者",
+  speakersTitle: "说话者",
+  speakersEmpty: "此账户没有可查看的说话者。",
+  speakerProjectsLabel: "项目授权",
+  speakerNoProjects: "没有活跃项目。",
+  speakerNoScopes: "没有可用的权限范围。",
+  issueCredentialAction: "签发凭证",
+  issueCredentialTitle: "签发凭证",
+  backToSpeakers: "返回说话者列表",
+  speakerNameLabel: "说话者",
+  projectsLegend: "项目",
+  scopesLegend: "权限范围",
+  issueCredentialHint: "请至少选择一个项目和一个权限范围。",
+  issueCredentialError: "请检查所选项目和权限范围后重试。",
+  credentialIssuedTitle: "凭证已签发",
+  credentialOnceWarning: "请立即复制此凭证。它只会显示一次，之后无法找回。",
+  credentialLabel: "新凭证",
+  credentialProjectsLabel: "已授权项目",
+  credentialScopesLabel: "权限范围",
+  statusInactive: "未激活",
 };
 
 const CATALOGS: Readonly<Record<Locale, Readonly<Record<MessageKey, string>>>> = {
@@ -322,6 +370,9 @@ button { padding: var(--space-2) var(--space-3); border: 1px solid var(--brand);
 .pager { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
 .project-form { display: grid; gap: var(--space-3); max-width: 40rem; border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); margin-block: var(--space-2) var(--space-4); }
 .project-form textarea { width: 100%; min-width: 0; resize: vertical; }
+.project-form fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); margin: 0; display: grid; gap: var(--space-1); }
+.project-form legend { font-weight: 600; padding: 0 var(--space-1); }
+.grant-list { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-1); }
 .form-actions { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: center; margin: 0; }
 @media (min-width: 48rem) { .message dl { grid-template-columns: max-content 1fr max-content 1fr; } }
 @media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
@@ -803,7 +854,7 @@ ${result.projects
 </ul>`;
 
   const content = `<h1>${escapeHtml(t(locale, "dashboardTitle"))}</h1>
-<p><a href="/projects/new${localeQuery(locale)}">${escapeHtml(t(locale, "newProjectTitle"))}</a></p>
+<p><a href="/projects/new${localeQuery(locale)}">${escapeHtml(t(locale, "newProjectTitle"))}</a> <span aria-hidden="true">·</span> <a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "speakersTitle"))}</a></p>
 ${projects}`;
   return htmlResponse(200, renderPage(locale, url, t(locale, "dashboardTitle"), content));
 }
@@ -970,6 +1021,256 @@ async function handleProjectUpdate(
         ...formOptions,
         status: 400,
         errorKey: "projectFormError",
+      });
+    }
+    throw error;
+  }
+}
+
+function displaySpeakerName(speaker: {
+  id: string;
+  display_name: string | null;
+}): string {
+  return speaker.display_name === null || speaker.display_name === ""
+    ? speaker.id
+    : speaker.display_name;
+}
+
+function renderSpeakerDirectory(
+  locale: Locale,
+  speakers: readonly OwnedSpeaker[],
+): string {
+  const heading = `<h1>${escapeHtml(t(locale, "speakersTitle"))}</h1>`;
+  if (speakers.length === 0) {
+    return `${heading}
+<p class="empty">${escapeHtml(t(locale, "speakersEmpty"))}</p>`;
+  }
+  const items = speakers
+    .map((speaker, index) => {
+      const nameId = `speaker-${index}-name`;
+      const grants =
+        speaker.projects.length === 0
+          ? escapeHtml(t(locale, "speakerNoProjects"))
+          : `<ul class="grant-list">${speaker.projects
+              .map(
+                (project) =>
+                  `<li>${escapeHtml(project.title)} <code>${escapeHtml(project.id)}</code></li>`,
+              )
+              .join("")}</ul>`;
+      const active = speaker.status === "active";
+      const issue = active
+        ? `<p><a href="/speakers/${encodeURIComponent(speaker.id)}/key${localeQuery(locale)}">${escapeHtml(t(locale, "issueCredentialAction"))}</a></p>`
+        : "";
+      return `<li><article aria-labelledby="${nameId}">
+<h2 id="${nameId}">${escapeHtml(displaySpeakerName(speaker))}</h2>
+<dl>
+<dt>${escapeHtml(t(locale, "speakerNameLabel"))}</dt><dd><code>${escapeHtml(speaker.id)}</code></dd>
+<dt>${escapeHtml(t(locale, "statusLabel"))}</dt><dd${active ? ' class="status"' : ""}>${escapeHtml(t(locale, active ? "statusActive" : "statusInactive"))}</dd>
+<dt>${escapeHtml(t(locale, "speakerProjectsLabel"))}</dt><dd>${grants}</dd>
+</dl>
+${issue}
+</article></li>`;
+    })
+    .join("\n");
+  return `${heading}
+<ul class="project-list">
+${items}
+</ul>`;
+}
+
+interface SpeakerKeyFormOptions {
+  speaker: OwnedSpeakerForKey;
+  action: string;
+  csrf: string;
+  selectedProjects: ReadonlySet<string>;
+  selectedScopes: ReadonlySet<string>;
+  status: number;
+  errorKey?: MessageKey;
+}
+
+function renderSpeakerKeyForm(
+  locale: Locale,
+  url: URL,
+  options: SpeakerKeyFormOptions,
+): Response {
+  const error =
+    options.errorKey === undefined
+      ? ""
+      : `<p class="error" role="alert">${escapeHtml(t(locale, options.errorKey))}</p>`;
+  const offeredScopes = new Set<string>();
+  for (const project of options.speaker.projects) {
+    for (const scope of project.capabilities) offeredScopes.add(scope);
+  }
+  const projects =
+    options.speaker.projects.length === 0
+      ? `<p class="empty">${escapeHtml(t(locale, "speakerNoProjects"))}</p>`
+      : options.speaker.projects
+          .map(
+            (project) =>
+              `<label><input type="checkbox" name="project" value="${escapeHtml(project.id)}"${options.selectedProjects.has(project.id) ? " checked" : ""}> ${escapeHtml(project.title)} <code>${escapeHtml(project.id)}</code></label>`,
+          )
+          .join("\n");
+  const scopes = SCOPES.filter((scope) => offeredScopes.has(scope));
+  const scopeBoxes =
+    scopes.length === 0
+      ? `<p class="empty">${escapeHtml(t(locale, "speakerNoScopes"))}</p>`
+      : scopes
+          .map(
+            (scope) =>
+              `<label><input type="checkbox" name="scope" value="${escapeHtml(scope)}"${options.selectedScopes.has(scope) ? " checked" : ""}> <code>${escapeHtml(scope)}</code></label>`,
+          )
+          .join("\n");
+  const content = `<h1>${escapeHtml(t(locale, "issueCredentialTitle"))}</h1>
+<p><a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "backToSpeakers"))}</a></p>
+<p>${escapeHtml(t(locale, "speakerNameLabel"))}: ${escapeHtml(displaySpeakerName(options.speaker))} <code>${escapeHtml(options.speaker.id)}</code></p>
+${error}<form class="project-form" method="post" action="${escapeHtml(options.action)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
+<fieldset><legend>${escapeHtml(t(locale, "projectsLegend"))}</legend>
+${projects}</fieldset>
+<fieldset><legend>${escapeHtml(t(locale, "scopesLegend"))}</legend>
+${scopeBoxes}</fieldset>
+<p class="hint">${escapeHtml(t(locale, "issueCredentialHint"))}</p>
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, "issueCredentialAction"))}</button>
+<a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "cancelAction"))}</a></p>
+</form>`;
+  return htmlResponse(
+    options.status,
+    renderPage(locale, url, t(locale, "issueCredentialTitle"), content),
+  );
+}
+
+function speakerKeyFormResponse(
+  locale: Locale,
+  url: URL,
+  request: Request,
+  options: Omit<SpeakerKeyFormOptions, "csrf">,
+): Response {
+  return renderSpeakerKeyForm(locale, url, {
+    ...options,
+    csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+  });
+}
+
+function renderIssuedCredential(
+  locale: Locale,
+  url: URL,
+  speaker: OwnedSpeakerForKey,
+  issued: IssuedCredential,
+): Response {
+  const titles = new Map(speaker.projects.map((project) => [project.id, project.title]));
+  const projectList = issued.projects
+    .map(
+      (projectId) =>
+        `<li>${escapeHtml(titles.get(projectId) ?? projectId)} <code>${escapeHtml(projectId)}</code></li>`,
+    )
+    .join("");
+  const content = `<h1>${escapeHtml(t(locale, "credentialIssuedTitle"))}</h1>
+<p class="filter-state" role="alert">${escapeHtml(t(locale, "credentialOnceWarning"))}</p>
+<p>${escapeHtml(t(locale, "speakerNameLabel"))}: ${escapeHtml(displaySpeakerName(speaker))} <code>${escapeHtml(speaker.id)}</code></p>
+<p>${escapeHtml(t(locale, "credentialLabel"))}: <code class="code">${escapeHtml(issued.token)}</code></p>
+<dl>
+<dt>${escapeHtml(t(locale, "credentialProjectsLabel"))}</dt><dd><ul class="grant-list">${projectList}</ul></dd>
+<dt>${escapeHtml(t(locale, "credentialScopesLabel"))}</dt><dd>${issued.scopes.map((scope) => `<code>${escapeHtml(scope)}</code>`).join(" ")}</dd>
+</dl>
+<p><a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "backToSpeakers"))}</a></p>`;
+  return htmlResponse(
+    200,
+    renderPage(locale, url, t(locale, "credentialIssuedTitle"), content),
+  );
+}
+
+async function handleSpeakers(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const speakers = await listOwnedSpeakers(deps, sessionAccountPrincipal(session));
+  return htmlResponse(
+    200,
+    renderPage(
+      locale,
+      url,
+      t(locale, "speakersTitle"),
+      renderSpeakerDirectory(locale, speakers),
+    ),
+  );
+}
+
+async function handleSpeakerKeyForm(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  speakerId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const speaker = await getOwnedSpeakerForKey(
+    deps,
+    sessionAccountPrincipal(session),
+    speakerId,
+  );
+  return speakerKeyFormResponse(locale, url, request, {
+    speaker,
+    action: `/speakers/${encodeURIComponent(speakerId)}/key${localeQuery(locale)}`,
+    selectedProjects: new Set(),
+    selectedScopes: new Set(),
+    status: 200,
+  });
+}
+
+async function handleSpeakerKeyCreate(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  speakerId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const principal = sessionAccountPrincipal(session);
+  // Authorize the owned speaker before parsing the body, so a foreign or
+  // unknown speaker is the uniform 404 regardless of payload shape.
+  const speaker = await getOwnedSpeakerForKey(deps, principal, speakerId);
+  const form = await readForm(request);
+  const selectedProjects = new Set(form.getAll("project"));
+  const selectedScopes = new Set(form.getAll("scope"));
+  const formOptions = {
+    speaker,
+    action: `/speakers/${encodeURIComponent(speakerId)}/key${localeQuery(locale)}`,
+    selectedProjects,
+    selectedScopes,
+  };
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return speakerKeyFormResponse(locale, url, request, {
+      ...formOptions,
+      status: 400,
+      errorKey: "formExpired",
+    });
+  }
+  try {
+    const issued = await issueProjectCredential(deps, principal, speakerId, {
+      projectIds: [...selectedProjects],
+      scopes: [...selectedScopes],
+    });
+    // The only display of the raw token: this response is no-store and the
+    // value is never put in redirect state, the database, a URL, or a log.
+    return renderIssuedCredential(locale, url, speaker, issued);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VALIDATION_ERROR") {
+      return speakerKeyFormResponse(locale, url, request, {
+        ...formOptions,
+        status: 400,
+        errorKey: "issueCredentialError",
       });
     }
     throw error;
@@ -1272,7 +1573,15 @@ export function isWebPath(segments: readonly string[]): boolean {
   if (segments.length === 0) return true;
   if (segments.length === 1 && segments[0] === "login") return true;
   if (segments.length === 1 && segments[0] === "projects") return true;
+  if (segments.length === 1 && segments[0] === "speakers") return true;
   if (segments.length === 2 && segments[0] === "static" && segments[1] === "app.css") {
+    return true;
+  }
+  if (
+    segments.length === 3 &&
+    segments[0] === "speakers" &&
+    segments[2] === "key"
+  ) {
     return true;
   }
   if (segments.length === 2 && segments[0] === "projects") return true;
@@ -1315,6 +1624,23 @@ export async function handleWebRoute(
     if (segments.length === 2 && segments[0] === "static" && segments[1] === "app.css") {
       if (method !== "GET") return methodNotAllowed(locale, url, "GET");
       return stylesheetResponse();
+    }
+    if (segments.length === 1 && segments[0] === "speakers") {
+      if (method !== "GET") return methodNotAllowed(locale, url, "GET");
+      return await handleSpeakers(deps, request, url, locale);
+    }
+    if (
+      segments.length === 3 &&
+      segments[0] === "speakers" &&
+      segments[2] === "key"
+    ) {
+      if (method === "GET") {
+        return await handleSpeakerKeyForm(deps, request, url, locale, segments[1] ?? "");
+      }
+      if (method === "POST") {
+        return await handleSpeakerKeyCreate(deps, request, url, locale, segments[1] ?? "");
+      }
+      return methodNotAllowed(locale, url, "GET, POST");
     }
     if (segments.length === 1 && segments[0] === "projects") {
       if (method !== "POST") return methodNotAllowed(locale, url, "POST");
