@@ -544,7 +544,8 @@ appear in the blob list. Exit `0` clean, `1` issues (stable codes), `2` cannot i
 is one object; an exit-2 inspection failure or unexpected command error also prints
 exactly one `{ok:false,code,...}` object on stdout (`code` is one of, for example,
 `USAGE_ERROR`, `BACKUP_INSPECT_FAILED`, `BACKUP_FAILED`, `VERIFY_FAILED`, or
-`RESTORE_FAILED`). Human stderr has absolute paths redacted and control bytes escaped.
+`RESTORE_FAILED`). Human stderr has absolute paths redacted and replaces control bytes
+with `?`; JSON escapes C0 controls but not DEL/C1.
 
 Run `verify` after every backup, before every restore, and on a schedule (for example
 daily or weekly) against recent backups. A backup that has never been verified is not

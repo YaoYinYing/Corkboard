@@ -326,7 +326,8 @@ touching the filesystem or a backup directory that cannot be inspected at all. W
 object on stdout: success/report objects, or `{ok:false,code,...}` with, for example,
 `USAGE_ERROR`, `BACKUP_INSPECT_FAILED`, `BACKUP_FAILED`, `VERIFY_FAILED`, or
 `RESTORE_FAILED`. Absolute paths are redacted from human stderr (including quoted paths
-with spaces) and control bytes in filenames are escaped; unexpected positionals are
+with spaces); human output replaces control bytes with `?`, and JSON output escapes C0
+controls (JSON.stringify does not escape DEL/C1); unexpected positionals are
 rejected before filesystem work.
 
 Verify after every backup and before every restore; keep a `verify` run on a schedule
