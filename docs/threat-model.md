@@ -291,8 +291,8 @@ Authentication and OAuth lifecycle metadata is written to `audit_events` through
 - **Availability and growth.** There is no audit read API/UI and no retention,
   rotation, or deletion; `prune` never removes audit rows. Authentication/OAuth traffic
   therefore grows the table, and operators must size and back it up accordingly.
-  Service-layer events leave `request_id` null because the HTTP request id is not
-  passed into the service.
+  `request_id` is null on every audit row because no call site passes the HTTP request
+  id to `writeAudit`; the request id itself is available at the HTTP layer.
 
 ## Attack cases to cover
 

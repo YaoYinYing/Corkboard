@@ -572,3 +572,18 @@ prevented regression; when to remove the advice.
   leakage into security metadata, and an audit-derived existence oracle.
 - **Remove when:** audit delivery moves to a durable queue that can report failures
   without affecting the request path, with its own retention and access controls.
+
+## 2026-11-04 — Audit detail must not echo unvalidated request values
+
+- **Failure:** The token-endpoint failure path copied the raw form `client_id` and
+  `grant_type` into `audit_events.detail`. Bounding a string does not make an
+  unauthenticated caller's text safe: it can carry control characters, forged
+  token-like strings, or another client's id into security metadata.
+- **Fix:** Record `grant_type` only when it is one of the supported literals and
+  `client_id` only when it is syntactically valid and registered; otherwise omit it.
+  Narrow the security docs to the code paths actually covered, because pre-dispatch
+  token validation rejections throw before the audited block and are not recorded.
+- **Prevents:** Attacker-controlled text and unverified identifiers in audit rows, and
+  documentation that overstates audit coverage.
+- **Remove when:** audit detail is assembled from typed, already-authorized values
+  rather than raw request parameters.

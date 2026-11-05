@@ -166,7 +166,10 @@ never sufficient authorization.
 metadata. `loginAccount`, `revokeSession`, `registerClient`, `mintTokens`,
 `rotateRefreshToken`, and `revokeOAuthToken` call `writeAudit`; the public form
 handlers in `src/app/oauth.ts` record rate-limited or rejected registration, consent
-allow/deny, and token-endpoint failures that happen before a service call. The helper
+allow/deny, token-endpoint failures raised from grant dispatch (code exchange or
+refresh), and token rate limits. Pre-dispatch validation rejections are not audited:
+an invalid, empty, or oversized `client_id`, a null `grant_type`, a duplicate
+parameter, and a wrong media type all throw before the audited block. The helper
 inserts `(id, actor_account_id, actor_speaker_id, project_id, operation, outcome,
 request_id, detail, created_at)` with parameterized SQL and a random `evt_` id. It
 bounds every `detail` string/array and drops a `detail` document that still exceeds

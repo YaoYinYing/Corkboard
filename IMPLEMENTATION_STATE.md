@@ -8,9 +8,9 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–N implemented and pushed; slice O implemented on candidate, not pushed |
-| Last pushed checkpoint | `c2aec6a` (operator backup/verify/restore, audited tree `e45dcdf`) on `origin/main`; CI pending |
-| Branch | `main`, clean; the `slice-n-backup` candidate was fast-forwarded |
+| Phase | 0 complete; vertical slices A–O implemented and pushed; slice-O P2 fixes on branch, not pushed |
+| Last pushed checkpoint | `f06c4ac` (slice O sanitized auth/OAuth audit events, tree `496e9ae`) on `origin/main`; CI success verified after push |
+| Branch | `main` at `f06c4ac`, clean; slice-O P2 fixes on `slice-o-p2-fixes`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
@@ -40,6 +40,7 @@ as the work it describes.
 | `78a3408` | `782ef11` | Vertical slice N: operator backup/verify/restore for SQLite DB + blobs | superseded by final N commit |
 | `8410b37` | `116cbb6` | Slice N audit fixes: immutable/read-only snapshot without source sidecars, restore manifest reuse, byte caps, CLI JSON/redaction | superseded by final N commit |
 | `c2aec6a` | `e45dcdf` | Slice N final: pre-snapshot DB cap, bounded listings, redaction/sanitization, mid-stream digest cap, docs | security PASS; contract PASS (delta on `e45dcdf`) |
+| `f06c4ac` | `496e9ae` | Vertical slice O: sanitized authentication/OAuth lifecycle audit events | security PASS; contract PASS (two independent audits) |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
@@ -986,7 +987,16 @@ pushed.
   backup-level encryption, key handling, point-in-time recovery, overwrite mode, or
   D1/Workers equivalent. Independent security and contract review is PENDING.
 
-## Vertical slice O — sanitized authentication/OAuth audit events (candidate, not pushed)
+## Vertical slice O — sanitized authentication/OAuth audit events (merged at `f06c4ac`, tree `496e9ae`)
+
+- **Checkpoint.** Merged on `main` as `f06c4aca864c9bf25dd821ad4251cfe7b48bf12a`
+  (tree `496e9aed1e06dffd43a39d3aafa2b878e1df35b8`), based on
+  `42e4ddccdbbf25521112045363b1fea27fa099ea`. Both independent audits PASS (security
+  and contract). Verification at that tree: `npm ci` exit 0, `npm run check` exit 0
+  (379 tests, 378 pass, 1 skipped live-D1), `npm run build` exit 0. CI succeeded after
+  push. The commit trailer records the stale pre-final `Candidate-SHA: 550d02e5...`;
+  that commit and `f06c4ac` share tree `496e9ae...`, so the audited tree is the pushed
+  tree.
 
 - **Write path.** New `src/service/audit.ts` provides `writeAudit`/`boundAuditDetail`.
   It reuses the existing `audit_events` table and `detail` column (no migration),
@@ -1002,13 +1012,20 @@ pushed.
   `detail` strings/arrays and the serialized document are capped; oversized detail is
   dropped. Revocation is not audited for no-op/unknown tokens, avoiding an oracle.
 - **Boundaries.** No audit read API/UI, no retention/rotation/deletion (`prune` still
-  never deletes audit rows), no new table, no authorization change. Service-layer events
-  leave `request_id` null because the request id is not threaded into the services.
+  never deletes audit rows), no new table, no authorization change. No audit call site
+  passes a request id, so `request_id` remains null for these events.
 - **Tests.** `tests/integration/audit.test.ts` asserts each event, uniform failure
   details, the sanitization denylist, bounded detail, rate-limited login, and that an
   injected audit-insert failure leaves login, token issuance, revocation, and logout
   successful. The full suite passes (379 tests: 378 pass, 1 skipped). Independent
-  security and contract review is PENDING.
+  security and contract review PASS on tree `496e9ae`.
+- **Remaining P2 debt (tracked, unfixed).** No audit row on a no-op or wrong-client
+  revocation; `request_id` is null and unasserted; rate-limited audit paths for OAuth
+  sign-in and HTML login are untested; rate-limited register/token failures are
+  untested; access-token revoke audit is untested; consent-denied detail is unasserted;
+  unknown/inactive-account login uniformity is untested; unexpected insert failures for
+  register/consent are uncovered; fail-open audit can suppress rows; `audit_events` is
+  unbounded.
 
 ## Implemented and verified at this tree
 
@@ -1026,10 +1043,10 @@ pushed.
   file, `LESSIONS.md`.
 - [x] Audit report schema and issue escalation format in `docs/campaign.md`.
 
-Commands executed at the candidate tree: `npm install`, `npm run secret-scan`,
-`npm run secret-scan:history`, `npm run typecheck`, `npm test`, `npm run build`.
-When this candidate is committed, the checkpoint commit trailer will record the exact
-candidate SHA and review verdicts.
+Commands executed for the slice-O P2 fix tree: `npm ci` exit 0, `npm run check` exit 0
+(secret scan, history scan, typecheck, 380 tests: 379 pass, 1 skipped live-D1), and
+`npm run build` exit 0. The checkpoint commit trailer records the exact candidate SHA
+and review verdicts.
 
 ## Phase 0 gate checklist
 

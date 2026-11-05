@@ -311,6 +311,64 @@ test("session and OAuth lifecycle events are recorded as sanitized metadata", as
   }
 });
 
+test("token failure audit detail never echoes unvalidated request values", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  const app = createApp(fx.deps, { publicBaseUrl: BASE });
+  const formHeaders = { "content-type": "application/x-www-form-urlencoded" };
+  const unknownClientId = "cb_cli_unknown" + "Z".repeat(16);
+
+  // 500 characters of arbitrary text plus control characters, a quote, a
+  // backslash, a bidi override, and a token-like suffix.
+  const attackerGrant =
+    "x".repeat(500) + "\n\r\t\"\\\u0000" + String.fromCharCode(0x202e) +
+    "cb_oat_" + "A".repeat(43);
+  const malicious = await call(app, "/oauth/token", {
+    method: "POST",
+    headers: formHeaders,
+    body: formBody({ client_id: unknownClientId, grant_type: attackerGrant }),
+  });
+  assert.equal(malicious.status, 400);
+
+  // A supported grant type that fails before any client verification must not
+  // record the unverified, syntactically valid client id either.
+  const unsupportedClient = await call(app, "/oauth/token", {
+    method: "POST",
+    headers: formHeaders,
+    body: formBody({ client_id: unknownClientId, grant_type: "authorization_code" }),
+  });
+  assert.equal(unsupportedClient.status, 400);
+
+  const rows = await fx.db.all<{ detail: string | null }>(
+    `SELECT detail FROM audit_events
+      WHERE operation = 'oauth.token.issue' AND outcome = 'failure'`,
+  );
+  assert.equal(rows.length, 2);
+
+  const details = rows.map((row) => {
+    assert.ok(row.detail !== null);
+    assert.equal(/[\u0000-\u001f\u007f]/.test(row.detail), false);
+    return JSON.parse(row.detail) as Record<string, unknown>;
+  });
+  const maliciousDetail = details.find((detail) => detail.reason === "unsupported_grant_type");
+  const unknownDetail = details.find((detail) => detail.reason === "invalid_request");
+  assert.ok(maliciousDetail !== undefined);
+  assert.ok(unknownDetail !== undefined);
+
+  // Attacker text and the unsupported grant type are omitted entirely.
+  assert.deepEqual(maliciousDetail, { reason: "unsupported_grant_type" });
+  assert.equal(JSON.stringify(rows).includes("cb_oat_"), false);
+  assert.equal(JSON.stringify(rows).includes("x".repeat(20)), false);
+
+  // The supported literal is kept, but the unverified client id is not.
+  assert.deepEqual(unknownDetail, {
+    grant_type: "authorization_code",
+    reason: "invalid_request",
+  });
+  assert.equal(Object.hasOwn(maliciousDetail, "client_id"), false);
+  assert.equal(Object.hasOwn(unknownDetail, "client_id"), false);
+});
+
 test("rate-limited login is audited uniformly", async (t) => {
   const fx = await createServiceFixture();
   t.after(() => fx.close());

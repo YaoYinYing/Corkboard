@@ -58,6 +58,8 @@ const MAX_OAUTH_BODY_BYTES = 64 * 1024;
 const FORM_MEDIA_TYPE = "application/x-www-form-urlencoded";
 const LOGIN_CSRF_COOKIE = "corkboard_oauth_login";
 const DECODER = new TextDecoder();
+const AUDIT_CLIENT_ID = /^[A-Za-z0-9._~-]{1,128}$/;
+const AUDIT_GRANT_TYPES = new Set(["authorization_code", "refresh_token"]);
 const ENCODER = new TextEncoder();
 const HTML_CSP =
   "default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
@@ -761,10 +763,14 @@ async function handleToken(
   const perClient = options.tokenLimiter.check(clientId);
   const global = options.tokenGlobalLimiter.check("oauth:token");
   if (!perClient.allowed || !global.allowed) {
+    const auditClientId = await verifiedAuditClientId(deps, clientId);
     await writeAudit(deps, {
       operation: "oauth.token.issue",
       outcome: "failure",
-      detail: { client_id: clientId, reason: "rate_limited" },
+      detail: {
+        ...(auditClientId === undefined ? {} : { client_id: auditClientId }),
+        reason: "rate_limited",
+      },
     });
     throw new RateLimitError(
       Math.max(perClient.retryAfterSeconds, global.retryAfterSeconds),
@@ -776,19 +782,33 @@ async function handleToken(
     return await dispatchTokenGrant(deps, clientId, grantType, form);
   } catch (error) {
     if (error instanceof OAuthTokenError) {
-      // Bounded OAuth error code only; no code, token, or verifier value.
+      // Bounded OAuth error code only; no code, token, or verifier value. The
+      // token endpoint is unauthenticated, so never echo raw form values.
+      const auditClientId = await verifiedAuditClientId(deps, clientId);
       await writeAudit(deps, {
         operation: "oauth.token.issue",
         outcome: "failure",
         detail: {
-          client_id: clientId,
-          grant_type: grantType,
+          ...(auditClientId === undefined ? {} : { client_id: auditClientId }),
+          ...(AUDIT_GRANT_TYPES.has(grantType) ? { grant_type: grantType } : {}),
           reason: error.oauthError,
         },
       });
     }
     throw error;
   }
+}
+
+// The token endpoint is unauthenticated. Echo only a syntactically valid,
+// registered client id so callers cannot write arbitrary text or an unverified
+// id into audit rows.
+async function verifiedAuditClientId(
+  deps: ServiceDeps,
+  clientId: string,
+): Promise<string | undefined> {
+  if (!AUDIT_CLIENT_ID.test(clientId)) return undefined;
+  const client = await findActiveClient(deps, clientId).catch(() => undefined);
+  return client === undefined ? undefined : clientId;
 }
 
 async function dispatchTokenGrant(

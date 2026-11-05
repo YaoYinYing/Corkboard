@@ -439,7 +439,8 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   | `session.login` | `failure` | none | `reason` (`invalid_credentials` / `rate_limited`) |
   | `session.logout` | `success` | account id | none (never the session id) |
   | `oauth.client.register` | `success` / `failure` | none | public `client_id` on success; `reason` on failure |
-  | `oauth.consent` | `success` / `denied` | account id | `client_id`, `project_id`, `speaker_id`, sorted `scopes`, `decision` |
+  | `oauth.consent` | `success` | account id | `client_id`, `project_id`, `speaker_id`, sorted `scopes`, `decision: "allow"` |
+  | `oauth.consent` | `denied` | account id | `client_id`, `decision: "deny"` (no project, speaker, or scopes) |
   | `oauth.token.issue` | `success` / `failure` | account id when known | `client_id`, internal `credential_id`, sorted `scopes`, `grant_type`; failures carry `reason` |
   | `oauth.refresh.reuse` | `detected` | none | `client_id`, internal `credential_id` |
   | `oauth.revoke` | `success` | none | `client_id`, internal `credential_id`, `token_type`; only when ownership is proven |
@@ -461,9 +462,15 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   `audit_events` yet. `prune` deliberately never deletes audit rows. Rows grow with
   authentication and OAuth traffic; the operator is responsible for database and
   backup lifecycle management. Audit rows are not cryptographically sealed or
-  tamper-evident against an operator with database write access. The service layer
-  does not receive the HTTP request id, so `request_id` remains null for these
-  events.
+  tamper-evident against an operator with database write access. No audit call site
+  passes a request id to `writeAudit`, so `request_id` remains null for these events
+  (the HTTP layer does have one; it is simply not forwarded).
+- **Unauthenticated writes grow the table.** A failed login, a rate-limited login, a
+  rate-limited token request, and a rejected OAuth sign-in (a failed credential check
+  on the sign-in form) each write one row before any authentication succeeds. Because
+  there is no retention, rotation, or deletion, an attacker can drive
+  `audit_events` growth at will. This is an accepted limit of slice O; operators must
+  size storage and archive or rotate the table out of band.
 - Expiry audit rows use a deterministic id derived from the message id and
   `INSERT OR IGNORE`. The HTTP endpoint records the authenticated principal; the
   operator-run worker records a **system actor** (null account and speaker), not the
