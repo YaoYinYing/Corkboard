@@ -11,7 +11,7 @@ as the work it describes.
 | Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) at `48b5a86`/state `5ca3067`, audit fix `4110a43` (tree `31d84ac`), final docs/tests `499a772` on `main`; supply-chain audit/license/SBOM (slice Z) on `slice-supply` at feature `09eb061` plus the audit-fix checkpoint (final `Tree-SHA` in that commit trailer), not pushed |
 | Last pushed checkpoint | `499a772` (slice-Y membership-editor docs/tests, tree `fe60450`) on `origin/main`; earlier pushed checkpoints include `15cdf62` (slice X speaker directory and project-scoped credential issuance, tree `3260e71`), `0f81877` (slice W atomic project creation, tree `b7a1653`), `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
 | Branch | `main` at `499a772` (`origin/main`); slice-Y membership editor on `slice-members`; slice-Z supply chain on `slice-supply`, not pushed |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success. Slice Z: first audits on tree `2b7e38e` returned security BLOCKED (P1: `sbom.ts` resolved `npm` through `PATH`, which `npm run` prepends with `node_modules/.bin`; P2: lock paths were checked only with `startsWith("node_modules/")`) and contract BLOCKED (missing `Tree-SHA` trailer, lockfile-driven scan and lock fallback undocumented, CLI exit-code tests absent). Fixes are in the audit-fix checkpoint (final `Tree-SHA` in that commit trailer); re-review pending, no PASS claimed |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success. Slice Z: first audits on tree `2b7e38e` returned security BLOCKED (P1: `sbom.ts` resolved `npm` through `PATH`, which `npm run` prepends with `node_modules/.bin`; P2: lock paths were checked only with `startsWith("node_modules/")`) and contract BLOCKED (missing `Tree-SHA` trailer, lockfile-driven scan and lock fallback undocumented, CLI exit-code tests absent). Fixes were reviewed at tree `3c05987`: security PASS + contract PASS. A final residual round then removed bare `npm` from the `check`/`audit` script chain, made absolute/traversal lock keys exit `2`, handled legacy `{type}` license objects, and routed the two pre-existing `dist`-build test helpers through `npm_execpath`; the final `Tree-SHA` is in the final commit trailer, and delta re-review is pending |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, credential rotation/revocation and grant editing, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
 ## Checkpoint history
@@ -53,7 +53,7 @@ as the work it describes.
 | this checkpoint | commit-trailer `Tree-SHA` | Slice Y: dashboard per-project membership editor — `GET`/`POST /projects/:projectId/members`, `POST /projects/:projectId/members/:speakerId/remove`; **project-owner-only** (not `project.edit`) with uniform `404`, explicit seven-scope capability set (owner may grant any), account-owned active speaker rule, duplicate conflict, manageable-owner removal refusal, grant deletion with membership removal, in-transaction ownership re-validation, adapter-level POST tests, en/zh | Base `15cdf62717626a07ccbe52c243f895a60064e298`; on `slice-members`, not pushed; security-audit P1 (owner gate) and P2/docs corrections in the fix commit; `npm ci` exit 0; `npm run check` exit 0 (440 tests: 439 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; D1/R2 parity remains unverified; cross-account provisioning, invitation/acceptance, bulk editing, credential rotation/revocation, and grant editing are not implemented or CLI-only |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
-| this checkpoint | commit-trailer `Tree-SHA` | Slice Z: lockfile-driven license/notice report (runtime/dev labeled, missing/unknown/non-permissive flagged), CycloneDX SBOM via the installed npm CLI (never PATH), license scan in `npm run check`, CI runs license scan + SBOM + uploads `reports/`, network `npm audit` stays separate | Base `499a772620d2caa3f0eb3f8a224fac9bfef47d10`; feature commit `09eb061` (tree `2b7e38e`); first audits security BLOCKED + contract BLOCKED; fixes in this audit-fix checkpoint; on `slice-supply`, not pushed; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (449 tests: 448 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run licenses` exit 0 (98 dependencies: 95 runtime, 3 dev; 0 flagged; 4,284-byte text, 18,711-byte JSON); `npm run sbom` exit 0 (95 components, root `corkboard@0.0.0`, 107,828 bytes); `npm run audit` exit 0 (0 vulnerabilities); re-review pending, no PASS claimed |
+| this checkpoint | commit-trailer `Tree-SHA` | Slice Z: lockfile-driven license/notice report (runtime/dev labeled, missing/unknown/non-permissive flagged; legacy `{type}` objects handled; absolute/traversal lock keys exit `2`), CycloneDX SBOM via the installed npm CLI (never PATH), license scan in `npm run check`, `check`/`audit` chain direct commands and an npm wrapper instead of bare `npm`, CI runs license scan + SBOM + uploads `reports/`, network `npm audit` stays separate | Base `499a772620d2caa3f0eb3f8a224fac9bfef47d10`; feature commit `09eb061` (tree `2b7e38e`); first audits BLOCKED on `2b7e38e`, fixes PASSED at tree `3c05987`; final residual round in this commit (final `Tree-SHA` in trailer), delta re-review pending; on `slice-supply`, not pushed; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (453 tests: 452 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run licenses` exit 0 (98 dependencies: 95 runtime, 3 dev; 0 flagged; 4,284-byte text, 18,711-byte JSON); `npm run sbom` exit 0 (95 components, root `corkboard@0.0.0`, 107,828 bytes); `npm run audit` exit 0 (0 vulnerabilities); a `node_modules/.bin/npm` shim was proven not to run during `npm run check` |
 
 ## GitHub Issue coordination
 
@@ -1444,19 +1444,31 @@ pushed.
 ## Vertical slice Z — dependency audit, license report, and SBOM (base `499a772`)
 
 - **Checkpoint.** Feature commit `09eb061` (tree `2b7e38e`) plus the audit-fix
-  checkpoint commit, on `slice-supply`, based on
+  commits on `slice-supply`, based on
   `499a772620d2caa3f0eb3f8a224fac9bfef47d10`; not pushed. The final checkpoint
-  commit message carries `Tree-SHA`. Re-review is pending, so no PASS is claimed.
+  commit message carries `Tree-SHA`.
 - **Audit outcome.** The first independent audits on tree `2b7e38e` returned
-  **security BLOCKED** and **contract BLOCKED**. Security P1: `scripts/sbom.ts`
-  executed `npm` resolved through `PATH`, which `npm run` prepends with
-  `node_modules/.bin`, so a dependency `npm` shim could forge the report; it now runs
-  `process.execPath` + `npm_execpath` and fails closed when `npm_execpath` is unset.
-  Security P2: `scripts/license-report.ts` accepted any lock key beginning with
-  `node_modules/`, so `..` could escape the repository; keys are now rejected unless
-  every segment is non-empty and not `.`/`..`, and the reader resolves and verifies
-  the file stays under `<root>/node_modules`. Contract fixes: `Tree-SHA` trailer,
-  lockfile-driven/fallback documentation, and CLI exit-code/report-writing tests.
+  **security BLOCKED** and **contract BLOCKED**; the fixes were re-reviewed at tree
+  `3c05987` as **security PASS + contract PASS**. A final residual round then removed
+  bare `npm` from the `check`/`audit` chain, rejected absolute/traversal lock keys,
+  handled legacy `{type}` license objects, and routed two pre-existing test build
+  helpers through `npm_execpath`; its delta re-review is pending at the final tree.
+  - Security P1: `scripts/sbom.ts` executed `npm` resolved through `PATH`, which
+    `npm run` prepends with `node_modules/.bin`, so a dependency `npm` shim could
+    forge the report. It now runs `process.execPath` + `npm_execpath` and fails
+    closed when `npm_execpath` is unset.
+  - Security residual: `package.json` `check`/`audit` also called bare `npm`, so a
+    shim could make them exit `0` without running. `check` now chains `node`, `tsc`,
+    and `node --test` directly; `audit` calls `scripts/npm-audit.ts`, which uses the
+    same `process.execPath` + `npm_execpath` pattern. Two pre-existing tests that ran
+    `npm run build` now use `npm_execpath` too; a `node_modules/.bin/npm` shim was
+    executed before this fix and is not executed after it.
+  - Security P2: `scripts/license-report.ts` accepted any lock key beginning with
+    `node_modules/`, so `..` or an absolute path could escape the repository. Keys
+    with absolute/traversal/empty segments are now rejected with exit `2`, and the
+    reader resolves and verifies the file stays under `<root>/node_modules`.
+  - Contract: `Tree-SHA` trailer, lockfile-driven/fallback documentation, legacy
+    object-form license handling, and CLI exit-code/report-writing tests.
 - **Scope.** Adds `npm run licenses` (`scripts/license-report.ts`) and
   `npm run sbom` (`scripts/sbom.ts`), adds the license scan to `npm run check`, and
   documents the policy and limits in `docs/supply-chain.md`. `package-lock.json`
@@ -1467,14 +1479,17 @@ pushed.
   is unreadable or absent. It labels runtime/dev from the lock's `dev`/`devOptional`
   flags, accepts simple SPDX `AND`/`OR` expressions composed only of `0BSD`,
   `Apache-2.0`, `BlueOak-1.0.0`, `BSD-2-Clause`, `BSD-3-Clause`, `CC0-1.0`, `ISC`,
-  `MIT`, and `Unlicense`, and exits `1` on `notice`/`missing`/`unknown` entries
-  (exit `2` for an unreadable/unsafe lockfile). It writes stable
+  `MIT`, and `Unlicense`, handles legacy `{"type": "..."}` objects and `licenses`
+  arrays, and exits `1` on `notice`/`missing`/`unknown` entries (exit `2` for an
+  unreadable/unsafe lockfile). It writes stable
   `reports/licenses.txt` and `reports/licenses.json`; `reports/` is git-ignored. The
   SBOM invokes the installed npm CLI explicitly (never through `PATH`), runs npm's
   built-in CycloneDX generator after install, writes `reports/sbom.cdx.json`, and
-  works offline from the installed tree and lockfile. CI runs the license scan and
-  SBOM, uploads `reports/`, and keeps `npm run audit` (`--audit-level=high`) as a
-  separate network-dependent step.
+  works offline from the installed tree and lockfile. `npm run check` and
+  `npm run audit` invoke no bare `npm`; the audit wrapper propagates npm's exit status
+  and fails closed without `npm_execpath`. CI runs the license scan and SBOM, uploads
+  `reports/`, and keeps `npm run audit` (`--audit-level=high`) as a separate
+  network-dependent step.
 - **Counts at this tree.** 98 lockfile dependency entries (95 runtime, 3 dev),
   0 flagged; report sizes 4,284 bytes (text) and 18,711 bytes (JSON); SBOM 95
   components (unique `name@version`; three repeated install paths collapse),
@@ -1487,15 +1502,19 @@ pushed.
   file or scan license texts. The SBOM has no signature, provenance attestation, or
   vulnerability data and follows npm's selector/deduplication. There is no update bot
   and no reproducible-build proof.
-- **Tests run.** `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (449 tests:
-  448 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run licenses`
+- **Tests run.** `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (453 tests:
+  452 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run licenses`
   exit 0; `npm run sbom` exit 0; `npm run audit` exit 0 (0 vulnerabilities).
   `tests/supply-chain/license-report.test.ts` covers classification, expression
-  parsing, missing/notice/unknown flagging, dev labeling, ordering, unreadable
-  metadata, and lock-path traversal rejection. `license-report-cli.test.ts` exercises
-  `main()` exit `0`/`1`/`2` and report writing in a temp repository.
-  `sbom.test.ts` proves a fake `npm` in `node_modules/.bin` is not executed, that the
-  root name is normalized, and that a missing `npm_execpath` fails closed.
+  parsing, legacy object-form declarations, missing/notice/unknown flagging, dev
+  labeling, ordering, unreadable metadata, and traversal/absolute lock-path
+  rejection. `license-report-cli.test.ts` exercises `main()` exit `0`/`1`/`2` and
+  report writing in a temp repository. `sbom.test.ts` and `npm-audit.test.ts` prove a
+  fake `npm` in `node_modules/.bin` is not executed, root-name normalization, status
+  propagation, and fail-closed behavior without `npm_execpath`. A static test asserts
+  the `check`/`audit` scripts contain no bare `npm`. An executable repo
+  `node_modules/.bin/npm` shim during `npm run check` left no marker and the check
+  passed (exit 0), confirming the chain ignores it.
 
 ## Implemented and verified at this tree
 

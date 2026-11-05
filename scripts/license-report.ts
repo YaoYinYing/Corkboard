@@ -78,6 +78,10 @@ function declaredLicense(pkg: unknown): unknown {
   }
   const { license, licenses } = pkg as { license?: unknown; licenses?: unknown };
   if (license !== undefined) {
+    // Legacy object form: {"type": "MIT", "url": "..."}.
+    if (typeof license === "object" && license !== null && "type" in license) {
+      return (license as { type?: unknown }).type;
+    }
     return license;
   }
   if (!Array.isArray(licenses)) {
@@ -144,6 +148,17 @@ export function buildLicenseReport({
 }: BuildInput): LicenseReport {
   const dependencies: DependencyRecord[] = [];
   for (const [path, entry] of Object.entries(packages)) {
+    if (path === "") {
+      continue;
+    }
+    const absoluteOrTraversal =
+      path.startsWith("/") ||
+      path.startsWith("\\") ||
+      /^[A-Za-z]:[\\/]/.test(path) ||
+      path.split(/[\\/]/).includes("..");
+    if (absoluteOrTraversal) {
+      throw new Error(`unsafe package path in lockfile: ${path}`);
+    }
     if (!path.startsWith("node_modules/")) {
       continue;
     }

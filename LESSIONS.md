@@ -795,7 +795,10 @@ prevented regression; when to remove the advice.
   fix. `tests/supply-chain/sbom.test.ts` pins the opposite outcome.
 - **Fix:** Invoke `process.execPath` with `process.env.npm_execpath`, and exit `2` with
   a clear error when `npm_execpath` is unset. Never rely on a shell/PATH lookup for
-  npm inside repository scripts.
+  npm inside repository scripts, `package.json` script chains, or test helpers that
+  spawn npm. `npm run check` now runs `node`/`tsc`/`node --test` directly and
+  `npm run audit` uses `scripts/npm-audit.ts`; the two tests that build `dist` use
+  `npm_execpath`.
 - **Prevents:** Dependency-controlled execution of the supply-chain tooling and forged
   reports.
 - **Remove when:** Scripts no longer spawn npm, or a reviewed helper resolves the

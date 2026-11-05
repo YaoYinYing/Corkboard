@@ -15,7 +15,7 @@ install.
 | `npm run audit` | **yes** (npm advisory database) | nothing | `npm audit --audit-level=high`; fails on high/critical advisories |
 | `npm run licenses` | no (after install) | `reports/licenses.txt`, `reports/licenses.json` | Declared licenses for every `package-lock.json` dependency entry, runtime/dev labeled, flagged when missing, unknown, or non-permissive |
 | `npm run sbom` | no (after install) | `reports/sbom.cdx.json` | CycloneDX JSON from npm's built-in `npm sbom` |
-| `npm run check` | no | `reports/licenses.*` | Secret scans, the license scan, typecheck, and tests |
+| `npm run check` | no | `reports/licenses.*` | Secret scans, the license scan, typecheck, and tests, each invoked directly |
 
 `reports/` is git-ignored and must be generated on demand. Do not commit a stale
 report. All three commands exit nonzero on failure; the license scan also exits `1`
@@ -25,14 +25,24 @@ when it flags an entry (the report is still written).
 given the lockfile and installed tree. It does **not** include `npm audit`, which
 requires the registry. CI runs `npm run audit` as a separate step.
 
+Neither `check` nor `audit` invokes a bare `npm`. `check` chains `node` with each
+script, `tsc --noEmit`, and `node --test`; `audit` calls
+`scripts/npm-audit.ts`, which runs `process.execPath` + `npm_execpath` with
+`audit --audit-level=high`, propagates npm's exit status, and fails closed (exit `2`)
+when `npm_execpath` is unset. The two integration tests that build `dist` also invoke
+npm through `npm_execpath` rather than `PATH`. This prevents a dependency-provided
+`npm` shim in `node_modules/.bin` from making the checks exit `0` without running.
+
 The scan is **lockfile-driven**: it iterates every `node_modules/` entry in
 `package-lock.json`, whether or not that package is present in the installed tree.
 For each entry it prefers the `license`/`licenses` declaration in
 `node_modules/<path>/package.json`; if that file is unreadable or declares no
 license, it falls back to the `license` field recorded in the lock entry. A package
 absent from `node_modules` is therefore still reported from lock metadata, and a lock
-entry with no declaration anywhere is `missing`. Lock paths containing `..`, absolute
-paths, or empty segments are rejected with exit `2` rather than read.
+entry with no declaration anywhere is `missing`. The legacy object form
+`{"type": "MIT", "url": "..."}` and `licenses` arrays are reduced to their `type`
+strings. Lock paths containing `..`, absolute paths, or empty segments are rejected
+with exit `2` rather than read.
 
 ### License policy
 
@@ -44,7 +54,7 @@ only of those identifiers.
 - `notice`: a recognized reciprocal license (for example GPL, LGPL, AGPL, MPL, EPL,
   CDDL, CC-BY-SA) is present. Do not redistribute without the required notice and a
   review.
-- `missing`: no `license`/`licenses` declaration is readable in
+- `missing`: no string or `{type}` `license`/`licenses` declaration is readable in
   `node_modules/<pkg>/package.json` and the lock entry has none either.
 - `unknown`: an unparsed or unrecognized declaration, including `SEE LICENSE IN ...`
   and proprietary strings.

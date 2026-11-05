@@ -109,5 +109,13 @@ test("licenses exits 2 on a missing lockfile and on an unsafe lock path", () => 
     const unsafe = run(dir);
     assert.equal(unsafe.status, 2);
     assert.match(unsafe.stderr, /unsafe package path in lockfile/);
+
+    writeLock(dir, {
+      "": {},
+      "/tmp/node_modules/absolute": { version: "1.0.0" },
+    });
+    const absolute = run(dir);
+    assert.equal(absolute.status, 2);
+    assert.match(absolute.stderr, /unsafe package path in lockfile/);
   });
 });

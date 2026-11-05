@@ -64,21 +64,51 @@ test("buildLicenseReport labels scope, sorts stably, and flags unreadable metada
   assert.equal(report.dependencies[1]?.scope, "runtime");
 });
 
-test("lock paths cannot escape node_modules", () => {
+test("legacy object-form license declarations are classified", () => {
+  const installed = buildLicenseReport({
+    packages: { "node_modules/a": { version: "1.0.0" } },
+    readPackageJson: () => ({
+      name: "a",
+      version: "1.0.0",
+      license: { type: "MIT" },
+    }),
+  });
+  assert.equal(installed.dependencies[0]?.status, "permissive");
+
+  // The lock-entry fallback accepts the same legacy object form.
+  const fallback = buildLicenseReport({
+    packages: {
+      "node_modules/b": { version: "1.0.0", license: { type: "ISC" } },
+    },
+    readPackageJson: () => {
+      throw new Error("unreadable");
+    },
+  });
+  assert.equal(fallback.dependencies[0]?.status, "permissive");
+  assert.equal(fallback.flagged.length, 0);
+});
+
+test("lock paths cannot escape node_modules or be absolute", () => {
   assert.equal(isSafePackagePath("node_modules/a"), true);
   assert.equal(isSafePackagePath("node_modules/@scope/a"), true);
   assert.equal(isSafePackagePath("node_modules/../outside"), false);
   assert.equal(isSafePackagePath("node_modules/a/../../outside"), false);
   assert.equal(isSafePackagePath("/tmp/node_modules/a"), false);
 
-  assert.throws(
-    () =>
-      buildLicenseReport({
-        packages: { "node_modules/../outside": { version: "1.0.0" } },
-        readPackageJson: () => {
-          throw new Error("must not read");
-        },
-      }),
-    /unsafe package path in lockfile/,
-  );
+  for (const path of [
+    "node_modules/../outside",
+    "/tmp/node_modules/outside",
+    "C:\\node_modules\\outside",
+  ]) {
+    assert.throws(
+      () =>
+        buildLicenseReport({
+          packages: { [path]: { version: "1.0.0" } },
+          readPackageJson: () => {
+            throw new Error("must not read");
+          },
+        }),
+      /unsafe package path in lockfile/,
+    );
+  }
 });

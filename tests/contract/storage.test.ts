@@ -382,7 +382,12 @@ function createLegacyV1(dbPath: string, repoRoot: string): void {
 }
 
 test("built adapter opens its bundled migration from dist", async (t) => {  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-  execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "pipe" });
+  const npmExecPath = process.env.npm_execpath;
+  assert.ok(npmExecPath, "npm_execpath is required to build in tests");
+  execFileSync(process.execPath, [npmExecPath, "run", "build"], {
+    cwd: repoRoot,
+    stdio: "pipe",
+  });
   execFileSync(
     process.execPath,
     [join(repoRoot, "scripts", "copy-migrations.ts")],

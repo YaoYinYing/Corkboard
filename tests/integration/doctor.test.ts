@@ -655,7 +655,12 @@ test("the built CLI runs doctor against a real data directory", (t) => {
   return (async () => {
     await seedSentAndRead(dataDir);
     // Build unconditionally so this cannot pass against stale dist output.
-    execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "pipe" });
+    const npmExecPath = process.env.npm_execpath;
+    assert.ok(npmExecPath, "npm_execpath is required to build in tests");
+    execFileSync(process.execPath, [npmExecPath, "run", "build"], {
+      cwd: repoRoot,
+      stdio: "pipe",
+    });
     const result = runCli(
       builtCli,
       ["doctor", "--data-dir", dataDir, "--json"],
