@@ -293,7 +293,7 @@ must equal `projects.owner_account_id`, and the project and that account must be
 active. A non-owner member who holds `project.edit` is still denied with the uniform
 `404`; that matters because such a member could otherwise add a speaker carrying
 `message.send` and mint a bearer credential for it. An unknown, foreign, non-owner,
-inactive, or non-member project is the same `404` page, and the route checks ownership
+inactive, or non-owner project is the same `404` page, and the route checks ownership
 **before** parsing a POST body so a malformed payload cannot probe project existence.
 The editor is a human-session surface only; a bearer principal is rejected.
 
@@ -344,7 +344,8 @@ renders English or Simplified Chinese.
 Cross-account **addition/provisioning** of speakers owned by another account remains
 CLI-only (`add-member`); the dashboard owner may add only their own active speakers.
 Invitation/acceptance, bulk editing, and capability presets are **not implemented**
-(no CLI command exists for them). Removal may target any membership. Credential
+(no CLI command exists for them). Removal may target any active (non-removed)
+membership; an already removed row returns `NOT_FOUND`. Credential
 issuance is available here; credential rotation, revocation, and per-credential grant
 editing remain CLI-only.
 

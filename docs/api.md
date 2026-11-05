@@ -265,7 +265,8 @@ the project owner account, is active, and includes `project.edit` (an inactive o
 speaker or one lacking `project.edit` neither counts nor is protected). Both writes
 are one transaction with an in-transaction ownership re-check. Cross-account
 addition/provisioning of other accounts' speakers remains CLI-only; removal may
-target any membership. No message send, expiry, credential rotation/revocation, or
+target any active (non-removed) membership; an already removed row returns
+`NOT_FOUND`. No message send, expiry, credential rotation/revocation, or
 admin action exists.
 
 ## Endpoints

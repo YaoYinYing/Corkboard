@@ -246,7 +246,8 @@ title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
   lacking `project.edit` neither count nor are protected. Both writes run in one
   transaction that re-reads project ownership under active checks; the update and
   grant deletion roll back together. Cross-account addition/provisioning of other
-  accounts' speakers remains CLI-only; removal may target any membership.
+  accounts' speakers remains CLI-only; removal may target any active (non-removed)
+  membership, and an already removed row returns `NOT_FOUND`.
 - **Body reveal and integrity.** The body route calls the existing verified decrypt
   path, re-authorizes after decryption, and returns a generic error page on
   failure. It never returns ciphertext, partial plaintext, or an integrity error

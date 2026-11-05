@@ -9,7 +9,12 @@ import { WEB_CSP } from "../../src/app/html.ts";
 import { hashPassword } from "../../src/auth/password.ts";
 import { SCOPES } from "../../src/domain/authz.ts";
 import { AppError } from "../../src/domain/errors.ts";
-import { authorizeProject } from "../../src/service/auth.ts";
+import { authorizeProject, sessionAccountPrincipal } from "../../src/service/auth.ts";
+import {
+  addProjectMember,
+  listProjectMembers,
+  removeProjectMember,
+} from "../../src/service/projects.ts";
 import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "../../src/service/sessions.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
 import type { SqlDatabase, SqlValue } from "../../src/storage/db.ts";
@@ -804,7 +809,105 @@ test("removal forms only accept POST and the editor keeps other routes intact", 
   assert.equal(removal.status, 405);
 });
 
-test("the Node adapter buffers membership form POSTs and enforces the owner gate over HTTP", async (t) => {
+test("project ownership alone permits membership changes without a caller membership or project.edit", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  await fx.addAccount("acct_owner");
+  await fx.addSpeaker("spk_owner", "acct_owner");
+  await fx.addSpeaker("spk_new", "acct_owner");
+  await fx.addSpeaker("spk_limited", "acct_owner");
+  await fx.addProject("proj_none", "acct_owner");
+  await fx.addProject("proj_limited", "acct_owner");
+  await fx.addMembership("proj_limited", "spk_limited", ["project.read"]);
+
+  const principal = sessionAccountPrincipal({
+    sessionId: "sess_owner",
+    accountId: "acct_owner",
+  });
+
+  // Ownership with no membership at all: list, add (granting a scope the
+  // caller does not hold), and remove all work.
+  assert.deepEqual(await listProjectMembers(fx.deps, principal, "proj_none"), []);
+  await addProjectMember(fx.deps, principal, "proj_none", {
+    speakerId: "spk_new",
+    capabilities: ["message.send"],
+  });
+  const noneMembers = await listProjectMembers(fx.deps, principal, "proj_none");
+  assert.deepEqual(
+    noneMembers.map((member) => [member.speakerId, member.capabilities]),
+    [["spk_new", ["message.send"]]],
+  );
+  await removeProjectMember(fx.deps, principal, "proj_none", "spk_new");
+  assert.deepEqual(await listProjectMembers(fx.deps, principal, "proj_none"), []);
+
+  // The owner's only own membership is limited (project.read, no
+  // project.edit), yet ownership still authorizes listing, adding a scope the
+  // caller's membership lacks, and removal. There is no caller-rights cap.
+  assert.deepEqual(
+    (await listProjectMembers(fx.deps, principal, "proj_limited")).map(
+      (member) => member.speakerId,
+    ),
+    ["spk_limited"],
+  );
+  await addProjectMember(fx.deps, principal, "proj_limited", {
+    speakerId: "spk_new",
+    capabilities: ["message.send", "receipt.write"],
+  });
+  const limitedMembers = await listProjectMembers(fx.deps, principal, "proj_limited");
+  assert.ok(
+    limitedMembers.some(
+      (member) =>
+        member.speakerId === "spk_new" &&
+        member.capabilities.includes("message.send") &&
+        member.capabilities.includes("receipt.write"),
+    ),
+  );
+  await removeProjectMember(fx.deps, principal, "proj_limited", "spk_new");
+  // The limited owner membership is not manageable, so it may be removed too.
+  await removeProjectMember(fx.deps, principal, "proj_limited", "spk_limited");
+  assert.deepEqual(await listProjectMembers(fx.deps, principal, "proj_limited"), []);
+});
+
+test("a bearer principal is rejected by the membership-editor ownership check", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  await fx.addAccount("acct_owner");
+  await fx.addSpeaker("spk_owner", "acct_owner");
+  await fx.addSpeaker("spk_other", "acct_owner");
+  await fx.addProject("proj_a", "acct_owner");
+  await fx.addMembership("proj_a", "spk_owner", ALL_SCOPES);
+  const { token } = await fx.addCredential({
+    speakerId: "spk_owner",
+    scopes: ALL_SCOPES,
+    grantProjects: ["proj_a"],
+    autoGrantMemberships: false,
+  });
+  const bearer = await fx.authenticate(token);
+  assert.equal(bearer.sessionViewer, undefined);
+
+  for (const action of [
+    () => listProjectMembers(fx.deps, bearer, "proj_a"),
+    () =>
+      addProjectMember(fx.deps, bearer, "proj_a", {
+        speakerId: "spk_other",
+        capabilities: ["project.read"],
+      }),
+    () => removeProjectMember(fx.deps, bearer, "proj_a", "spk_owner"),
+  ]) {
+    await assert.rejects(
+      action(),
+      (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+    );
+  }
+  const ownerRows = await fx.db.all<{ removed_at: string | null }>(
+    "SELECT removed_at FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
+    ["proj_a", "spk_owner"],
+  );
+  assert.equal(ownerRows[0]?.removed_at, null);
+  assert.equal(await membershipRow(fx, "proj_a", "spk_other"), undefined);
+});
+
+test("the Node adapter buffers membership form POSTs on the owner path over HTTP", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "corkboard-members-http-"));
   const dataDir = join(root, "data");
   mkdirSync(dataDir, { recursive: true });

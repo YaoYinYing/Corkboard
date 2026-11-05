@@ -191,7 +191,8 @@ written) is not prevented; no stronger guarantee is claimed. See
   active and the capabilities include `project.edit`. Inactive owner speakers and
   owner memberships lacking `project.edit` neither count nor are protected.
   Cross-account **addition/provisioning** of other accounts' speakers remains
-  CLI-only; removal may target any membership.
+  CLI-only; removal may target any active (non-removed) membership, and an already
+  removed row returns `NOT_FOUND`.
 - **Residual CLI race (documented, not fixed).** `grant-key-project` checks the active
   membership and then inserts the grant as two independent statements, outside a
   transaction. A concurrent `remove-member` can mark the membership removed and delete
