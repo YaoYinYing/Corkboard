@@ -760,3 +760,27 @@ prevented regression; when to remove the advice.
 - **Remove when:** The storage layer can enforce the invariant in one declarative
   statement (for example a database-level trigger) or every adapter ships a verified
   transaction implementation.
+
+## 2026-11-05 — Membership removal and grant deletion are one atomic rule
+
+- **Failure:** Treating `project_memberships.removed_at` and
+  `credential_project_grants` as independent writes lets a crash or a later statement
+  failure leave a removed membership whose grants survive (or an active-looking grant
+  for a removed member). Re-adding the membership then revives a credential the
+  operator believed revoked, and the dashboard silently diverges from the CLI
+  `remove-member`. Separately, an upsert that reactivates a membership on re-add would
+  make an active duplicate silently change capabilities instead of rejecting it.
+- **Reproducer:** Wrap `SqlDatabase.transaction` so it throws after the service's
+  transaction body. Call the remove route, then assert `removed_at` is still `NULL`
+  **and** the grant row is still present. On a split-write implementation the first
+  write commits and the second is missing (or vice versa). Re-add the speaker and
+  authenticate its old credential: a surviving grant yields `FORBIDDEN`-free access.
+- **Fix:** One `transaction` performs the in-transaction `project.edit` re-check, the
+  last-owner count, the soft delete, and the grant deletion; both writes roll back
+  together. Add rejects an active duplicate as a conflict and only reactivates a
+  removed row with the explicitly submitted capability set, restoring no grants.
+- **Prevents:** Partial revocation state, credentials that revive on re-add, and a
+  dashboard that does not match the CLI's grant-deletion contract.
+- **Remove when:** A database-level constraint/trigger can enforce "no grant without
+  an active membership" and grant deletion is expressed in the same statement, or
+  every adapter ships a verified transaction implementation.
