@@ -523,10 +523,14 @@ verification externally; nothing runs on a timer.
 It never contains keys, tokens, emails, message summaries or bodies, absolute paths,
 or file contents. Blob names are validated as plain basenames, so a manifest cannot
 traverse out of the backup directory. Individual blobs are capped at 16 KiB (twice the
-8 KiB plaintext body cap, leaving room for the CB01 frame/header) and the total at
-1 GiB; the database snapshot is capped at 16 GiB. These bounds are checked from
-metadata **before** hashing or copying, so a sparse or hardlink-multiplied giant file
-cannot turn `backup`/`verify`/`restore` into an unbounded scan.
+8 KiB plaintext body cap, leaving room for the CB01 frame/header), the total at
+1 GiB, and the database at 16 GiB. Blob and total bounds are checked from manifest/
+`lstat` metadata **before** hashing or copying. The source database size is checked from
+`lstat` **before** `VACUUM INTO` (and re-checked after the snapshot), so an oversized or
+sparse source is rejected without being copied into `--out`. A sparse or
+hardlink-multiplied giant blob therefore cannot turn verification into an unbounded
+scan. These bounds must be revisited before attachments raise the real blob maximum;
+today's 16 KiB cap is sized for the 8 KiB body limit.
 
 ### Verify
 
@@ -538,8 +542,9 @@ the manifest's schema version to match, and requires every referenced storage ke
 appear in the blob list. Exit `0` clean, `1` issues (stable codes), `2` cannot inspect
 (missing/unreadable/symlinked backup directory). With `--json`, a clean or issue report
 is one object; an exit-2 inspection failure or unexpected command error also prints
-exactly one `{ok:false,code,...}` object on stdout. Human stderr has absolute paths
-redacted.
+exactly one `{ok:false,code,...}` object on stdout (`code` is one of, for example,
+`USAGE_ERROR`, `BACKUP_INSPECT_FAILED`, `BACKUP_FAILED`, `VERIFY_FAILED`, or
+`RESTORE_FAILED`). Human stderr has absolute paths redacted and control bytes escaped.
 
 Run `verify` after every backup, before every restore, and on a schedule (for example
 daily or weekly) against recent backups. A backup that has never been verified is not

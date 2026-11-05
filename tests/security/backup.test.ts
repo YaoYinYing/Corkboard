@@ -3,11 +3,9 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
-  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -16,7 +14,6 @@ import {
   truncateSync,
   unlinkSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +32,7 @@ import {
   verifyBackup,
 } from "../../src/service/backup.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
+import { redactPaths } from "../../scripts/corkboard.ts";
 
 const script = fileURLToPath(new URL("../../scripts/corkboard.ts", import.meta.url));
 const NOW = "2026-11-03T12:00:00.000Z";
@@ -572,20 +570,40 @@ test("verify distinguishes an unreadable database from an integrity failure", as
 
   const corrupted = await makeBackup(t);
   const corruptedPath = join(corrupted.backupDir, BACKUP_DATABASE_FILE);
-  const fd = openSync(corruptedPath, "r+");
+  // Build a controlled multi-page database so a b-tree page corruption is
+  // reproducible; the VACUUM output's page layout is not guaranteed.
+  rmSync(corruptedPath, { force: true });
+  const controlled = new DatabaseSync(corruptedPath);
   try {
-    // Corrupt a cell pointer on page 3; integrity_check returns errors rather
-    // than failing to open.
-    writeSync(fd, Buffer.from([0xff, 0xff, 0xff, 0xff]), 0, 4, 2 * 4096 + 8);
+    controlled.exec("PRAGMA journal_mode=DELETE");
+    controlled.exec("PRAGMA page_size=4096");
+    controlled.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    const insert = controlled.prepare("INSERT INTO t(v) VALUES (?)");
+    for (let index = 0; index < 400; index += 1) insert.run(`x${index}`);
   } finally {
-    closeSync(fd);
+    controlled.close();
   }
-  refreshManifestDatabase(corrupted.backupDir);
-  const corruptedReport = await verifyBackup({ backupDir: corrupted.backupDir });
-  assert.ok(
-    issueCodes(corruptedReport).includes("BACKUP_DATABASE_INTEGRITY_FAILED"),
-    JSON.stringify(corruptedReport.issues),
-  );
+  const original = readFileSync(corruptedPath);
+  // SQLite page layout varies, so find a b-tree page corruption that makes
+  // `PRAGMA integrity_check` return errors (rather than failing to open).
+  const candidates: number[] = [];
+  for (let page = 2; page <= 8; page += 1) {
+    for (const offset of [8, 20, 64]) candidates.push((page - 1) * 4096 + offset);
+  }
+  let integrityReported = false;
+  for (const offset of candidates) {
+    if (offset + 4 > original.length) continue;
+    const bytes = Buffer.from(original);
+    bytes.writeUInt32BE(0xffffffff, offset);
+    writeFileSync(corruptedPath, bytes);
+    refreshManifestDatabase(corrupted.backupDir);
+    const report = await verifyBackup({ backupDir: corrupted.backupDir });
+    if (issueCodes(report).includes("BACKUP_DATABASE_INTEGRITY_FAILED")) {
+      integrityReported = true;
+      break;
+    }
+  }
+  assert.ok(integrityReported, "no page corruption produced an integrity_check failure");
 });
 
 test("restore refuses a target inside the backup and backup refuses an output inside the source", async (t) => {
@@ -651,4 +669,92 @@ test("backup and verify bound per-file and total blob bytes before hashing", asy
     issueCodes(totalReport).includes("BACKUP_TOTAL_BYTES_EXCEEDED"),
     JSON.stringify(totalReport.issues.slice(0, 5)),
   );
+});
+
+test("an oversized source database is rejected before the snapshot writes output", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "oversized-db");
+  mkdirSync(dataDir, { mode: 0o700 });
+  const sourcePath = join(dataDir, BACKUP_DATABASE_FILE);
+  writeFileSync(sourcePath, new Uint8Array());
+  truncateSync(sourcePath, 16 * 1024 ** 3 + 1);
+  const outDir = join(root, "oversized-out");
+  await assert.rejects(
+    createBackup({ dataDir, outDir }),
+    (error: unknown) =>
+      error instanceof BackupError && error.code === "BACKUP_DATABASE_TOO_LARGE",
+  );
+  assert.equal(existsSync(outDir), false);
+});
+
+test("redacts quoted absolute paths including embedded spaces and controls", () => {
+  const message = "EACCES: permission denied, mkdir '/home/x/My Secret Project/out'";
+  const redacted = redactPaths(message);
+  assert.equal(redacted.includes("Secret Project"), false);
+  assert.equal(redacted.includes("/home/x"), false);
+  assert.ok(redacted.includes("<path>"));
+  assert.equal(
+    redactPaths("open /home/x/plain/out failed").includes("/home/x"),
+    false,
+  );
+  assert.equal(
+    redactPaths('open "/home/x/Two Words/out" failed').includes("Two Words"),
+    false,
+  );
+});
+
+test("CLI stderr redacts a generic error path containing spaces", { skip: process.getuid?.() === 0 }, async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { mode: 0o700 });
+  const db = await openSqliteDatabase(join(dataDir, BACKUP_DATABASE_FILE));
+  db.close();
+  const parent = join(root, "My Secret Project");
+  mkdirSync(parent, { mode: 0o700 });
+  chmodSync(parent, 0o500);
+  try {
+    const run = runCli([
+      "backup",
+      "--data-dir",
+      dataDir,
+      "--out",
+      join(parent, "out"),
+      "--json",
+    ]);
+    assert.equal(run.status, 1);
+    assert.equal(run.stderr.includes("Secret Project"), false);
+    assert.equal(run.stderr.includes(root), false);
+    assert.ok(run.stderr.includes("<path>"), run.stderr);
+    const failure = JSON.parse(run.stdout) as { ok: boolean; code: string };
+    assert.equal(failure.ok, false);
+    assert.equal(failure.code, "BACKUP_FAILED");
+  } finally {
+    chmodSync(parent, 0o700);
+  }
+});
+
+test("verify bounds directory listings and reports an entry-limit issue", async (t) => {
+  const fixture = await makeBackup(t);
+  const blobDir = join(fixture.backupDir, BACKUP_BLOB_DIR);
+  for (let index = 0; index <= 100_000; index += 1) {
+    writeFileSync(join(blobDir, `overflow_${index}`), new Uint8Array());
+  }
+  const report = await verifyBackup({ backupDir: fixture.backupDir });
+  assert.equal(report.ok, false);
+  assert.ok(
+    issueCodes(report).includes("BACKUP_ENTRY_LIMIT_EXCEEDED"),
+    JSON.stringify(report.issues.slice(0, 5)),
+  );
+});
+
+test("human verify output escapes control bytes in unexpected filenames", async (t) => {
+  const fixture = await makeBackup(t);
+  writeFileSync(
+    join(fixture.backupDir, BACKUP_BLOB_DIR, "\u001b[31mevil"),
+    new Uint8Array(),
+  );
+  const run = runCli(["verify", "--backup", fixture.backupDir]);
+  assert.equal(run.status, 1);
+  assert.equal(run.stdout.includes("\u001b"), false);
+  assert.ok(run.stdout.includes("BACKUP_FILE_UNEXPECTED"), run.stdout);
 });

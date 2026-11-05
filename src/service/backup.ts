@@ -3,6 +3,7 @@
 // database snapshot uses SQLite's portable `VACUUM INTO`, which writes a single
 // self-contained file and does not require copying `-wal`/`-shm` sidecars.
 import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
 import { constants as fsConstants, createWriteStream } from "node:fs";
 import {
   chmod,
@@ -10,7 +11,7 @@ import {
   mkdir,
   mkdtemp,
   open,
-  readdir,
+  opendir,
   realpath,
   rename,
   rm,
@@ -94,6 +95,7 @@ export type BackupIssueCode =
   | "BACKUP_TOTAL_BYTES_EXCEEDED"
   | "BACKUP_FILE_UNEXPECTED"
   | "BACKUP_ENTRY_INVALID"
+  | "BACKUP_ENTRY_LIMIT_EXCEEDED"
   | "BACKUP_SCHEMA_UNSUPPORTED"
   | "BACKUP_SCHEMA_AHEAD"
   | "BACKUP_SCHEMA_MISMATCH";
@@ -216,6 +218,23 @@ async function lstatOrUndefined(
   }
 }
 
+// Iterate instead of loading an unbounded directory listing. One extra entry is
+// read to distinguish "at cap" from "over cap"; the caller reports a stable
+// issue and skips that directory's per-entry work.
+async function listDirectoryBounded(
+  path: string,
+  limit: number,
+): Promise<{ entries: Dirent[]; exceeded: boolean }> {
+  const dir = await opendir(path);
+  const entries: Dirent[] = [];
+  // The async iterator closes the directory on completion or early return.
+  for await (const entry of dir) {
+    if (entries.length >= limit) return { entries, exceeded: true };
+    entries.push(entry);
+  }
+  return { entries, exceeded: false };
+}
+
 class FileTooLargeError extends Error {
   constructor() {
     super("file exceeds the configured size bound");
@@ -248,8 +267,11 @@ async function digestFile(path: string, maxBytes?: number): Promise<FileDigest> 
     let size = 0;
     for await (const chunk of handle.createReadStream({ autoClose: false })) {
       const bytes = chunk as Buffer;
-      hash.update(bytes);
       size += bytes.length;
+      // Enforce the bound while streaming too, in case the file grew after the
+      // open-time stat.
+      if (maxBytes !== undefined && size > maxBytes) throw new FileTooLargeError();
+      hash.update(bytes);
     }
     return { size, sha256: hash.digest("hex") };
   } finally {
@@ -487,9 +509,14 @@ async function inspectBlobs(
     add("BACKUP_ENTRY_INVALID", BACKUP_BLOB_DIR);
     return;
   }
-  let diskEntries;
+  let diskEntries: Dirent[];
   try {
-    diskEntries = await readdir(blobDir, { withFileTypes: true });
+    const listing = await listDirectoryBounded(blobDir, MAX_BLOB_ENTRIES);
+    if (listing.exceeded) {
+      add("BACKUP_ENTRY_LIMIT_EXCEEDED", BACKUP_BLOB_DIR);
+      return;
+    }
+    diskEntries = listing.entries;
   } catch {
     throw new BackupInspectError("cannot read the backup blob directory");
   }
@@ -591,9 +618,11 @@ async function inspectBackup(input: { backupDir: string }): Promise<BackupInspec
   };
   report.schema_version = manifest.schema_version;
 
-  let topEntries;
+  let topEntries: Dirent[];
   try {
-    topEntries = await readdir(backupDir, { withFileTypes: true });
+    const listing = await listDirectoryBounded(backupDir, MAX_BLOB_ENTRIES);
+    if (listing.exceeded) add("BACKUP_ENTRY_LIMIT_EXCEEDED");
+    topEntries = listing.entries;
   } catch {
     throw new BackupInspectError("cannot read the backup directory");
   }
@@ -708,17 +737,19 @@ async function copyBlobs(
       "blob path is not a directory or is a symbolic link; refusing to back up",
     );
   }
-  let entries;
+  let entries: Dirent[];
   try {
-    entries = await readdir(sourceDir, { withFileTypes: true });
-  } catch {
+    const listing = await listDirectoryBounded(sourceDir, MAX_BLOB_ENTRIES);
+    if (listing.exceeded) {
+      throw new BackupError(
+        "BACKUP_BLOB_LIMIT_EXCEEDED",
+        `blob directory has more than ${MAX_BLOB_ENTRIES} entries`,
+      );
+    }
+    entries = listing.entries;
+  } catch (error) {
+    if (error instanceof BackupError) throw error;
     throw new BackupError("BACKUP_BLOB_DIR_INVALID", "cannot read the blob directory");
-  }
-  if (entries.length > MAX_BLOB_ENTRIES) {
-    throw new BackupError(
-      "BACKUP_BLOB_LIMIT_EXCEEDED",
-      `blob directory has more than ${MAX_BLOB_ENTRIES} entries`,
-    );
   }
   const copied: BackupBlobEntry[] = [];
   let totalBytes = 0;
@@ -804,6 +835,15 @@ async function assertBackupSource(dataDir: string): Promise<{
     throw new BackupError(
       "BACKUP_SOURCE_INVALID",
       "database path is not a regular file (including a symlink)",
+    );
+  }
+  // Check before VACUUM INTO so an oversized/sparse source is rejected without
+  // being fully copied into --out. The post-snapshot check remains defense in
+  // depth in case the file grows during the snapshot.
+  if (Number(dbEntry.size) > MAX_BACKUP_DATABASE_BYTES) {
+    throw new BackupError(
+      "BACKUP_DATABASE_TOO_LARGE",
+      "source database exceeds the backup size bound",
     );
   }
   return { dataDir: resolved, databasePath, blobDir: join(resolved, BACKUP_BLOB_DIR) };
@@ -992,13 +1032,17 @@ export async function restoreBackup(input: {
         "restore target exists and is not a directory",
       );
     }
-    let contents;
+    let nonEmpty = false;
     try {
-      contents = await readdir(dataDir);
+      const dir = await opendir(dataDir);
+      for await (const _entry of dir) {
+        nonEmpty = true;
+        break;
+      }
     } catch {
       throw new RestoreError("RESTORE_TARGET_NOT_DIRECTORY", "cannot read restore target");
     }
-    if (contents.length > 0) {
+    if (nonEmpty) {
       throw new RestoreError(
         "RESTORE_TARGET_NOT_EMPTY",
         "restore target is not empty; refusing to overwrite",

@@ -302,10 +302,12 @@ is modified, and a source with no WAL sidecars is opened `immutable=1` so backup
 no `-wal`/`-shm` (a live read with both sidecars present may touch the existing `-shm`).
 A lone, symlinked, or non-regular sidecar is refused. Backup rejects a source schema
 newer than the bundled migrations and a database that references a missing blob, so it
-does not report success for a pair its own `verify` rejects. Individual blobs are
-capped at 16 KiB, the blob total at 1 GiB, and the snapshot at 16 GiB, checked from
-metadata before hashing/copying. Keys are not included; back them up separately and
-restore them before starting the service.
+does not report success for a pair its own `verify` rejects. Blob sizes are capped at
+16 KiB and the blob total at 1 GiB, checked from metadata before hashing/copying; the
+source database is `lstat`-checked against 16 GiB **before** `VACUUM INTO` (and again
+after), so an oversized/sparse source is rejected before output is written. The 16 KiB
+cap must be revisited before attachments raise the real blob maximum. Keys are not
+included; back them up separately and restore them before starting the service.
 
 `verify` checks the manifest schema/version and bounds, every size/digest, required and
 extra files, `PRAGMA integrity_check` on the snapshot, that the schema is not newer than
@@ -321,10 +323,11 @@ issues (`RESTORE_TARGET_NOT_EMPTY`, `RESTORE_TARGET_SYMLINK`, `BACKUP_OUT_EXISTS
 the stable `BACKUP_*` issue codes in the JSON output), `2` usage/config error before
 touching the filesystem or a backup directory that cannot be inspected at all. With
 `--json`, every outcome, including exit `2` and unexpected errors, prints exactly one
-object on stdout: success/report objects, or `{ok:false,code,...}` with `USAGE_ERROR`,
-`BACKUP_INSPECT_FAILED`, `BACKUP_FAILED`, `VERIFY_FAILED`, or `RESTORE_FAILED`.
-Absolute paths are redacted from human stderr; unexpected positionals are rejected
-before filesystem work.
+object on stdout: success/report objects, or `{ok:false,code,...}` with, for example,
+`USAGE_ERROR`, `BACKUP_INSPECT_FAILED`, `BACKUP_FAILED`, `VERIFY_FAILED`, or
+`RESTORE_FAILED`. Absolute paths are redacted from human stderr (including quoted paths
+with spaces) and control bytes in filenames are escaped; unexpected positionals are
+rejected before filesystem work.
 
 Verify after every backup and before every restore; keep a `verify` run on a schedule
 and perform a full restore into a scratch directory quarterly. The manifest/blob policy,

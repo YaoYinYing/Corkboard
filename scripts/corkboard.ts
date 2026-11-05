@@ -20,7 +20,7 @@ import {
   restoreBackup,
   verifyBackup,
 } from "../src/service/backup.ts";
-import { DoctorError, formatDoctorReport, runDoctor } from "../src/service/doctor.ts";
+import { DoctorError, formatDoctorReport, runDoctor, sanitizeForTerminal } from "../src/service/doctor.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
 import {
   RETENTION_DEFAULT_GRACE_HOURS,
@@ -807,14 +807,18 @@ function backupOption(value: string | undefined, name: string): string {
 }
 
 // Operator-facing error text must not expose an absolute path (for example a
-// temporary staging directory) on stderr.
-function redactPaths(message: string): string {
-  return message.replace(/(?:\/[A-Za-z0-9._-]+)+/g, "<path>");
+// temporary staging directory) on stderr. Quoted paths are replaced as a whole
+// so spaces inside the path cannot leak the remainder.
+export function redactPaths(message: string): string {
+  return message
+    .replace(/'[^']*\/[^']*'/g, "'<path>'")
+    .replace(/"[^"]*\/[^"]*"/g, '"<path>"')
+    .replace(/(?:\/[^\s"']+)+/g, "<path>");
 }
 
 function printCliFailure(code: string, message: string, json: boolean): void {
   if (json) console.log(JSON.stringify({ ok: false, code }));
-  console.error(`corkboard: ${redactPaths(message)}`);
+  console.error(`corkboard: ${sanitizeForTerminal(redactPaths(message))}`);
 }
 
 function printVerifyIssues(report: {
@@ -822,7 +826,12 @@ function printVerifyIssues(report: {
   issues_truncated: boolean;
 }): void {
   const listed = report.issues
-    .map((issue) => (issue.file === undefined ? issue.code : `${issue.code}(${issue.file})`))
+    .map((issue) => {
+      const text = issue.file === undefined ? issue.code : `${issue.code}(${issue.file})`;
+      // File names can be attacker-chosen; never let control bytes reach a
+      // terminal in human output. JSON escaping already covers --json.
+      return sanitizeForTerminal(text);
+    })
     .join(", ");
   const suffix = report.issues_truncated ? ", ... (truncated)" : "";
   console.log(report.issues.length === 0 ? "issues: none" : `issues: ${listed}${suffix}`);
@@ -919,9 +928,10 @@ async function restoreCommand(values: Values, extraPositionals: number): Promise
           JSON.stringify({ ok: false, code: error.code, issues: error.issues }),
         );
       } else {
-        console.error(`corkboard: ${redactPaths(error.message)}`);
+        console.error(`corkboard: ${sanitizeForTerminal(redactPaths(error.message))}`);
         for (const issue of error.issues) {
-          console.error(issue.file === undefined ? issue.code : `${issue.code}(${issue.file})`);
+          const text = issue.file === undefined ? issue.code : `${issue.code}(${issue.file})`;
+          console.error(sanitizeForTerminal(text));
         }
       }
       process.exitCode = 1;
@@ -1048,7 +1058,7 @@ if (isEntryPoint()) {
                 : "BACKUP_FAILED";
         console.log(JSON.stringify({ ok: false, code }));
       }
-      console.error(`corkboard: ${redactPaths(message)}`);
+      console.error(`corkboard: ${sanitizeForTerminal(redactPaths(message))}`);
       process.exit(exitCode);
     }
     console.error(`corkboard: ${message}`);

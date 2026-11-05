@@ -474,14 +474,19 @@ scheduler, remote replication, key management, or a D1/Workers path.
   no keys, tokens, bodies, emails, or absolute paths. Names are validated as plain
   basenames, so a manifest cannot address a path outside the backup. Per-blob (16 KiB,
   derived from the 8 KiB plaintext cap plus CB01 overhead), total-blob (1 GiB), and
-  database (16 GiB) bounds are checked from metadata before hashing or copying, so a
-  sparse or hardlink-multiplied file cannot cause an unbounded scan. `backup` also
-  rejects a schema newer than the build and a referenced blob that is absent, so it
-  never reports success for a pair `verify` would reject.
+  database (16 GiB) bounds are enforced: blob sizes before hashing/copying, the source
+  database from `lstat` before `VACUUM INTO` (and again after), so a sparse or
+  hardlink-multiplied file cannot cause an unbounded scan and an oversized source is
+  never copied into `--out`. The 16 KiB cap must be revisited before attachments raise
+  the real blob maximum. `backup` also rejects a schema newer than the build and a
+  referenced blob that is absent, so it never reports success for a pair `verify` would
+  reject.
 - **Verification.** `verify` validates the manifest and every listed size/digest,
   required/extra entries, non-file and symlink rejection, `PRAGMA integrity_check`,
   schema compatibility, and blob reference coverage. It opens only the backup database,
-  read-only; a tampered database is rejected by digest before it is parsed. Issues use
+  read-only; a tampered database is rejected by digest before it is parsed. Directory
+  listings use `opendir` and stop at the 100,000-entry cap, reporting
+  `BACKUP_ENTRY_LIMIT_EXCEEDED` instead of loading an unbounded listing. Issues use
   stable `BACKUP_*` codes and exit `1`; a backup directory that cannot be inspected
   exits `2`.
 - **Restore.** `restore` verifies first and uses the same inspection result's manifest
