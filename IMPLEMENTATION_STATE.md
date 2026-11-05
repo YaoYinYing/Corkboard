@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) at `48b5a86`/state `5ca3067`, audit fix `4110a43` (tree `31d84ac`), final docs/tests `499a772` on `main`; supply-chain audit/license/SBOM (slice Z) pushed on `main` at `f7e62be` (tree `06f664e`) |
-| Last pushed checkpoint | slice-Z `f7e62be` (supply-chain audit/license/SBOM, tree `06f664e5bca840ce7719cdb5ff31daa5b85d9c51`) on `origin/main`; this docs-only amendment is local-only, not yet pushed; earlier pushed checkpoints include `499a772` (slice-Y membership-editor docs/tests, tree `fe60450`), `15cdf62` (slice X speaker directory and project-scoped credential issuance, tree `3260e71`), `0f81877` (slice W atomic project creation, tree `b7a1653`), `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
-| Branch | `origin/main` at `f7e62be`; local `main` is this docs-only amendment (not pushed); completed slice branches remain locally, including squashed variants shown by `git branch --no-merged main`; none was rewritten or deleted |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) at `48b5a86`/state `5ca3067`, audit fix `4110a43` (tree `31d84ac`), final docs/tests `499a772` on `main`; supply-chain audit/license/SBOM (slice Z) pushed on `main` at `f7e62be` (tree `06f664e`); the docs/state amendment is `1dfa284` (tree `bc6a82b`) and is `origin/main`; dashboard credential inventory and revocation (slice AA) candidate on `slice-credentials` (base `1dfa284`), not pushed |
+| Last pushed checkpoint | `1dfa284` (docs/state record of slice-Z audits and script portability limits, tree `bc6a82bbb1e58de6beb7bd8ed9ca34ed69d9a159`) is `origin/main`; slice-Z code is `f7e62be` (supply-chain audit/license/SBOM, tree `06f664e5bca840ce7719cdb5ff31daa5b85d9c51`). Earlier pushed checkpoints include `499a772` (slice-Y membership-editor docs/tests, tree `fe60450`), `15cdf62` (slice X speaker directory and project-scoped credential issuance, tree `3260e71`), `0f81877` (slice W atomic project creation, tree `b7a1653`), `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `origin/main` at `1dfa284`; slice AA is the local `slice-credentials` branch (not pushed); completed slice branches remain locally, including squashed variants shown by `git branch --no-merged main`; none was rewritten or deleted |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success. Slice Z: first audits on tree `2b7e38e` returned security BLOCKED (P1: `sbom.ts` resolved `npm` through `PATH`, which `npm run` prepends with `node_modules/.bin`; P2: lock paths were checked only with `startsWith("node_modules/")`) and contract BLOCKED (missing `Tree-SHA` trailer, lockfile-driven scan and lock fallback undocumented, CLI exit-code tests absent). Fixes were reviewed at tree `3c05987`: security PASS + contract PASS. A residual security round removed bare `npm` from the `check`/`audit` chain, made absolute/traversal lock keys exit `2`, handled legacy `{type}` license objects, and routed the two pre-existing `dist`-build test helpers through `process.execPath` + `npm_execpath`. A contract audit then BLOCKED the same shim class via bare `node`/`tsc` in package scripts; all scripts now use `$npm_node_execpath` with a fail-closed `${npm_node_execpath:?...}` guard, and `tsc` is `node_modules/typescript/lib/tsc.js`. The final `Tree-SHA` is in the final commit trailer. Final audits on tree `06f664e` (commit `f7e62be`) returned **security PASS + contract PASS** with three non-blocking P2s (POSIX-only scripts understated by "as before"; `git` still PATH-resolved in the secret scans; the shim test's `tsc` assertion is static, not functional). Fast-forwarded and pushed on `origin/main`; CI run 42055915268 success |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, credential rotation/revocation and grant editing, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, credential rotation and grant editing, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
 ## Checkpoint history
 
@@ -54,6 +54,7 @@ as the work it describes.
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
 | this checkpoint | commit-trailer `Tree-SHA` | Slice Z: lockfile-driven license/notice report (runtime/dev labeled, missing/unknown/non-permissive flagged; legacy `{type}` objects handled; absolute/traversal lock keys exit `2`), CycloneDX SBOM via the installed npm CLI (never PATH), license scan in `npm run check`, `check`/`audit` chain direct `$npm_node_execpath` commands and an npm wrapper instead of bare `node`/`tsc`/`npm`, CI runs license scan + SBOM + uploads `reports/`, network `npm audit` stays separate, legacy `{type}` objects handled and absolute/traversal lock keys exit `2` | Base `499a772620d2caa3f0eb3f8a224fac9bfef47d10`; feature commit `09eb061` (tree `2b7e38e`); first audits BLOCKED on `2b7e38e`, fixes PASSED at tree `3c05987`; residual rounds then removed bare `npm` and bare `node`/`tsc`; final audits on tree `06f664e` PASS (security + contract) with three non-blocking P2s; pushed on `origin/main` at `f7e62be`; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (455 tests: 454 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run licenses` exit 0 (98 dependencies: 95 runtime, 3 dev; 0 flagged; 4,284-byte text, 18,711-byte JSON); `npm run sbom` exit 0 (95 components, root `corkboard@0.0.0`, 107,828 bytes); `npm run audit` exit 0 (0 vulnerabilities); executable `node_modules/.bin/{npm,node,tsc}` shims were proven not to run during `npm run check` |
+| this checkpoint | commit-trailer `Tree-SHA` | Slice AA: dashboard credential inventory and revocation — `GET /speakers/:speakerId/credentials` lists only non-secret metadata (credential ID, created, expiry, revoked state, project grants) for an account-owned speaker; `POST /speakers/:speakerId/credentials/:credentialId/revoke` soft-revokes with `revoked_at`, keeps grants and the row, is idempotent, audits sanitized `credential.revoke`, and `303`s back; account-owner-only with uniform `404`, speaker-scoped credential IDs, session double-submit CSRF, in-transaction ownership re-check, bearer-principal rejection, en/zh, Node adapter body coverage. Rotation is explicitly not implemented; revoke-then-issue is the replacement path | Base `1dfa2849094d8085ae67deeb74973e70421f5b86`; not pushed; independent review PENDING; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (tests recorded in the commit trailer); `npm run build` exit 0 |
 
 ## GitHub Issue coordination
 
@@ -1534,6 +1535,72 @@ pushed.
   `node_modules/.bin/{node,tsc}` shim pair during `npm run check` left no markers and
   the check passed (exit 0).
 
+## Vertical slice AA — dashboard credential inventory and revocation (base `1dfa284`)
+
+- **Scope.** Adds `GET /speakers/:speakerId/credentials` and
+  `POST /speakers/:speakerId/credentials/:credentialId/revoke` to the
+  server-rendered dashboard, plus a per-speaker inventory link in `/speakers`. The
+  inventory renders only non-secret metadata: credential ID, created time, expiry
+  (or "No expiry"), derived active/expired/revoked/unknown state (revocation wins
+  over expiry; an unparseable stored expiry is "Unknown", never "Active"), and
+  project grants (title and ID). The speaker, credential, and grant reads are three
+  independent parameterized SELECTs, each repeating the owner/active-account
+  predicate; there is no read-snapshot claim, and an ownership transfer between
+  reads can only make a later read return empty, never add foreign rows. It never
+  selects or renders the token, public prefix, verifier, or `scope_json`. Dashboard,
+  CLI, and OAuth-issued credentials are all ordinary `credentials` rows and all
+  appear; revoking an OAuth access credential also blocks refresh because the
+  refresh path re-reads `revoked_at` (refresh rows are not deleted here).
+- **Authority.** Account-owner-only, like the speaker directory and membership
+  editor: `speakers.owner_account_id` must equal the session account, and the owning
+  account must be active. A foreign or unknown speaker is the uniform `404`; an
+  unauthenticated request is redirected to `/login`; the service rejects any
+  non-session principal, so a bearer credential cannot list or revoke. The speaker
+  status is not required to be active (inactive speakers are already listed; their
+  credentials are already denied by authorization). The POST resolves the owned
+  speaker and inventory before parsing the body and re-reads ownership and the active
+  account inside the write transaction, so a transfer after the route check aborts
+  without a revocation.
+- **Revocation semantics.** `revokeOwnedSpeakerCredential` sets
+  `credentials.revoked_at` once with `... WHERE id = ? AND speaker_id = ?
+  AND revoked_at IS NULL`, inside one `SqlDatabase.transaction`; grants and the
+  credential row are retained, matching CLI `revoke-key`. The credential must belong
+  to the path speaker: a credential ID from another speaker (owned or foreign) or an
+  unknown ID is the same `NOT_FOUND` and changes nothing. A repeat call is an
+  idempotent no-op (same `303`, unchanged timestamp, no duplicate audit row). A
+  successful transition writes one sanitized `credential.revoke` event with the actor
+  account, speaker, and non-secret credential ID. The route uses the session
+  double-submit (`corkboard_csrf` plus one hidden `csrf_token`), the
+  `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB cap; CSRF failure re-renders the
+  inventory with `400` and writes nothing. The Node adapter buffers the new POST
+  through `isWebPath`.
+- **Rotation is not implemented.** This is revocation, not an atomic rotate. The
+  replacement path is the existing issuance flow (`POST /speakers/:speakerId/key`
+  or CLI `issue-key`), which creates a new credential and grants. Per-credential
+  grant editing and expiry selection remain CLI-only. Documented in `web-ui.md` and
+  `security-operations.md`; no documentation claims rotation.
+- **Tests.** `tests/integration/speakers-web.test.ts` adds: inventory metadata,
+  no token/prefix/verifier rendering, directory link, soft revoke retaining grants
+  and row, sanitized audit, token invalidation, idempotent repeat, owner-only and
+  cross-speaker uniform `404` with no state change, CSRF missing/wrong/duplicate/
+  cookie-less/cross-origin, revoke POST over 64 KiB (`413`) and wrong
+  `Content-Type` (`400`) with no write, `405` on the new paths, unknown-speaker
+  `GET` (`404`), inactive owning account (service `NOT_FOUND`, no write; the HTTP
+  session redirect is the existing inactive-account behavior), inactive owned
+  speaker (manageable), foreign speaker with malformed and oversized bodies (`404`
+  before body semantics), an unparseable expiry rendered "Unknown", bearer service
+  rejection and cookie-less HTTP redirect,
+  in-transaction ownership re-check rollback, ownership transfer injected between
+  the speaker and credential SELECTs (zero credential rows) and between the
+  credential and grant SELECTs (credentials without grants, never foreign rows),
+  revoked-session redirects, en/zh
+  rendering, and an adapter-level `startServer` POST-body test. Service functions are
+  covered directly where the HTTP layer cannot supply a bearer principal.
+- **Limitations.** Inventory is Node/SQLite-only and unbounded per speaker (no
+  pagination); rotation/overlap, grant editing, expiry selection, bulk revocation,
+  and automatic cleanup remain absent. D1/R2 parity and a real-browser pass are
+  unexecuted. Independent security and contract review is PENDING.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -1886,6 +1953,16 @@ Do not infer any of these from local MCP behavior or from another plan.
   the global 1024-session cap lets one credential evict another's session (availability
   only); `SessionEntry.sessionId` is dead; the MCP 413-before-auth ordering exception on
   oversized unauthenticated POSTs needs explicit docs/tests.
+- Slice-AA audit debt (non-blocking): the per-speaker credential inventory is
+  unbounded (no pagination) and lists every ordinary credential, including
+  OAuth-issued access credentials; revocation blocks their refresh through the
+  credential's `revoked_at` but does not delete `oauth_refresh_tokens` rows (the
+  operator `prune` handles them later). Rotation, grant editing, expiry selection,
+  and bulk revocation remain unimplemented. The `credential.revoke` audit row is
+  written after the revocation transaction commits and is fail-open, so a crash or
+  audit-insert failure between commit and audit loses the row while the revocation
+  still takes effect (the pre-existing audit-sink rule; no behavior change here).
+  D1/R2 parity and a real-browser pass are unexecuted.
 - No Workers adapter.
 - Slice-I audit debt (P2, non-blocking): login rate limiting is process-local and keyed
   by email digest (an attacker who knows an address can consume that bucket); failure

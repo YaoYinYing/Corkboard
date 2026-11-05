@@ -3,6 +3,36 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — Revocation is not rotation, and a credential ID is not speaker-wide authority
+
+- **Failure avoided:** A dashboard credential list invites three mistakes: gating it
+  on `project.edit`/membership (a delegated capability would become credential
+  administration), accepting any credential ID the signed-in account owns (so a
+  credential of another speaker could be revoked through the wrong path), and
+  describing revoke-then-issue as "rotation". All three misstate the authority or the
+  operation.
+- **Decision:** Inventory and revocation require `speakers.owner_account_id` = the
+  session account (active account), with a uniform `404` for foreign/unknown
+  speakers and for credential IDs not belonging to the path speaker. The listing
+  selects only ID, timestamps, revoked state, and grant rows; the token, prefix, and
+  verifier are never selected or rendered. Revocation is a soft `revoked_at`
+  assignment that retains the row and grants, is idempotent, and audits one
+  `credential.revoke` row only for the transition that actually happened.
+  Revoke-then-issue through the existing issuance flow is the documented replacement
+  path; **no atomic rotation is claimed**.
+- **Reproducer / test:** `tests/integration/speakers-web.test.ts` covers a non-owner
+  and a same-account different-speaker credential ID (both uniform `404`, no state
+  change), CSRF failure, bearer-principal rejection at the service boundary,
+  idempotent repeat with one audit row, revoked-session redirects, and an
+  adapter-level POST proving the Node body gate includes the new route. Removing the
+  `speaker_id = ?` predicate or the owner predicate makes these fail.
+- **Prevents:** Privilege escalation through delegated project capabilities,
+  cross-speaker revocation by ID guessing, rendering a one-time secret in an
+  inventory, duplicate audit rows for no-ops, and buying a rotation guarantee the
+  system does not have.
+- **Remove when:** Credential administration gets a reviewed delegated role, or an
+  atomic rotate/overlap operation with its own audited contract is implemented.
+
 ## 2026-11-05 — A once-only secret belongs in the POST response, not in redirect state
 
 - **Failure avoided:** The obvious redirect-after-POST pattern has nowhere to put a

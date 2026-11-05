@@ -36,9 +36,13 @@ import {
 import {
   getOwnedSpeakerForKey,
   issueProjectCredential,
+  listOwnedSpeakerCredentials,
   listOwnedSpeakers,
+  revokeOwnedSpeakerCredential,
   type IssuedCredential,
+  type OwnedCredential,
   type OwnedSpeaker,
+  type OwnedSpeakerCredentials,
   type OwnedSpeakerForKey,
 } from "../service/speakers.ts";
 import {
@@ -169,6 +173,18 @@ const EN = {
   credentialLabel: "New credential",
   credentialProjectsLabel: "Granted projects",
   credentialScopesLabel: "Scopes",
+  manageCredentialsAction: "Credentials",
+  credentialsTitle: "Credentials",
+  credentialsEmpty: "This speaker has no credentials.",
+  credentialCreatedLabel: "Created",
+  credentialExpiresLabel: "Expires",
+  credentialNoExpiry: "No expiry",
+  credentialGrantsLabel: "Project grants",
+  credentialNoGrants: "No project grants.",
+  revokeCredentialAction: "Revoke credential",
+  statusRevoked: "Revoked",
+  statusExpired: "Expired",
+  statusUnknown: "Unknown",
   statusInactive: "Inactive",
   membersTitle: "Members",
   membersEmpty: "This project has no active members.",
@@ -272,6 +288,18 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   credentialLabel: "新凭证",
   credentialProjectsLabel: "已授权项目",
   credentialScopesLabel: "权限范围",
+  manageCredentialsAction: "凭证",
+  credentialsTitle: "凭证",
+  credentialsEmpty: "此说话者没有凭证。",
+  credentialCreatedLabel: "创建时间",
+  credentialExpiresLabel: "过期时间",
+  credentialNoExpiry: "不过期",
+  credentialGrantsLabel: "项目授权",
+  credentialNoGrants: "没有项目授权。",
+  revokeCredentialAction: "撤销凭证",
+  statusRevoked: "已撤销",
+  statusExpired: "已过期",
+  statusUnknown: "未知",
   statusInactive: "未激活",
   membersTitle: "成员",
   membersEmpty: "此项目没有活跃成员。",
@@ -1296,9 +1324,15 @@ function renderSpeakerDirectory(
               )
               .join("")}</ul>`;
       const active = speaker.status === "active";
-      const issue = active
-        ? `<p><a href="/speakers/${encodeURIComponent(speaker.id)}/key${localeQuery(locale)}">${escapeHtml(t(locale, "issueCredentialAction"))}</a></p>`
-        : "";
+      const actions = [
+        `<a href="/speakers/${encodeURIComponent(speaker.id)}/credentials${localeQuery(locale)}">${escapeHtml(t(locale, "manageCredentialsAction"))}</a>`,
+      ];
+      if (active) {
+        actions.push(
+          `<a href="/speakers/${encodeURIComponent(speaker.id)}/key${localeQuery(locale)}">${escapeHtml(t(locale, "issueCredentialAction"))}</a>`,
+        );
+      }
+      const links = `<p>${actions.join(' <span aria-hidden="true">·</span> ')}</p>`;
       return `<li><article aria-labelledby="${nameId}">
 <h2 id="${nameId}">${escapeHtml(displaySpeakerName(speaker))}</h2>
 <dl>
@@ -1306,7 +1340,7 @@ function renderSpeakerDirectory(
 <dt>${escapeHtml(t(locale, "statusLabel"))}</dt><dd${active ? ' class="status"' : ""}>${escapeHtml(t(locale, active ? "statusActive" : "statusInactive"))}</dd>
 <dt>${escapeHtml(t(locale, "speakerProjectsLabel"))}</dt><dd>${grants}</dd>
 </dl>
-${issue}
+${links}
 </article></li>`;
     })
     .join("\n");
@@ -1314,6 +1348,83 @@ ${issue}
 <ul class="project-list">
 ${items}
 </ul>`;
+}
+
+interface CredentialsPageOptions {
+  inventory: OwnedSpeakerCredentials;
+  csrf: string;
+  status: number;
+  errorKey?: MessageKey;
+}
+
+// Only non-secret credential metadata is rendered: the id, timestamps, revoked
+// state, and grant rows. The token was shown once at issuance; the prefix and
+// verifier are never selected by the service or placed in this page.
+function renderCredentialsPage(
+  locale: Locale,
+  url: URL,
+  options: CredentialsPageOptions,
+): Response {
+  const error =
+    options.errorKey === undefined
+      ? ""
+      : `<p class="error" role="alert">${escapeHtml(t(locale, options.errorKey))}</p>`;
+  const items =
+    options.inventory.credentials.length === 0
+      ? `<p class="empty">${escapeHtml(t(locale, "credentialsEmpty"))}</p>`
+      : `<ul class="project-list">
+${options.inventory.credentials
+  .map((credential: OwnedCredential, index) => {
+    const headingId = `credential-${index}-id`;
+    const revoked = credential.revokedAt !== null;
+    const stateKey =
+      credential.state === "revoked"
+        ? "statusRevoked"
+        : credential.state === "expired"
+          ? "statusExpired"
+          : credential.state === "unknown"
+            ? "statusUnknown"
+            : "statusActive";
+    const projects =
+      credential.projects.length === 0
+        ? escapeHtml(t(locale, "credentialNoGrants"))
+        : `<ul class="grant-list">${credential.projects
+            .map(
+              (project) =>
+                `<li>${escapeHtml(project.title)} <code>${escapeHtml(project.id)}</code></li>`,
+            )
+            .join("")}</ul>`;
+    const expiry =
+      credential.expiresAt === null
+        ? escapeHtml(t(locale, "credentialNoExpiry"))
+        : `<time datetime="${escapeHtml(credential.expiresAt)}">${escapeHtml(formatCommittedAt(locale, credential.expiresAt))}</time>`;
+    const revoke = revoked
+      ? ""
+      : `
+<form method="post" action="/speakers/${encodeURIComponent(options.inventory.speaker.id)}/credentials/${encodeURIComponent(credential.id)}/revoke${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, "revokeCredentialAction"))}</button></p>
+</form>`;
+    return `<li><article aria-labelledby="${headingId}">
+<h2 id="${headingId}"><code>${escapeHtml(credential.id)}</code></h2>
+<dl>
+<dt>${escapeHtml(t(locale, "statusLabel"))}</dt><dd${credential.state === "active" ? ' class="status"' : ""}>${escapeHtml(t(locale, stateKey))}</dd>
+<dt>${escapeHtml(t(locale, "credentialCreatedLabel"))}</dt><dd><time datetime="${escapeHtml(credential.createdAt)}">${escapeHtml(formatCommittedAt(locale, credential.createdAt))}</time></dd>
+<dt>${escapeHtml(t(locale, "credentialExpiresLabel"))}</dt><dd>${expiry}</dd>
+<dt>${escapeHtml(t(locale, "credentialGrantsLabel"))}</dt><dd>${projects}</dd>
+</dl>${revoke}
+</article></li>`;
+  })
+  .join("\n")}
+</ul>`;
+  const content = `<p><a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "backToSpeakers"))}</a></p>
+<h1>${escapeHtml(t(locale, "credentialsTitle"))}</h1>
+<p>${escapeHtml(t(locale, "speakerNameLabel"))}: ${escapeHtml(displaySpeakerName(options.inventory.speaker))} <code>${escapeHtml(options.inventory.speaker.id)}</code></p>
+${error}${items}`;
+  return htmlResponse(
+    options.status,
+    renderPage(locale, url, t(locale, "credentialsTitle"), content),
+  );
 }
 
 interface SpeakerKeyFormOptions {
@@ -1436,6 +1547,64 @@ async function handleSpeakers(
       t(locale, "speakersTitle"),
       renderSpeakerDirectory(locale, speakers),
     ),
+  );
+}
+
+async function handleSpeakerCredentials(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  speakerId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const inventory = await listOwnedSpeakerCredentials(
+    deps,
+    sessionAccountPrincipal(session),
+    speakerId,
+  );
+  return renderCredentialsPage(locale, url, {
+    inventory,
+    csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+    status: 200,
+  });
+}
+
+async function handleSpeakerCredentialRevoke(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  speakerId: string,
+  credentialId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const principal = sessionAccountPrincipal(session);
+  // Resolve the owned speaker before parsing the body, so a foreign or unknown
+  // speaker is the uniform 404 regardless of payload shape. The service repeats
+  // the owner check inside the write transaction.
+  const inventory = await listOwnedSpeakerCredentials(deps, principal, speakerId);
+  const form = await readForm(request);
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return renderCredentialsPage(locale, url, {
+      inventory,
+      csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+      status: 400,
+      errorKey: "formExpired",
+    });
+  }
+  // A credential from another speaker, or an unknown credential, is NOT_FOUND
+  // and changes nothing; an already-revoked credential is an idempotent no-op.
+  await revokeOwnedSpeakerCredential(deps, principal, speakerId, credentialId);
+  return redirect(
+    303,
+    `/speakers/${encodeURIComponent(speakerId)}/credentials${localeQuery(locale)}`,
   );
 }
 
@@ -1824,6 +1993,21 @@ export function isWebPath(segments: readonly string[]): boolean {
   ) {
     return true;
   }
+  if (
+    segments.length === 3 &&
+    segments[0] === "speakers" &&
+    segments[2] === "credentials"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 5 &&
+    segments[0] === "speakers" &&
+    segments[2] === "credentials" &&
+    segments[4] === "revoke"
+  ) {
+    return true;
+  }
   if (segments.length === 2 && segments[0] === "projects") return true;
   if (
     segments.length === 3 &&
@@ -1896,6 +2080,30 @@ export async function handleWebRoute(
         return await handleSpeakerKeyCreate(deps, request, url, locale, segments[1] ?? "");
       }
       return methodNotAllowed(locale, url, "GET, POST");
+    }
+    if (
+      segments.length === 3 &&
+      segments[0] === "speakers" &&
+      segments[2] === "credentials"
+    ) {
+      if (method !== "GET") return methodNotAllowed(locale, url, "GET");
+      return await handleSpeakerCredentials(deps, request, url, locale, segments[1] ?? "");
+    }
+    if (
+      segments.length === 5 &&
+      segments[0] === "speakers" &&
+      segments[2] === "credentials" &&
+      segments[4] === "revoke"
+    ) {
+      if (method !== "POST") return methodNotAllowed(locale, url, "POST");
+      return await handleSpeakerCredentialRevoke(
+        deps,
+        request,
+        url,
+        locale,
+        segments[1] ?? "",
+        segments[3] ?? "",
+      );
     }
     if (segments.length === 1 && segments[0] === "projects") {
       if (method !== "POST") return methodNotAllowed(locale, url, "POST");

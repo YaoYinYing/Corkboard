@@ -11,7 +11,11 @@ import { hashPassword } from "../../src/auth/password.ts";
 import { SCOPES } from "../../src/domain/authz.ts";
 import { AppError } from "../../src/domain/errors.ts";
 import { authorizeProject, sessionAccountPrincipal } from "../../src/service/auth.ts";
-import { issueProjectCredential } from "../../src/service/speakers.ts";
+import {
+  issueProjectCredential,
+  listOwnedSpeakerCredentials,
+  revokeOwnedSpeakerCredential,
+} from "../../src/service/speakers.ts";
 import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "../../src/service/sessions.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
 import type { SqlDatabase, SqlTransaction, SqlValue } from "../../src/storage/db.ts";
@@ -180,6 +184,48 @@ function withCapabilityDowngradedDuringTransaction(db: SqlDatabase): SqlDatabase
       return fn(tx);
     }),
   );
+}
+
+// Simulates the speaker's ownership being transferred away after the route's
+// authorization check but before the revocation transaction re-reads it.
+function withSpeakerReassignedDuringTransaction(db: SqlDatabase): SqlDatabase {
+  return delegateDatabase(db, (fn) =>
+    db.transaction(async (tx) => {
+      await tx.run("UPDATE speakers SET owner_account_id = ? WHERE id = ?", [
+        "acct_d",
+        "spk_a",
+      ]);
+      return fn(tx);
+    }),
+  );
+}
+
+// Simulates an ownership transfer landing immediately before the first SELECT
+// that matches `matches`, so the read path's independent owner-scoped queries
+// are exercised without a snapshot.
+function withOwnershipReassignedBefore(
+  db: SqlDatabase,
+  matches: (sql: string) => boolean,
+): SqlDatabase {
+  let reassigned = false;
+  return {
+    exec: (sql: string): Promise<void> => db.exec(sql),
+    first: <T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined> =>
+      db.first<T>(sql, params),
+    all: async <T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> => {
+      if (!reassigned && matches(sql)) {
+        reassigned = true;
+        await db.run("UPDATE speakers SET owner_account_id = ? WHERE id = ?", [
+          "acct_d",
+          "spk_a",
+        ]);
+      }
+      return db.all<T>(sql, params);
+    },
+    run: (sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }> =>
+      db.run(sql, params),
+    transaction: (fn) => db.transaction(fn),
+  };
 }
 
 // Forces the second write of the issuance transaction to fail so the rollback
@@ -977,4 +1023,717 @@ test("the Node adapter buffers the speaker key POST body over HTTP", async (t) =
   });
   assert.equal(formAgain.status, 200);
   assert.equal(TOKEN_RE.test(await formAgain.text()), false);
+});
+
+test("credential inventory shows non-secret metadata and revokes idempotently", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const first = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read", "message.read"],
+  });
+  const second = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read"],
+    expiresAt: new Date("2027-01-01T00:00:00.000Z"),
+  });
+  const expired = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read"],
+    expiresAt: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  const unknown = await fx.addCredential({ speakerId: "spk_a", scopes: ["project.read"] });
+  // A corrupt stored expiry must never render as Active: authorization treats an
+  // unparseable date as inactive, and the inventory mirrors that fail-closed rule.
+  await fx.db.run("UPDATE credentials SET expires_at = ? WHERE id = ?", [
+    "not-a-date",
+    unknown.credentialId,
+  ]);
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+
+  // The directory points at the inventory.
+  const directory = await getPage(app, "/speakers", cookie);
+  assert.equal(directory.status, 200);
+  assert.ok(directory.html.includes('href="/speakers/spk_a/credentials"'));
+
+  const page = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.equal(page.status, 200);
+  assertHardened(page.response);
+  assert.ok(page.html.includes(`<code>${first.credentialId}</code>`));
+  assert.ok(page.html.includes(`<code>${second.credentialId}</code>`));
+  assert.ok(page.html.includes(`<code>${expired.credentialId}</code>`));
+  assert.ok(page.html.includes(`<code>${unknown.credentialId}</code>`));
+  assert.ok(page.html.includes("No expiry"));
+  assert.ok(page.html.includes('datetime="2026-11-03T12:00:00.000Z"'));
+  assert.ok(page.html.includes('datetime="2027-01-01T00:00:00.000Z"'));
+  assert.ok(page.html.includes("Alpha project"));
+  assert.ok(page.html.includes("Beta project"));
+  assert.ok(page.html.includes("Active"));
+  assert.ok(page.html.includes("Expired"));
+  assert.ok(page.html.includes("Unknown"));
+
+  // No token, public prefix, or verifier is selected or rendered.
+  const stored = await fx.db.first<{ public_prefix: string; secret_verifier: string }>(
+    "SELECT public_prefix, secret_verifier FROM credentials WHERE id = ?",
+    [first.credentialId],
+  );
+  assert.ok(stored);
+  for (const secret of [
+    first.token,
+    first.token.slice(12),
+    stored.public_prefix,
+    stored.secret_verifier,
+  ]) {
+    assert.equal(page.html.includes(secret), false);
+  }
+
+  const revoked = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${first.credentialId}/revoke`,
+    cookie,
+    [["csrf_token", csrf]],
+  );
+  assert.equal(revoked.status, 303);
+  assert.equal(revoked.headers.get("location"), "/speakers/spk_a/credentials");
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [first.credentialId],
+  );
+  assert.equal(row?.revoked_at, "2026-11-03T12:00:00.000Z");
+  const revokedAt = row?.revoked_at;
+
+  // Grants and the credential row survive a soft revocation.
+  const grants = await fx.db.all<{ project_id: string }>(
+    "SELECT project_id FROM credential_project_grants WHERE credential_id = ?",
+    [first.credentialId],
+  );
+  assert.deepEqual(grants.map((grant) => grant.project_id).sort(), ["proj_a", "proj_b"]);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM credentials WHERE id = ?", [first.credentialId])).length,
+    1,
+  );
+
+  const audits = await fx.db.all<{
+    operation: string;
+    outcome: string;
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+    detail: string | null;
+  }>(
+    "SELECT operation, outcome, actor_account_id, actor_speaker_id, detail FROM audit_events WHERE operation = 'credential.revoke'",
+  );
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0]?.outcome, "success");
+  assert.equal(audits[0]?.actor_account_id, "acct_a");
+  assert.equal(audits[0]?.actor_speaker_id, "spk_a");
+  assert.deepEqual(JSON.parse(audits[0]?.detail ?? "{}"), {
+    credential_id: first.credentialId,
+    source: "dashboard",
+  });
+  assert.equal(JSON.stringify(audits).includes(first.token), false);
+  assert.equal(JSON.stringify(audits).includes(stored.secret_verifier), false);
+
+  // The revoked token no longer authenticates.
+  await assert.rejects(
+    fx.authenticate(first.token),
+    (error: unknown) => error instanceof AppError && error.code === "UNAUTHENTICATED",
+  );
+
+  const after = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.ok(after.html.includes("Revoked"));
+  assert.equal(after.html.includes(`/credentials/${first.credentialId}/revoke`), false);
+  assert.ok(after.html.includes(`/credentials/${second.credentialId}/revoke`));
+
+  // A repeat submit is a no-op: same redirect, same timestamp, one audit row.
+  // Stay inside the 30-minute session idle window.
+  fx.setNow(new Date("2026-11-03T12:10:00.000Z"));
+  const again = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${first.credentialId}/revoke`,
+    cookie,
+    [["csrf_token", csrf]],
+  );
+  assert.equal(again.status, 303);
+  assert.equal(again.headers.get("location"), "/speakers/spk_a/credentials");
+  const repeated = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [first.credentialId],
+  );
+  assert.equal(repeated?.revoked_at, revokedAt);
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT id FROM audit_events WHERE operation = 'credential.revoke'",
+      )
+    ).length,
+    1,
+  );
+});
+
+test("credential inventory and revocation are speaker-owner-scoped", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const aCred = await fx.addCredential({ speakerId: "spk_a" });
+  const bCred = await fx.addCredential({ speakerId: "spk_b" });
+  const dCred = await fx.addCredential({ speakerId: "spk_d" });
+  const other = await loginAsWithCsrf(app, "d@example.test", "account d secret");
+
+  // Another account cannot list or revoke account A's speaker credentials.
+  assert.equal((await getPage(app, "/speakers/spk_a/credentials", other.cookie)).status, 404);
+  const foreignPost = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${aCred.credentialId}/revoke`,
+    other.cookie,
+    [["csrf_token", other.csrf]],
+  );
+  assert.equal(foreignPost.status, 404);
+
+  // The owner sees only the requested speaker's credentials.
+  const owner = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const page = await getPage(app, "/speakers/spk_a/credentials", owner.cookie);
+  assert.equal(page.status, 200);
+  assert.ok(page.html.includes(aCred.credentialId));
+  assert.equal(page.html.includes(bCred.credentialId), false);
+  assert.equal(page.html.includes(dCred.credentialId), false);
+  assert.equal(page.html.includes("proj_d"), false);
+
+  const otherPage = await getPage(app, "/speakers/spk_d/credentials", other.cookie);
+  assert.equal(otherPage.status, 200);
+  assert.ok(otherPage.html.includes(dCred.credentialId));
+
+  // A credential ID from another speaker, owned or foreign, is the uniform 404.
+  for (const credentialId of [bCred.credentialId, dCred.credentialId, "cred_missing"]) {
+    const response = await postFormMulti(
+      app,
+      `/speakers/spk_a/credentials/${credentialId}/revoke`,
+      owner.cookie,
+      [["csrf_token", owner.csrf]],
+    );
+    assert.equal(response.status, 404, credentialId);
+  }
+  for (const credentialId of [aCred.credentialId, bCred.credentialId, dCred.credentialId]) {
+    const row = await fx.db.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ?",
+      [credentialId],
+    );
+    assert.equal(row?.revoked_at, null, credentialId);
+  }
+});
+
+test("credential revocation requires the session double-submit CSRF check", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const sessionOnly = cookie.split("; ")[0];
+  const path = `/speakers/spk_a/credentials/${credential.credentialId}/revoke`;
+
+  const attempts: Array<{ name: string; fields: Array<[string, string]>; useCookie: string | undefined }> = [
+    { name: "missing", fields: [], useCookie: cookie },
+    { name: "wrong", fields: [["csrf_token", "A".repeat(43)]], useCookie: cookie },
+    {
+      name: "duplicate",
+      fields: [
+        ["csrf_token", csrf],
+        ["csrf_token", csrf],
+      ],
+      useCookie: cookie,
+    },
+    { name: "no cookie", fields: [["csrf_token", csrf]], useCookie: sessionOnly },
+  ];
+  for (const attempt of attempts) {
+    const response = await postFormMulti(app, path, attempt.useCookie, attempt.fields);
+    assert.equal(response.status, 400, attempt.name);
+    assert.ok((await response.text()).includes("The form expired."), attempt.name);
+  }
+
+  for (const headers of [
+    { origin: "https://evil.example" },
+    { "sec-fetch-site": "cross-site" },
+    { "sec-fetch-site": "same-site" },
+  ]) {
+    const response = await call(app, path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie,
+        ...headers,
+      },
+      body: new URLSearchParams({ csrf_token: csrf }).toString(),
+    });
+    assert.equal(response.status, 400, JSON.stringify(headers));
+    assert.ok((await response.text()).includes("The form expired."));
+  }
+
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(row?.revoked_at, null);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'credential.revoke'")).length,
+    0,
+  );
+});
+
+test("bearer principals and cookie-less requests cannot administer credentials", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const target = await fx.addCredential({ speakerId: "spk_a" });
+  const bearerCredential = await fx.addCredential({ speakerId: "spk_b" });
+  const bearer = await fx.authenticate(bearerCredential.token);
+
+  // The service boundary rejects a non-session principal even if a route were
+  // miswired to pass one.
+  await assert.rejects(
+    listOwnedSpeakerCredentials(fx.deps, bearer, "spk_a"),
+    (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+  );
+  await assert.rejects(
+    revokeOwnedSpeakerCredential(fx.deps, bearer, "spk_a", target.credentialId),
+    (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+  );
+
+  // The dashboard reads no Authorization header: a bearer-only request is an
+  // unauthenticated browser session and is redirected to login.
+  const response = await call(
+    app,
+    `/speakers/spk_a/credentials/${target.credentialId}/revoke`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${bearerCredential.token}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "csrf_token=ignored",
+    },
+  );
+  assert.equal(response.status, 303);
+  assert.ok(response.headers.get("location")?.startsWith("/login?return_to="));
+
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [target.credentialId],
+  );
+  assert.equal(row?.revoked_at, null);
+});
+
+test("ownership transferred during the revocation transaction aborts the write", async (t) => {
+  const { fx } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  const deps = {
+    ...fx.deps,
+    db: withSpeakerReassignedDuringTransaction(fx.deps.db),
+  };
+  await assert.rejects(
+    revokeOwnedSpeakerCredential(deps, sessionPrincipal("acct_a"), "spk_a", credential.credentialId),
+    (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+  );
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(row?.revoked_at, null);
+  // The injected ownership change ran inside the rolled-back transaction.
+  const speaker = await fx.db.first<{ owner_account_id: string }>(
+    "SELECT owner_account_id FROM speakers WHERE id = ?",
+    ["spk_a"],
+  );
+  assert.equal(speaker?.owner_account_id, "acct_a");
+});
+
+test("ownership transfer between inventory reads yields no foreign rows", async (t) => {
+  const { fx } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  const principal = sessionPrincipal("acct_a");
+
+  // Transfer between the speaker SELECT and the credential SELECT: the
+  // credential query is owner-scoped and returns zero rows. The speaker object
+  // was read before the transfer, so it remains; no credential metadata leaks.
+  const beforeCredential = withOwnershipReassignedBefore(
+    fx.deps.db,
+    (sql) => sql.includes("FROM credentials c"),
+  );
+  const noCredentials = await listOwnedSpeakerCredentials(
+    { ...fx.deps, db: beforeCredential },
+    principal,
+    "spk_a",
+  );
+  assert.deepEqual(noCredentials.credentials, []);
+  assert.equal(noCredentials.speaker.id, "spk_a");
+
+  // Restore ownership, then transfer between the credential SELECT and the
+  // grant SELECT: already-read credential metadata remains, but the later grant
+  // read is empty. A later read set can only become empty, never wider.
+  await fx.db.run("UPDATE speakers SET owner_account_id = ? WHERE id = ?", [
+    "acct_a",
+    "spk_a",
+  ]);
+  const beforeGrant = withOwnershipReassignedBefore(
+    fx.deps.db,
+    (sql) => sql.includes("credential_project_grants g"),
+  );
+  const noGrants = await listOwnedSpeakerCredentials(
+    { ...fx.deps, db: beforeGrant },
+    principal,
+    "spk_a",
+  );
+  assert.deepEqual(
+    noGrants.credentials.map((row) => row.id),
+    [credential.credentialId],
+  );
+  assert.deepEqual(noGrants.credentials[0]?.projects, []);
+
+  // The transfer is real: the old owner is now NOT_FOUND and the new owner sees
+  // the same credential row.
+  await assert.rejects(
+    listOwnedSpeakerCredentials(fx.deps, principal, "spk_a"),
+    (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+  );
+  const newOwner = await listOwnedSpeakerCredentials(
+    fx.deps,
+    sessionPrincipal("acct_d"),
+    "spk_a",
+  );
+  assert.deepEqual(
+    newOwner.credentials.map((row) => row.id),
+    [credential.credentialId],
+  );
+});
+
+test("revoked sessions are redirected from the credential routes", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  await fx.db.run("UPDATE sessions SET revoked_at = ? WHERE account_id = ?", [
+    "2026-11-03T12:05:00.000Z",
+    "acct_a",
+  ]);
+
+  const list = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.equal(list.status, 303);
+  assert.equal(
+    list.response.headers.get("location"),
+    `/login?return_to=${encodeURIComponent("/speakers/spk_a/credentials")}`,
+  );
+  const revoke = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${credential.credentialId}/revoke`,
+    cookie,
+    [["csrf_token", csrf]],
+  );
+  assert.equal(revoke.status, 303);
+  assert.ok(revoke.headers.get("location")?.startsWith("/login?return_to="));
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(row?.revoked_at, null);
+});
+
+test("credential inventory and revocation are localized", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  await fx.addCredential({
+    speakerId: "spk_a",
+    expiresAt: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  const unknown = await fx.addCredential({ speakerId: "spk_a" });
+  await fx.db.run("UPDATE credentials SET expires_at = ? WHERE id = ?", [
+    "not-a-date",
+    unknown.credentialId,
+  ]);
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+
+  const directory = await getPage(app, "/speakers?lang=zh", cookie);
+  assert.ok(directory.html.includes('href="/speakers/spk_a/credentials?lang=zh"'));
+
+  const page = await getPage(app, "/speakers/spk_a/credentials?lang=zh", cookie);
+  assert.equal(page.status, 200);
+  assert.match(page.html, /<html lang="zh-Hans" dir="ltr">/);
+  for (const text of [
+    "凭证",
+    "创建时间",
+    "过期时间",
+    "不过期",
+    "项目授权",
+    "撤销凭证",
+    "已过期",
+    "未知",
+  ]) {
+    assert.ok(page.html.includes(text), text);
+  }
+  assert.ok(page.html.includes('action="/speakers/spk_a/credentials/'));
+
+  const revoked = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${credential.credentialId}/revoke?lang=zh`,
+    cookie,
+    [["csrf_token", csrf]],
+  );
+  assert.equal(revoked.status, 303);
+  assert.equal(revoked.headers.get("location"), "/speakers/spk_a/credentials?lang=zh");
+
+  const after = await getPage(app, "/speakers/spk_a/credentials?lang=zh", cookie);
+  assert.ok(after.html.includes("已撤销"));
+  for (const html of [page.html, after.html]) {
+    assert.equal(html.includes("<script"), false);
+    assert.equal(html.includes("<style"), false);
+    assert.equal(/ style=/.test(html), false);
+    assert.equal(/ on[a-z]+=/.test(html), false);
+  }
+});
+
+test("the Node adapter buffers the credential revocation POST body over HTTP", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "corkboard-credentials-http-"));
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const email = "http-credentials@example.test";
+  const password = "http credentials secret";
+  const now = "2026-11-03T12:00:00.000Z";
+
+  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  await db.run(
+    `INSERT INTO accounts (id, email, password_hash, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["acct_http", email, await hashPassword(password), now],
+  );
+  await db.run(
+    `INSERT INTO speakers (id, owner_account_id, display_name, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["spk_http", "acct_http", "HTTP Speaker", now],
+  );
+  await db.run(
+    `INSERT INTO projects (id, owner_account_id, title, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["proj_http", "acct_http", "HTTP Project", now],
+  );
+  await db.run(
+    `INSERT INTO credentials
+       (id, speaker_id, public_prefix, secret_verifier, scope_json, expires_at, revoked_at, created_at)
+     VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`,
+    [
+      "cred_http",
+      "spk_http",
+      "cb_http00000",
+      "unused-test-verifier",
+      JSON.stringify(["project.read"]),
+      now,
+    ],
+  );
+  await db.run(
+    `INSERT INTO credential_project_grants (credential_id, project_id, granted_at)
+     VALUES (?, ?, ?)`,
+    ["cred_http", "proj_http", now],
+  );
+  db.close();
+
+  const running = await startServer({
+    env: {
+      CORKBOARD_DATA_DIR: dataDir,
+      CORKBOARD_ROOT_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      CORKBOARD_CREDENTIAL_PEPPER: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      PORT: "0",
+    },
+  });
+  t.after(async () => {
+    await running.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  const address = running.server.address();
+  assert.ok(address !== null && typeof address === "object");
+  const base = `http://127.0.0.1:${address.port}`;
+  const formType = "application/x-www-form-urlencoded";
+
+  const loginPage = await fetch(`${base}/login`, { headers: { connection: "close" } });
+  const loginCsrf = cookieValue(loginPage.headers.getSetCookie(), WEB_LOGIN_CSRF_COOKIE);
+  assert.ok(loginCsrf);
+  const login = await fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": formType,
+      cookie: `${WEB_LOGIN_CSRF_COOKIE}=${loginCsrf}`,
+      connection: "close",
+    },
+    body: new URLSearchParams({
+      return_to: "/",
+      login_csrf: loginCsrf,
+      email,
+      password,
+    }).toString(),
+  });
+  assert.equal(login.status, 303);
+  const session = cookieValue(login.headers.getSetCookie(), SESSION_COOKIE_NAME);
+  const csrf = cookieValue(login.headers.getSetCookie(), CSRF_COOKIE_NAME);
+  assert.ok(session);
+  assert.ok(csrf);
+  const cookie = `${SESSION_COOKIE_NAME}=${session}; ${CSRF_COOKIE_NAME}=${csrf}`;
+
+  const inventory = await fetch(`${base}/speakers/spk_http/credentials`, {
+    headers: { cookie, connection: "close" },
+  });
+  assert.equal(inventory.status, 200);
+  assert.ok((await inventory.text()).includes("cred_http"));
+
+  // Before the adapter buffered this route the form would arrive body-less and
+  // the CSRF check would return the 400 expired-form page.
+  const revoked = await fetch(`${base}/speakers/spk_http/credentials/cred_http/revoke`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": formType, cookie, connection: "close" },
+    body: new URLSearchParams({ csrf_token: csrf }).toString(),
+  });
+  assert.equal(revoked.status, 303, "the adapter must buffer the credential revoke POST body");
+  assert.equal(revoked.headers.get("location"), "/speakers/spk_http/credentials");
+
+  const after = await fetch(`${base}/speakers/spk_http/credentials`, {
+    headers: { cookie, connection: "close" },
+  });
+  assert.equal(after.status, 200);
+  const afterHtml = await after.text();
+  assert.ok(afterHtml.includes("Revoked"));
+  assert.equal(afterHtml.includes("/credentials/cred_http/revoke"), false);
+});
+
+test("credential routes enforce method, media type, size, and unknown-speaker boundaries", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const revokePath = `/speakers/spk_a/credentials/${credential.credentialId}/revoke`;
+  const oversized = "A".repeat(70_000);
+
+  // Unknown and malformed speaker IDs are the uniform 404 before any body work.
+  for (const speakerId of ["spk_missing", "%20"]) {
+    assert.equal(
+      (await getPage(app, `/speakers/${speakerId}/credentials`, cookie)).status,
+      404,
+      speakerId,
+    );
+  }
+  assert.equal(
+    (await postFormMulti(
+      app,
+      "/speakers/spk_missing/credentials/cred_x/revoke",
+      cookie,
+      [["csrf_token", csrf]],
+    )).status,
+    404,
+  );
+
+  // Only the documented methods are accepted on the new paths.
+  const getRevoke = await call(app, revokePath, { headers: { cookie } });
+  assert.equal(getRevoke.status, 405);
+  assert.equal(getRevoke.headers.get("allow"), "POST");
+  const postList = await postFormMulti(app, "/speakers/spk_a/credentials", cookie, [
+    ["csrf_token", csrf],
+  ]);
+  assert.equal(postList.status, 405);
+  assert.equal(postList.headers.get("allow"), "GET");
+  for (const method of ["PUT", "DELETE"]) {
+    const response = await call(app, revokePath, { method, headers: { cookie } });
+    assert.equal(response.status, 405, method);
+    assert.equal(response.headers.get("allow"), "POST", method);
+  }
+
+  // A wrong media type and an over-cap body are rejected before any write.
+  const json = await call(app, revokePath, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: "{}",
+  });
+  assert.equal(json.status, 400);
+  const tooLarge = await call(app, revokePath, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie },
+    body: `csrf_token=${oversized}`,
+  });
+  assert.equal(tooLarge.status, 413);
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(row?.revoked_at, null);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'credential.revoke'")).length,
+    0,
+  );
+
+  // A foreign speaker is 404 even for a malformed or oversized body: ownership
+  // is resolved before the body is parsed.
+  const other = await loginAsWithCsrf(app, "d@example.test", "account d secret");
+  for (const [headers, body] of [
+    [{ "content-type": "application/json" }, "{}"],
+    [{ "content-type": "application/x-www-form-urlencoded" }, `csrf_token=${oversized}`],
+  ] as const) {
+    const response = await call(app, revokePath, {
+      method: "POST",
+      headers: { ...headers, cookie: other.cookie },
+      body,
+    });
+    assert.equal(response.status, 404, headers["content-type"]);
+  }
+  const afterForeign = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(afterForeign?.revoked_at, null);
+});
+
+test("inactive owning accounts are denied and inactive owned speakers remain manageable", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+
+  // Service boundary: an inactive owning account is NOT_FOUND, not a write.
+  await fx.db.run("UPDATE accounts SET status = 'inactive' WHERE id = ?", ["acct_a"]);
+  const principal = sessionPrincipal("acct_a");
+  await assert.rejects(
+    listOwnedSpeakerCredentials(fx.deps, principal, "spk_a"),
+    (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+  );
+  await assert.rejects(
+    revokeOwnedSpeakerCredential(fx.deps, principal, "spk_a", credential.credentialId),
+    (error: unknown) => error instanceof AppError && error.code === "NOT_FOUND",
+  );
+  // The dashboard's existing session rule redirects an inactive account to login.
+  assert.equal((await getPage(app, "/speakers/spk_a/credentials", cookie)).status, 303);
+  const httpRevoke = await postFormMulti(app, `/speakers/spk_a/credentials/${credential.credentialId}/revoke`, cookie, [
+    ["csrf_token", csrf],
+  ]);
+  assert.equal(httpRevoke.status, 303);
+  assert.ok(httpRevoke.headers.get("location")?.startsWith("/login?return_to="));
+  const denied = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(denied?.revoked_at, null);
+
+  // An inactive owned speaker is still an ownership-manageable inventory: its
+  // credentials are already denied by authorization, but the owner can revoke them.
+  await fx.db.run("UPDATE accounts SET status = 'active' WHERE id = ?", ["acct_a"]);
+  await fx.addSpeaker("spk_off", "acct_a", "inactive");
+  const inactiveCredential = await fx.addCredential({ speakerId: "spk_off" });
+  const page = await getPage(app, "/speakers/spk_off/credentials", cookie);
+  assert.equal(page.status, 200);
+  assert.ok(page.html.includes(inactiveCredential.credentialId));
+  const revoked = await postFormMulti(
+    app,
+    `/speakers/spk_off/credentials/${inactiveCredential.credentialId}/revoke`,
+    cookie,
+    [["csrf_token", csrf]],
+  );
+  assert.equal(revoked.status, 303);
+  const inactiveRow = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [inactiveCredential.credentialId],
+  );
+  assert.ok(inactiveRow !== undefined, "the inactive speaker's credential row must exist");
+  assert.equal(typeof inactiveRow.revoked_at, "string");
 });

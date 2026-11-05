@@ -366,7 +366,9 @@ with the existing service functions.
   `/projects/:projectId/edit`, `/projects/:projectId/members` (`GET` and `POST`),
   `/projects/:projectId/members/:speakerId/remove` (`POST`),
   `/projects/:projectId/messages/:messageId/body`,
-  `/speakers`, `/speakers/:speakerId/key` (`GET` and `POST`), and
+  `/speakers`, `/speakers/:speakerId/key` (`GET` and `POST`),
+  `/speakers/:speakerId/credentials` (`GET`),
+  `/speakers/:speakerId/credentials/:credentialId/revoke` (`POST`), and
   `/static/app.css` to `handleWebRoute`. Pages are rendered on the server from
   string templates. `src/app/html.ts` owns the single `escapeHtml` boundary and
   the strict dashboard CSP. There is no client script or inline style, and the
@@ -376,9 +378,12 @@ with the existing service functions.
   under the same 64 KiB cap and streaming limit as the API. That is the form
   routes `/login`, `/projects`, `/projects/:projectId`,
   `/projects/:projectId/members`, `/projects/:projectId/members/:speakerId/remove`,
-  and `/speakers/:speakerId/key`, plus POSTs to the GET-only paths `isWebPath` also
-  names (`/projects/new`, `/projects/:projectId/edit`,
-  `/projects/:projectId/messages/:messageId/body`, `/speakers`, and
+  `/speakers/:speakerId/key`, and
+  `/speakers/:speakerId/credentials/:credentialId/revoke`, plus POSTs to the
+  GET-only paths `isWebPath` also names (`/projects/new`,
+  `/projects/:projectId/edit`,
+  `/projects/:projectId/messages/:messageId/body`, `/speakers`,
+  `/speakers/:speakerId/credentials`, and
   `/static/app.css`). Those GET-only POSTs still receive the router's `405`,
   but their body is buffered up to the cap first. The root `/` is excluded by
   the `segments.length` guard. `GET`, `HEAD`, and `DELETE` requests are never
@@ -431,8 +436,11 @@ with the existing service functions.
   checks the selected projects and scopes, re-reads each membership inside the write
   transaction, and inserts one credential plus one grant per explicitly selected
   project; the raw token is returned only in the no-store response. No dashboard
-  route writes a message or receipt, and credential/grant writes occur only through
-  that explicit issuance transaction.
+  route writes a message or receipt. Credential writes are the explicit issuance
+  transaction and the single `credentials.revoked_at` soft-revocation transition
+  (the credential row and its grants are retained). Grant writes occur through
+  explicit issuance, and dashboard membership removal also deletes that speaker's
+  `credential_project_grants` rows for the project.
   `POST /login` inserts the session row and authenticated page requests refresh
   `sessions.last_seen_at`.
 - **Uniform denial.** The resolver and the session authorization branch return

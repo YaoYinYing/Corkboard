@@ -218,8 +218,10 @@ title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
   prefix + keyed verifier). It is returned only in the `200` POST body, which is
   `no-store` with the strict CSP; it is never in a redirect, URL, cookie, hidden field,
   database row, or log. Reopening the directory or form never shows it. A re-submitted
-  POST is a fresh credential, not recovery of the old one. Consequently there is no
-  rotation/revocation UI; leaked credentials are revoked through the CLI. The route
+  POST is a fresh credential, not recovery of the old one. Dashboard credential
+  inventory and soft revocation are available for owned speakers; only rotation,
+  per-credential grant editing, and expiry selection remain CLI-only. Leaked
+  credentials are revoked through the dashboard or CLI. The route
   remains a cookie-authenticated POST and therefore needs the same CSRF defense; the
   request logger records only the fixed path, never the token.
 - **Membership editor.** `GET/POST /projects/:projectId/members` and

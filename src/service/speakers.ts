@@ -10,6 +10,7 @@ import { parseScopeJson, type Principal, type ServiceDeps } from "./auth.ts";
 
 const MAX_SPEAKER_ID_CHARS = 128;
 const MAX_PROJECT_ID_CHARS = 128;
+const MAX_CREDENTIAL_ID_CHARS = 128;
 const MAX_SELECTED_PROJECTS = 100;
 // `boundAuditDetail` caps arrays at 32 elements. Keep the audit honest by
 // sending at most that many IDs plus the full count rather than relying on the
@@ -47,6 +48,29 @@ export interface IssuedCredential {
   token: string;
   projects: string[];
   scopes: Scope[];
+}
+
+export interface CredentialGrant {
+  id: string;
+  title: string;
+}
+
+export type CredentialState = "active" | "expired" | "revoked" | "unknown";
+
+/** Non-secret credential metadata only: never the token, prefix, or verifier. */
+export interface OwnedCredential {
+  id: string;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  /** Derived for display; revocation wins over expiry. */
+  state: CredentialState;
+  projects: CredentialGrant[];
+}
+
+export interface OwnedSpeakerCredentials {
+  speaker: { id: string; display_name: string | null; status: string };
+  credentials: OwnedCredential[];
 }
 
 // Only a human session may read the directory or mint a credential. A bearer
@@ -283,4 +307,164 @@ export async function issueProjectCredential(
   });
 
   return { credentialId, token, projects: selected, scopes };
+}
+
+function requireOwnedSpeakerId(speakerId: string): void {
+  if (speakerId === "" || speakerId.length > MAX_SPEAKER_ID_CHARS) {
+    throw new AppError("NOT_FOUND");
+  }
+}
+
+function requireCredentialId(credentialId: string): void {
+  if (credentialId === "" || credentialId.length > MAX_CREDENTIAL_ID_CHARS) {
+    throw new AppError("NOT_FOUND");
+  }
+}
+
+// Account ownership is the authority for credential administration. The owning
+// account must be active; the speaker status is deliberately not required so an
+// operator can still revoke a credential of an inactive speaker. A foreign or
+// unknown speaker is the same NOT_FOUND, which keeps the page non-enumerable.
+//
+// The inventory selects only non-secret columns. The raw token was displayed
+// once at issuance and cannot be recovered here; the public prefix is not shown
+// either, so the page cannot be used to correlate or probe a credential. The
+// speaker, credential, and grant reads are three independent SELECTs; each
+// repeats the owner/active-account predicate. This is a read path, so it does
+// not use the write transaction (`SqlDatabase.transaction` is BEGIN IMMEDIATE
+// and buffers writes for D1's batch emulation). There is no snapshot claim: an
+// ownership transfer between reads can only make a later read return empty,
+// never add a foreign speaker's rows.
+function credentialState(
+  revokedAt: string | null,
+  expiresAt: string | null,
+  nowMs: number,
+): CredentialState {
+  if (revokedAt !== null) return "revoked";
+  if (expiresAt === null) return "active";
+  const expiresMs = Date.parse(expiresAt);
+  // Authorization treats an unparseable expiry as unusable; never show it as
+  // active here. The stored values are normally ISO-8601.
+  if (Number.isNaN(expiresMs)) return "unknown";
+  return expiresMs <= nowMs ? "expired" : "active";
+}
+
+export async function listOwnedSpeakerCredentials(
+  deps: ServiceDeps,
+  principal: Principal,
+  speakerId: string,
+): Promise<OwnedSpeakerCredentials> {
+  const accountId = requireSessionAccount(principal);
+  requireOwnedSpeakerId(speakerId);
+  const nowMs = deps.now().getTime();
+  const speaker = await deps.db.first<SpeakerRow>(
+    `SELECT s.id, s.display_name, s.status
+       FROM speakers s
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE s.id = ? AND s.owner_account_id = ? AND a.status = 'active'`,
+    [speakerId, accountId],
+  );
+  if (speaker === undefined) throw new AppError("NOT_FOUND");
+  const rows = await deps.db.all<{
+    id: string;
+    created_at: string;
+    expires_at: string | null;
+    revoked_at: string | null;
+  }>(
+    `SELECT c.id, c.created_at, c.expires_at, c.revoked_at
+       FROM credentials c
+       JOIN speakers s ON s.id = c.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+      WHERE c.speaker_id = ? AND s.owner_account_id = ? AND a.status = 'active'
+      ORDER BY c.created_at ASC, c.id ASC`,
+    [speakerId, accountId],
+  );
+  const grantRows = await deps.db.all<{
+    credential_id: string;
+    project_id: string;
+    title: string;
+  }>(
+    `SELECT g.credential_id, p.id AS project_id, p.title
+       FROM credential_project_grants g
+       JOIN credentials c ON c.id = g.credential_id
+       JOIN speakers s ON s.id = c.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+       JOIN projects p ON p.id = g.project_id
+      WHERE c.speaker_id = ? AND s.owner_account_id = ? AND a.status = 'active'
+      ORDER BY p.created_at ASC, p.id ASC`,
+    [speakerId, accountId],
+  );
+  const grants = new Map<string, CredentialGrant[]>();
+  for (const row of grantRows) {
+    const list = grants.get(row.credential_id);
+    const grant = { id: row.project_id, title: row.title };
+    if (list === undefined) grants.set(row.credential_id, [grant]);
+    else list.push(grant);
+  }
+  return {
+    speaker,
+    credentials: rows.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+      state: credentialState(row.revoked_at, row.expires_at, nowMs),
+      projects: grants.get(row.id) ?? [],
+    })),
+  };
+}
+
+
+// Soft revocation with the CLI `revoke-key` semantics: one `revoked_at`
+// assignment, no grant deletion, and repeat calls are a no-op. The ownership
+// re-check runs inside the transaction so an ownership transfer cannot land
+// between the route's check and the write. The credential must belong to the
+// named speaker, so a credential ID from another speaker (owned or foreign) is
+// the same NOT_FOUND and no other credential can be revoked through this route.
+// Returns true only when this call performed the transition; a repeated call
+// writes no duplicate audit row.
+export async function revokeOwnedSpeakerCredential(
+  deps: ServiceDeps,
+  principal: Principal,
+  speakerId: string,
+  credentialId: string,
+): Promise<boolean> {
+  const accountId = requireSessionAccount(principal);
+  requireOwnedSpeakerId(speakerId);
+  requireCredentialId(credentialId);
+  const now = deps.now().toISOString();
+  let changed = false;
+  await deps.db.transaction(async (tx) => {
+    const speaker = await tx.first<{ id: string }>(
+      `SELECT s.id
+         FROM speakers s
+         JOIN accounts a ON a.id = s.owner_account_id
+        WHERE s.id = ? AND s.owner_account_id = ? AND a.status = 'active'`,
+      [speakerId, accountId],
+    );
+    if (speaker === undefined) throw new AppError("NOT_FOUND");
+    const credential = await tx.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ? AND speaker_id = ?",
+      [credentialId, speakerId],
+    );
+    if (credential === undefined) throw new AppError("NOT_FOUND");
+    if (credential.revoked_at !== null) return;
+    const result = await tx.run(
+      `UPDATE credentials SET revoked_at = ?
+        WHERE id = ? AND speaker_id = ? AND revoked_at IS NULL`,
+      [now, credentialId, speakerId],
+    );
+    changed = result.changes > 0;
+  });
+  if (changed) {
+    await writeAudit(deps, {
+      operation: "credential.revoke",
+      outcome: "success",
+      actorAccountId: accountId,
+      actorSpeakerId: speakerId,
+      projectId: null,
+      detail: { credential_id: credentialId, source: "dashboard" },
+    });
+  }
+  return changed;
 }

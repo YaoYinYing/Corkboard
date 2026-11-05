@@ -207,6 +207,8 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | `/speakers` | `GET` | Speakers owned by the session account only, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active owned speaker. |
 | `/speakers/:speakerId/key` | `POST` | Form-encoded issuance for explicitly selected projects and scopes; requires the session CSRF check. The raw token is displayed once in a `no-store` `200` response and is never placed in a URL, state, or log. |
+| `/speakers/:speakerId/credentials` | `GET` | Non-secret credential inventory for a speaker owned by the session account: credential ID, created time, expiry (or no expiry), derived active/expired/revoked/unknown state, and project grants. The token, public prefix, verifier, and scope column are never selected or rendered. Foreign and unknown speakers are the uniform `404`. |
+| `/speakers/:speakerId/credentials/:credentialId/revoke` | `POST` | Form-encoded soft revocation with the CLI `revoke-key` semantics: one `revoked_at` assignment, grants and the credential row retained, idempotent. Requires account ownership, the credential must belong to the path speaker, and the session CSRF check is required. Uniform `404` for a foreign/unknown speaker or a credential of another speaker; `303` to the inventory. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet. |
 
 Authorization derives a viewer from active, non-removed memberships of speakers
@@ -245,8 +247,10 @@ over-limit selections return the HTML `400` form error and write nothing. A succ
 issue writes one credential and only the selected project grants in one transaction,
 re-reading each membership under active checks before the writes, and audits up to 32
 project IDs plus the true `project_count` and scopes, without the token. The raw token appears exactly once in the `200` `no-store` POST response; it is
-not in a redirect, URL, cookie, database column, or log. There is no rotation,
-revocation, grant-editing, or expiry UI; those remain CLI-only. The membership
+not in a redirect, URL, cookie, database column, or log. Dashboard credential
+inventory and soft revocation are available for owned speakers (the two routes
+above). Rotation, per-credential grant editing, and expiry selection remain
+CLI-only. The membership
 editor is `GET`/`POST /projects/:projectId/members` plus
 `POST /projects/:projectId/members/:speakerId/remove`. It is **project-owner-only**:
 the signed-in account must equal `projects.owner_account_id`, and the project and
@@ -266,7 +270,7 @@ speaker or one lacking `project.edit` neither counts nor is protected). Both wri
 are one transaction with an in-transaction ownership re-check. Cross-account
 addition/provisioning of other accounts' speakers remains CLI-only; removal may
 target any active (non-removed) membership; an already removed row returns
-`NOT_FOUND`. No message send, expiry, credential rotation/revocation, or
+`NOT_FOUND`. No message send, expiry, credential rotation, grant editing, or
 admin action exists.
 
 ## Endpoints
@@ -780,8 +784,9 @@ read/sign-out is implemented as described above; the dashboard (login, project l
 project create/edit, timeline with metadata filters, summary-only search, and
 bounded cursor replay, body reveal, English/Simplified Chinese) is implemented per
 [`web-ui.md`](./web-ui.md); the speaker directory, credential issuance, and the
-per-project HTML membership editor are implemented; credential
-rotation/revocation and grant editing, project deletion/status changes, and
+per-project HTML membership editor are implemented; the dashboard credential
+inventory and soft revocation are implemented; credential rotation and
+per-credential grant editing, project deletion/status changes, and
 message/expiry writes remain deferred or CLI-only. The
 bearer-authenticated `/mcp` surface is implemented
 (see above and `mcp.md`);

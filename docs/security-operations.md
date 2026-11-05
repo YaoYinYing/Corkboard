@@ -108,10 +108,22 @@ operator-facing rules are:
   **every** selected project, the same subset rule as `issue-key`. The credential and
   one grant per selected project are inserted in a single transaction; selecting a
   project is the only way to grant it, and membership alone grants nothing.
-- `expires_at` is `NULL` in this UI (no expiry selection). Revocation, rotation, and
-  later grant changes remain CLI-only (`revoke-key`, `grant-key-project`,
-  `revoke-key-project`). To replace a dashboard-issued credential, revoke it and issue
-  a new one.
+- `expires_at` is `NULL` in this UI (no expiry selection). The account owner can
+  revoke an owned speaker's credential from `GET
+  /speakers/:speakerId/credentials` (or with the CLI `revoke-key`); revocation sets
+  `credentials.revoked_at` once, keeps the credential row and its grants, and is
+  idempotent. **Rotation is not implemented:** to replace a dashboard-issued
+  credential, revoke it and issue a new one through the normal issuance form (or
+  `issue-key`), selecting the projects and scopes again. Grant changes and expiry
+  selection remain CLI-only (`grant-key-project`, `revoke-key-project`).
+- The credential inventory is account-owner-only and shows only non-secret metadata:
+  credential ID, created time, expiry, revoked state, and project grants. It never
+  selects or renders the token, public prefix, verifier, or scope column. The revoke
+  route is speaker-scoped, so a credential ID belonging to another speaker is a
+  uniform `404`, and the write re-reads the speaker's ownership and the active
+  account inside its transaction. A successful transition writes a sanitized
+  `credential.revoke` audit event with the actor account, speaker, and non-secret
+  credential ID; repeat calls write no duplicate audit row.
 - The raw token is returned only in the `POST` response (HTTP `200`), which is
   `Cache-Control: no-store`. It is never put in a redirect, URL, cookie, hidden form
   field, session state, database column, or application log. The response is the only
@@ -316,13 +328,17 @@ or as authority to act as a speaker.
   explicitly selected project after the session-account owner check and the same
   in-transaction membership/scope re-check; `POST /projects/:projectId/members`
   inserts or reactivates one membership after a project-ownership check and the same
-  in-transaction ownership re-check, and `POST
+  in-transaction ownership re-check; `POST
   /projects/:projectId/members/:speakerId/remove`
   soft-deletes the membership and deletes that speaker's grants for the project in
-  one transaction. The HTML form routes require the
+  one transaction; and `POST
+  /speakers/:speakerId/credentials/:credentialId/revoke` soft-revokes one credential
+  (sets `revoked_at`; the row and its grants are retained)
+  after the session-account owner check and the same in-transaction ownership
+  re-check, retaining its grants. The HTML form routes require the
   session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
   `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message send/expiry,
-  receipts, credential rotation/revocation and grant editing, registration,
+  receipts, credential rotation, grant editing, registration,
   recovery, and administrative capability remain absent.
 
 ## OAuth 2.1 authorization server
@@ -882,8 +898,9 @@ operator snapshot or to any unauthenticated aggregate.
   provides the dashboard (project list, timeline, explicit body reveal), slice T
   adds project create/edit, slice X adds the account-scoped speaker directory
   and one-time project-scoped credential issuance on the same session auth, and the
-  membership-editor slice adds the per-project member list, add, and remove routes.
-  Message send, expiry, credential rotation/revocation, and grant editing remain
+  membership-editor slice adds the per-project member list, add, and remove routes,
+  and the credential-inventory slice adds per-speaker listing and soft revocation.
+  Message send, expiry, credential rotation, and per-credential grant editing remain
   CLI/API-only. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not
   perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.
