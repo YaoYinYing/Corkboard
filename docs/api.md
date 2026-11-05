@@ -192,14 +192,15 @@ Server-rendered HTML beside the JSON API. It is not part of `/api/v1`, is
 | --- | --- | --- |
 | `/login` | `GET`, `POST` | Form sign-in. `POST` requires `application/x-www-form-urlencoded` and a matching `login_csrf` hidden field plus `corkboard_web_login` cookie. `return_to` must be a same-origin path. |
 | `/` | `GET` | Projects readable by the account. |
-| `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`, `type`, `sender`, `unread`, and `q` use the same identifiers, bounds, and semantics as the REST message list below. |
+| `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`, `type`, `sender`, `unread`, and `q` use the same identifiers, bounds, and filter semantics as the REST message list below. A blank or whitespace-only value is treated as absent (blank text and number inputs reach the parser as empty values); only non-blank values are validated and can return the HTML `400` page. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet. |
 
 Authorization derives a viewer from active, non-removed memberships of speakers
 owned by the session account, intersects them with `project.read` or `message.read`,
 and then calls the same service functions as the REST API. Filters and cursors are
-parsed only after that authorization and are passed unchanged to `listMessages`;
+parsed only after that authorization; blank or whitespace-only values are dropped
+as absent before the remaining values are passed to `listMessages`;
 the page adds no SQL and never searches message bodies. A project the account
 cannot read is a uniform `404` even when filters are malformed. Every page is
 `no-store` with a strict CSP and no inline script or style. `?lang=zh` selects
@@ -533,6 +534,12 @@ Requires `message.read`, membership, and a grant for the calling credential. Que
 | `sender` | exact speaker ID; must be a project member |
 | `unread` | `true` or `false`; relative to the **calling** speaker only |
 | `q` | case-insensitive substring over `summary` only, ≤100 chars; wildcards escaped; bodies are never searched |
+
+Blank values are not special in the REST list: an empty `q` is ignored, but an
+empty `type`, `sender`, `unread`, `limit`, `after_seq`, or `before_seq` value is
+invalid (`VALIDATION_ERROR`). Only the HTML dashboard treats blank values as
+absent, because its blank text and number inputs reach the parser as empty
+values.
 
 Ascending `seq`. At most one of `after_seq`/`before_seq` may be present. Returns
 metadata only; bodies are never included, and listing never marks anything read.

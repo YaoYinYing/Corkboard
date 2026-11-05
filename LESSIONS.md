@@ -6,6 +6,29 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — A blank query value from a GET form is not invalid input
+
+- **Failure:** The dashboard's filter form submits its blank text and number inputs
+  when the user leaves them empty. The page forwarded every non-null query value to
+  `listMessages`, whose validators correctly reject an empty speaker id, an empty
+  type, and an empty/non-integer limit, so submitting with Sender blank returned the
+  generic `400` page. `q=` was already tolerated because the service ignores an empty
+  search.
+- **Reproducer:** Seed a project, sign in, and open `/projects/:id?sender=` (also
+  `type=`, `limit=`, `unread=`, `after_seq=`, `before_seq=`): `400` before the fix,
+  unfiltered `200` after. `q=` was already `200` before the fix. Malformed non-blank
+  values must still be `400`.
+- **Fix:** Parse timeline values through one helper that maps `null` and
+  whitespace-only values to absent before the strict validators run. Identifier and
+  cursor values are not trimmed, so surrounding whitespace still fails validation;
+  `q` is literal search text, so its whitespace is preserved. Do not change the REST
+  list, where an explicitly empty parameter keeps its existing validation.
+- **Prevents:** Visible blank form inputs turning "no filter" into invalid input while
+  preserving rejection of real malformed values.
+- **Remove when:** the filter controls stop submitting blank values, for example by
+  omitting unset fields with a client script or a form contract that distinguishes
+  absent from empty.
+
 ## 2026-11-04 — Retention must preserve the marker that proves a row is OAuth-issued
 
 - **Failure pattern:** The only structural difference between an OAuth access credential

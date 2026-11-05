@@ -632,6 +632,78 @@ test("summary search ignores body text, escapes reflected input, and rejects mal
   }
 });
 
+// The filter form submits every control, so leaving Sender (or Type, search,
+// limit, unread) empty produces a blank query value. Blank means "not set".
+test("blank timeline filter values are absent, not invalid", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  const first = await sendTyped(
+    fx,
+    credential.token,
+    "proj_a",
+    "blank1",
+    "Blank first",
+    "body one",
+    "note",
+  );
+  const second = await sendTyped(
+    fx,
+    credential.token,
+    "proj_a",
+    "blank2",
+    "Blank second",
+    "body two",
+    "request",
+  );
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+
+  const expected = [first.seq, second.seq];
+  for (const query of [
+    "sender=",
+    "type=",
+    "q=",
+    "limit=",
+    "unread=",
+    "after_seq=",
+    "before_seq=",
+    "type=&sender=&q=&limit=&unread=",
+  ]) {
+    const page = await getPage(app, `/projects/proj_a?${query}`, cookie);
+    assert.equal(page.status, 200, query);
+    assert.deepEqual(messageSeqs(page.html), expected, query);
+    assert.ok(page.html.includes("No filters applied."), query);
+    assert.equal(page.html.includes("Clear filters"), false, query);
+  }
+
+  // Whitespace-only is absent too. Non-blank values are never stripped, so
+  // whitespace around an invalid identifier remains invalid below.
+  for (const query of ["sender=%20%20", "type=%20", "q=%20%20", "limit=%20"]) {
+    const page = await getPage(app, `/projects/proj_a?${query}`, cookie);
+    assert.equal(page.status, 200, query);
+    assert.deepEqual(messageSeqs(page.html), expected, query);
+    assert.ok(page.html.includes("No filters applied."), query);
+  }
+
+  const blankSender = await getPage(app, "/projects/proj_a?sender=", cookie);
+  assert.ok(
+    blankSender.html.includes('id="filter-sender" name="sender" type="text" maxlength="128" value=""'),
+  );
+
+  // Blank handling must not loosen validation for supplied values.
+  for (const query of [
+    "sender=%20spk_a%20",
+    "type=NOTVALID",
+    "limit=0",
+    "limit=abc",
+    "unread=yes",
+    "after_seq=abc",
+    `q=${"a".repeat(101)}`,
+  ]) {
+    const bad = await getPage(app, `/projects/proj_a?${query}`, cookie);
+    assert.equal(bad.status, 400, query);
+  }
+});
+
 test("cursor paging is bounded forward and backward with no duplicate or skipped rows", async (t) => {
   const { fx, app } = await withApp(t);
   const credential = await basicProject(fx);

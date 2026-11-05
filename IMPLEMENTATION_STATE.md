@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–O implemented and pushed; slice Q UI design tokens on `main` (`58e548f`); slice R observability P2-fixed squash candidate on `slice-obs-final`, not pushed |
-| Last pushed checkpoint | `f06c4ac` (slice O sanitized auth/OAuth audit events, tree `496e9ae`) on `origin/main`; CI success verified after push. UI checkpoint `58e548f` (tree `09e3153`) is now `origin/main`; slice R was replayed onto it. |
-| Branch | Replay base `58e548f` (`origin/main`); `slice-obs-final` at the slice-R P2-fixed squash candidate, not pushed; slice-O P2 fixes on `slice-o-p2-fixes`, not pushed |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix on `slice-filter-final`, not pushed |
+| Last pushed checkpoint | `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`) on `origin/main`; earlier pushed checkpoints include `58e548f` (UI design tokens, tree `09e3153`) and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `main` at `48c52bc` (`origin/main`); slice-S filter fix on `slice-filter-final`, not pushed; slice-O P2 fixes on `slice-o-p2-fixes`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), integration of the slice-R squash candidate, real-browser verification of the UI token slice |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
 ## Checkpoint history
 
@@ -41,7 +41,8 @@ as the work it describes.
 | `8410b37` | `116cbb6` | Slice N audit fixes: immutable/read-only snapshot without source sidecars, restore manifest reuse, byte caps, CLI JSON/redaction | superseded by final N commit |
 | `c2aec6a` | `e45dcdf` | Slice N final: pre-snapshot DB cap, bounded listings, redaction/sanitization, mid-stream digest cap, docs | security PASS; contract PASS (delta on `e45dcdf`) |
 | `f06c4ac` | `496e9ae` | Vertical slice O: sanitized authentication/OAuth lifecycle audit events | security PASS; contract PASS (two independent audits) |
-| `4a8bde8` | `dd59cff` | Vertical slice R: queue-to-commit histogram and authorized per-project counts (audited candidate, replayed onto `58e548f`) | audits PASS; P2 fixes and squash follow |
+| `4a8bde8` | `dd59cff` | Vertical slice R: queue-to-commit histogram and authorized per-project counts (audited candidate, replayed onto `58e548f`) | audits PASS; P2 fixes squashed as `48c52bc` (tree `dba3fab`) on `origin/main` |
+| `b4666e2` | `a56d6d4` | Slice S: dashboard filter blank-value fix; blank/whitespace-only values are absent for `type`, `sender`, `limit`, `unread`, and both cursors instead of `400`; `q=` was already tolerated; non-blank validation is unchanged | evidence: GitHub Issue #6, real browser at `58e548f`; regression test `blank timeline filter values are absent, not invalid`; squashed into this checkpoint; `npm ci` exit 0; `npm run check` exit 0 (392 tests: 391 pass, 1 skipped live-D1); `npm run build` exit 0 |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
@@ -1032,8 +1033,8 @@ pushed.
 ## Design-system checkpoint (slice P) — web design-system contract (branch `slice-p-final`)
 
 - **Checkpoint.** Branch `slice-p-final` is one squashed checkpoint commit based on
-  `55bd96e28f013dc79f934eae760eb7ff5415b167`. Not pushed; `main` is unchanged and the
-  shipped runtime is untouched.
+  `55bd96e28f013dc79f934eae760eb7ff5415b167`. It was pushed as `9a3d389` (tree
+  `0ff2142`) and is part of `origin/main`; the shipped runtime is untouched.
 - **Files added.** `designs/corkboard-design-system/` with `project/design-system.json`,
   `project/tokens.json` (light/dark color, type, 4px spacing, radius, shadow),
   `project/README.md` brand book, and static previews plus READMEs for `Cover`, `Login`,
@@ -1089,8 +1090,13 @@ pushed.
   no literal hex appears outside a token definition. Verification: `npm ci` exit 0;
   `npm run check` exit 0 (381 tests: 380 pass, 1 skipped live-D1); `npm run build`
   exit 0.
-- **Unverified.** No real-browser render check: light/dark appearance, 320px layout,
-  focus visibility, and both locales are asserted from the stylesheet and DOM only.
+- **Browser evidence.** Real-browser visual evidence for checkpoint
+  `58e548f` is published in GitHub Issue #6 with its prerelease asset channel.
+  That evidence surfaced the blank `sender=` timeline filter defect, fixed by
+  the slice-S replay candidate `b4666e2` (squashed into the slice-S checkpoint).
+  Beyond it, light/dark appearance, 320px layout, focus visibility,
+  and both locales are asserted from the stylesheet and DOM only; no automated
+  browser matrix is claimed.
 
 ## Vertical slice R — queue-to-commit histogram and authorized per-project counts (candidate `4a8bde8`, tree `dd59cff`)
 

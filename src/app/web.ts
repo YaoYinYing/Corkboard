@@ -420,14 +420,23 @@ export function normalizeReturnTo(raw: string | null | undefined): string {
   return target.pathname + target.search;
 }
 
+// The filter form submits every control, including empty ones. A blank or
+// whitespace-only value means the control was left unset, so it is absent, not
+// invalid input. Only non-blank values reach the strict validators below.
+function queryText(url: URL, name: string): string | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw.trim() === "") return undefined;
+  return raw;
+}
+
 function queryInt(
   url: URL,
   name: string,
   min: number,
   max: number,
 ): number | undefined {
-  const raw = url.searchParams.get(name);
-  if (raw === null) return undefined;
+  const raw = queryText(url, name);
+  if (raw === undefined) return undefined;
   if (!/^\d+$/.test(raw)) throw new AppError("VALIDATION_ERROR");
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -438,8 +447,8 @@ function queryInt(
 
 // Same spelling as the REST list: only literal true/false are accepted.
 function queryBoolean(url: URL, name: string): boolean | undefined {
-  const raw = url.searchParams.get(name);
-  if (raw === null) return undefined;
+  const raw = queryText(url, name);
+  if (raw === undefined) return undefined;
   if (raw === "true") return true;
   if (raw === "false") return false;
   throw new AppError("VALIDATION_ERROR");
@@ -447,12 +456,12 @@ function queryBoolean(url: URL, name: string): boolean | undefined {
 
 function timelineFiltersFrom(url: URL): TimelineFilters {
   const filters: TimelineFilters = {};
-  const type = url.searchParams.get("type");
-  if (type !== null) filters.type = type;
-  const sender = url.searchParams.get("sender");
-  if (sender !== null) filters.sender = sender;
-  const q = url.searchParams.get("q");
-  if (q !== null) filters.q = q;
+  const type = queryText(url, "type");
+  if (type !== undefined) filters.type = type;
+  const sender = queryText(url, "sender");
+  if (sender !== undefined) filters.sender = sender;
+  const q = queryText(url, "q");
+  if (q !== undefined) filters.q = q;
   const unread = queryBoolean(url, "unread");
   if (unread !== undefined) filters.unread = unread;
   return filters;
@@ -765,10 +774,10 @@ function renderTimeline(
   hasMore: boolean,
   filters: TimelineFilters,
 ): string {
-  const afterRaw = url.searchParams.get("after_seq");
-  const beforeRaw = url.searchParams.get("before_seq");
-  const afterSeq = afterRaw === null ? undefined : Number(afterRaw);
-  const beforeSeq = beforeRaw === null ? undefined : Number(beforeRaw);
+  const afterRaw = queryText(url, "after_seq");
+  const beforeRaw = queryText(url, "before_seq");
+  const afterSeq = afterRaw === undefined ? undefined : Number(afterRaw);
+  const beforeSeq = beforeRaw === undefined ? undefined : Number(beforeRaw);
   const pagerLabel = escapeHtml(t(locale, "paginationLabel"));
   const jump = `<a href="${escapeHtml(hrefWithParams(url, { before_seq: String(LATEST_SEQ), after_seq: null }))}">${escapeHtml(t(locale, "jumpToLatest"))}</a>`;
 

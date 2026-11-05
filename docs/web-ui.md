@@ -24,8 +24,8 @@ remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 
 `?lang=zh` selects Simplified Chinese. Unknown values fall back to English.
 `lang` is preserved by the filter form and every pager link. The timeline query
-parameters are the same identifiers and bounds as the REST message list; they are
-parsed by the page and passed unchanged to `listMessages`.
+parameters are the same identifiers and bounds as the REST message list; the page
+parses them and passes only present, non-blank values to `listMessages`.
 
 | Param | Meaning |
 | --- | --- |
@@ -36,12 +36,21 @@ parsed by the page and passed unchanged to `listMessages`.
 | `limit` | 1–100, default 50, matching the API. |
 | `after_seq` / `before_seq` | Non-negative integer cursors; at most one may be present. They are mutually exclusive. |
 
-Malformed or out-of-range values (for example `limit=0`, `after_seq=abc`, both
-cursors, `unread=yes`, an invalid `type`, a summary query longer than 100
-characters, or a sender that is not a project member) return the safe `400`
-page. A project the account may not read returns the uniform `404` **before**
-filter parsing, so filters cannot probe project existence. An empty `q` is
-ignored, as in the API.
+Malformed or out-of-range non-blank values (for example `limit=0`,
+`after_seq=abc`, both cursors, `unread=yes`, an invalid `type`, a summary query
+longer than 100 characters, or a sender that is not a project member) return the
+safe `400` page. A project the account may not read returns the uniform `404`
+**before** filter parsing, so filters cannot probe project existence.
+
+A blank or whitespace-only value for any documented filter or cursor parameter
+(`type`, `sender`, `q`, `unread`, `limit`, `after_seq`, `before_seq`) is treated
+as **absent**, never as invalid input. The browser submits the blank text and
+number inputs, so an empty value reaches the parser and means "not set"; an
+unchecked `unread` checkbox is simply omitted. Identifier and cursor values are
+not trimmed: a non-blank value with surrounding whitespace still fails
+validation. Search text (`q`) is preserved literally, so surrounding spaces are
+part of the search. The REST message list does not share this blank-is-absent
+rule (see `api.md`).
 
 The `unread` filter uses the same receipt-based meaning as
 `GET /api/v1/projects/:projectId/messages`: `true` selects messages without a
