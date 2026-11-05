@@ -6,6 +6,7 @@ import { randomBase64url } from "../auth/credentials.ts";
 import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 import { AppError, RateLimitError } from "../domain/errors.ts";
 import { normalizeEmail, validateLoginPassword } from "../domain/validation.ts";
+import { writeAudit } from "../service/audit.ts";
 import type { ServiceDeps } from "../service/auth.ts";
 import {
   appendOAuthQuery,
@@ -36,6 +37,7 @@ import {
   CSRF_HEADER_NAME,
   authenticateSession,
   loginAccount,
+  recordLoginRateLimited,
   sessionTokenFromCookie,
   touchSession,
   validateSession,
@@ -382,7 +384,14 @@ async function handleRegister(
 ): Promise<Response> {
   if (request.method.toUpperCase() !== "POST") return methodNotAllowed("POST");
   const decision = options.registerLimiter.check("oauth:register");
-  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
+  if (!decision.allowed) {
+    await writeAudit(deps, {
+      operation: "oauth.client.register",
+      outcome: "failure",
+      detail: { reason: "rate_limited" },
+    });
+    throw new RateLimitError(decision.retryAfterSeconds);
+  }
   try {
     const body = await readJsonObject(request);
     const input = validateClientRegistration(body);
@@ -397,6 +406,13 @@ async function handleRegister(
     });
   } catch (error) {
     if (error instanceof AppError && error.code === "VALIDATION_ERROR") {
+      // No client id exists for a rejected registration, and the reason is a
+      // bounded constant rather than attacker-supplied text.
+      await writeAudit(deps, {
+        operation: "oauth.client.register",
+        outcome: "failure",
+        detail: { reason: "invalid_client_metadata" },
+      });
       return oauthErrorResponse(400, "invalid_client_metadata");
     }
     throw error;
@@ -546,7 +562,10 @@ async function handleSignIn(
     return signInPage(401, normalizedReturnTo, "Invalid email or password.").response;
   }
   const decision = loginLimiter.check(await sha256Hex(ENCODER.encode(email)));
-  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
+  if (!decision.allowed) {
+    await recordLoginRateLimited(deps);
+    throw new RateLimitError(decision.retryAfterSeconds);
+  }
 
   let login;
   try {
@@ -632,6 +651,12 @@ async function handleConsent(
   // Denial needs only an exact client/redirect and a valid request; no speaker,
   // project, or scope selection is required to decline.
   if (decision === "deny") {
+    await writeAudit(deps, {
+      operation: "oauth.consent",
+      outcome: "denied",
+      actorAccountId: session.accountId,
+      detail: { client_id: clientId, decision: "deny" },
+    });
     return json(200, {
       redirect_to: appendOAuthQuery(redirectUri, {
         error: "access_denied",
@@ -701,6 +726,19 @@ async function handleConsent(
     speakerId,
     projectId,
   });
+  await writeAudit(deps, {
+    operation: "oauth.consent",
+    outcome: "success",
+    actorAccountId: session.accountId,
+    projectId,
+    detail: {
+      client_id: clientId,
+      project_id: projectId,
+      speaker_id: speakerId,
+      scopes: [...selected].sort(),
+      decision: "allow",
+    },
+  });
   return json(200, { redirect_to: issued.redirectTo });
 }
 
@@ -723,12 +761,42 @@ async function handleToken(
   const perClient = options.tokenLimiter.check(clientId);
   const global = options.tokenGlobalLimiter.check("oauth:token");
   if (!perClient.allowed || !global.allowed) {
+    await writeAudit(deps, {
+      operation: "oauth.token.issue",
+      outcome: "failure",
+      detail: { client_id: clientId, reason: "rate_limited" },
+    });
     throw new RateLimitError(
       Math.max(perClient.retryAfterSeconds, global.retryAfterSeconds),
     );
   }
   if (grantType === null) throw new OAuthTokenError("invalid_request");
 
+  try {
+    return await dispatchTokenGrant(deps, clientId, grantType, form);
+  } catch (error) {
+    if (error instanceof OAuthTokenError) {
+      // Bounded OAuth error code only; no code, token, or verifier value.
+      await writeAudit(deps, {
+        operation: "oauth.token.issue",
+        outcome: "failure",
+        detail: {
+          client_id: clientId,
+          grant_type: grantType,
+          reason: error.oauthError,
+        },
+      });
+    }
+    throw error;
+  }
+}
+
+async function dispatchTokenGrant(
+  deps: ServiceDeps,
+  clientId: string,
+  grantType: string,
+  form: URLSearchParams,
+): Promise<Response> {
   if (grantType === "authorization_code") {
     const code = singleTokenParam(form, "code");
     const redirectUri = singleTokenParam(form, "redirect_uri");

@@ -265,6 +265,35 @@ authorization system.
   script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none';
   frame-ancestors 'none'`.
 
+## Audit events (slice O)
+
+Authentication and OAuth lifecycle metadata is written to `audit_events` through
+`src/service/audit.ts`; audit rows are metadata, never authority.
+
+- **Integrity.** The insert is fail-open: a database error or a deliberately failing
+  audit trigger is swallowed and does not change the login, token, consent, revocation,
+  or logout response, nor any authorization decision. The trade-off is that an actor
+  able to make audit inserts fail can suppress those rows while the operation still
+  succeeds. Rows are not signed, hash-chained, or otherwise tamper-evident against
+  someone with database write access; database and backup integrity remain the
+  boundary. No authorization path reads them.
+- **Privacy and sanitization.** Rows carry actor/project ids, bounded operations and
+  outcomes, public client ids, internal credential ids, sorted scope lists, grant
+  types, and constant failure reasons. They never carry passwords or hashes, emails,
+  session tokens, CSRF values, OAuth codes, access/refresh tokens, client names,
+  redirect URIs, raw IPs, bodies, or absolute paths. `detail` strings, arrays, and the
+  total document are capped; an oversized document is dropped rather than truncated.
+- **Enumeration.** Login failure rows have no actor and only the uniform reasons
+  `invalid_credentials` or `rate_limited`. Registration, consent-denial, and token
+  failure reasons are bounded constants. Revocation is audited only when ownership is
+  proven, so the audit stream adds no existence or account signal beyond the HTTP
+  response.
+- **Availability and growth.** There is no audit read API/UI and no retention,
+  rotation, or deletion; `prune` never removes audit rows. Authentication/OAuth traffic
+  therefore grows the table, and operators must size and back it up accordingly.
+  Service-layer events leave `request_id` null because the HTTP request id is not
+  passed into the service.
+
 ## Attack cases to cover
 
 Cross-project `message_id` guessing; sender spoofing in HTTP/MCP parameters; forged

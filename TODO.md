@@ -347,6 +347,7 @@ recorded there.
 - [ ] Implement 256-bit speaker key creation, hash/pepper verifier, once-only display, TTL, key rotation/revocation and emergency project-disable path.
 - [x] Enforce authorization at service layer and again at blob access with no metadata leaks on forbidden IDs. Model project membership as server-provisioned and revocable. (Credential-to-project grants are explicit and deny-by-default per Issue #2; a membership alone grants no credential.)
 - [ ] Implement audit events for login, token issuance/revocation, permission grant, membership removal, project deletion and manual cleanup; exclude bodies and credentials.
+  - [x] Authentication and OAuth lifecycle: session login success/failure/rate-limit, sign-out, OAuth client registration, consent allow/deny, access-token issuance (code exchange and refresh), refresh-token reuse detection, and revocation, using a shared sanitized helper. (Slice O.)
 - [ ] Implement hard impersonation boundary via isolated agent credential broker / OS permissions (document threat limitations and prove a subagent lacking the secret cannot send as parent).
 - [ ] Run adversarial probes for object-level access control, JWT claims, idempotency ownership, time-of-check races, spoofed sender, hostile headers and injection attempts.
 

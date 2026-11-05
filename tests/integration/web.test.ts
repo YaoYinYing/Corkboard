@@ -1107,9 +1107,11 @@ test("timeline and body GETs create no receipts and mutate no message tables", a
     bodies: (await fx.db.all<{ id: string }>("SELECT id FROM body_objects")).length,
     audit: (await fx.db.all<{ id: string }>("SELECT id FROM audit_events")).length,
   });
+  // Login itself writes a `session.login` audit row; capture counts after it so
+  // this test isolates the read-only page GETs under test.
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
   const before = await counts();
 
-  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
   assert.equal((await getPage(app, "/projects/proj_a", cookie)).status, 200);
   assert.equal(
     (

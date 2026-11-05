@@ -8,6 +8,7 @@
 import { hashSecret, randomBase64url, verifySecret } from "../auth/credentials.ts";
 import { digestsEqual } from "../domain/digest.ts";
 import { AppError } from "../domain/errors.ts";
+import { writeAudit } from "./audit.ts";
 import { parseScopeJson, type ServiceDeps } from "./auth.ts";
 import { sessionIsActiveById } from "./sessions.ts";
 
@@ -307,6 +308,12 @@ export async function registerClient(
       now.toISOString(),
     ],
   );
+  // client_id is public; the client name and redirect URIs are not recorded.
+  await writeAudit(deps, {
+    operation: "oauth.client.register",
+    outcome: "success",
+    detail: { client_id: clientId },
+  });
   return {
     clientId,
     clientName: input.clientName,
@@ -697,6 +704,8 @@ async function mintTokens(
     projectId: string;
     scopes: readonly OAuthScope[];
     issueRefresh: boolean;
+    actorAccountId: string;
+    grantType: "authorization_code" | "refresh_token";
   },
 ): Promise<TokenResponse> {
   const now = deps.now();
@@ -754,6 +763,18 @@ async function mintTokens(
     await deleteMintedCredential(deps, credentialId);
     throw error;
   }
+  // Credential id and scopes only; the access and refresh tokens never appear.
+  await writeAudit(deps, {
+    operation: "oauth.token.issue",
+    outcome: "success",
+    actorAccountId: input.actorAccountId,
+    detail: {
+      client_id: input.clientId,
+      credential_id: credentialId,
+      scopes: [...input.scopes].sort(),
+      grant_type: input.grantType,
+    },
+  });
   return tokenResponse(accessToken, refreshToken, input.scopes);
 }
 
@@ -831,6 +852,8 @@ export async function exchangeAuthorizationCode(
     scopes,
     // Only a client registered for the refresh grant receives a refresh token.
     issueRefresh: client.grantTypes.includes("refresh_token"),
+    actorAccountId: code.account_id,
+    grantType: "authorization_code",
   });
 }
 
@@ -914,6 +937,18 @@ async function loadCredentialConsent(
   };
 }
 
+async function auditRefreshReuse(
+  deps: ServiceDeps,
+  clientId: string,
+  credentialId: string,
+): Promise<void> {
+  await writeAudit(deps, {
+    operation: "oauth.refresh.reuse",
+    outcome: "detected",
+    detail: { client_id: clientId, credential_id: credentialId },
+  });
+}
+
 async function revokeFamiliesForCredential(
   deps: ServiceDeps,
   credentialId: string,
@@ -971,6 +1006,7 @@ export async function rotateRefreshToken(
   const now = deps.now();
   if (token.revoked_at !== null || token.rotated_at !== null) {
     // Reuse of an already rotated/revoked value revokes the whole family.
+    await auditRefreshReuse(deps, token.client_id, token.credential_id);
     await revokeFamiliesForCredential(deps, token.credential_id);
     throw invalidGrant();
   }
@@ -1007,6 +1043,7 @@ export async function rotateRefreshToken(
     [nowIso, token.id],
   );
   if (rotated.changes !== 1) {
+    await auditRefreshReuse(deps, token.client_id, token.credential_id);
     await revokeFamiliesForCredential(deps, token.credential_id);
     throw invalidGrant();
   }
@@ -1052,6 +1089,17 @@ export async function rotateRefreshToken(
     await revokeFamiliesForCredential(deps, token.credential_id);
     throw error;
   }
+  await writeAudit(deps, {
+    operation: "oauth.token.issue",
+    outcome: "success",
+    actorAccountId: consent.accountId,
+    detail: {
+      client_id: token.client_id,
+      credential_id: token.credential_id,
+      scopes: [...consent.scopes].sort(),
+      grant_type: "refresh_token",
+    },
+  });
   return tokenResponse(accessToken, refreshToken, consent.scopes);
 }
 
@@ -1073,6 +1121,17 @@ export async function revokeOAuthToken(
       if (!(await verifySecret(input.token, prefix, row.token_verifier, deps.pepper))) continue;
       if (row.client_id !== input.clientId) return;
       await revokeFamiliesForCredential(deps, row.credential_id);
+      // Only an ownership-proven success is audited; no-op outcomes are not,
+      // so the audit stream does not become an existence oracle.
+      await writeAudit(deps, {
+        operation: "oauth.revoke",
+        outcome: "success",
+        detail: {
+          client_id: input.clientId,
+          credential_id: row.credential_id,
+          token_type: "refresh_token",
+        },
+      });
       return;
     }
     return;
@@ -1095,6 +1154,15 @@ export async function revokeOAuthToken(
       );
       if (owned === undefined) return;
       await revokeFamiliesForCredential(deps, row.id);
+      await writeAudit(deps, {
+        operation: "oauth.revoke",
+        outcome: "success",
+        detail: {
+          client_id: input.clientId,
+          credential_id: row.id,
+          token_type: "access_token",
+        },
+      });
       return;
     }
   }

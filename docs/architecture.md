@@ -160,6 +160,25 @@ Indexes are listed in `migrations/001_init.sql` and `migrations/002_*.sql` when
 implemented. Every tenant-owned query filters on `project_id`; object access alone is
 never sufficient authorization.
 
+## Audit path
+
+`src/service/audit.ts` is the single write path for authentication and OAuth lifecycle
+metadata. `loginAccount`, `revokeSession`, `registerClient`, `mintTokens`,
+`rotateRefreshToken`, and `revokeOAuthToken` call `writeAudit`; the public form
+handlers in `src/app/oauth.ts` record rate-limited or rejected registration, consent
+allow/deny, and token-endpoint failures that happen before a service call. The helper
+inserts `(id, actor_account_id, actor_speaker_id, project_id, operation, outcome,
+request_id, detail, created_at)` with parameterized SQL and a random `evt_` id. It
+bounds every `detail` string/array and drops a `detail` document that still exceeds
+2,048 characters.
+
+The write is fail-open by design: an insert error is swallowed and never logged, so the
+audit sink cannot alter an external response or an authorization outcome. Audit rows are
+metadata, never authority — no route reads them and no authorization path consults them.
+Body-integrity failures and message expiry keep their existing separate writers; expiry
+retains its deterministic id with `INSERT OR IGNORE` for reconciliation. There is no
+audit retention/deletion job and no read API or UI; `prune` never deletes these rows.
+
 ## Retention and pruning
 
 Message bodies have their own opt-in expiry path (`expiry.ts`). Session and OAuth

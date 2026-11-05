@@ -46,6 +46,7 @@ import {
   SESSION_COOKIE_NAME,
   authenticateSession,
   loginAccount,
+  recordLoginRateLimited,
   revokeSession,
   sessionTokenFromCookie,
 } from "../service/sessions.ts";
@@ -326,7 +327,10 @@ async function handleSessionLogin(
   // Keying by the email digest keeps the bucket map free of addresses. This is
   // process-local and runs before account lookup or password verification.
   const decision = limiter.check(await sha256Hex(EMAIL_ENCODER.encode(email)));
-  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
+  if (!decision.allowed) {
+    await recordLoginRateLimited(deps);
+    throw new RateLimitError(decision.retryAfterSeconds);
+  }
 
   const login = await loginAccount(deps, { email, password });
   return json(

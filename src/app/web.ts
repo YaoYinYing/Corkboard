@@ -24,6 +24,7 @@ import { listProjects } from "../service/projects.ts";
 import {
   authenticateSession,
   loginAccount,
+  recordLoginRateLimited,
   sessionTokenFromCookie,
   validateSession,
 } from "../service/sessions.ts";
@@ -564,7 +565,10 @@ async function handleLoginSubmit(
   }
   // Keyed by an email digest, never the address. Checked before account lookup.
   const decision = loginLimiter.check(await sha256Hex(ENCODER.encode(email)));
-  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
+  if (!decision.allowed) {
+    await recordLoginRateLimited(deps);
+    throw new RateLimitError(decision.retryAfterSeconds);
+  }
 
   let login: { token: string; csrfToken: string };
   try {

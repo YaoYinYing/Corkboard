@@ -11,6 +11,7 @@ import {
 } from "../auth/password.ts";
 import { digestsEqual } from "../domain/digest.ts";
 import { AppError } from "../domain/errors.ts";
+import { writeAudit } from "./audit.ts";
 import type { ServiceDeps } from "./auth.ts";
 
 export const SESSION_TOKEN_PREFIX = "cb_sess_";
@@ -105,6 +106,12 @@ export async function loginAccount(
     account.status !== "active" ||
     !matched
   ) {
+    // Uniform: no actor and no account-existence signal beyond the response.
+    await writeAudit(deps, {
+      operation: "session.login",
+      outcome: "failure",
+      detail: { reason: "invalid_credentials" },
+    });
     throw new AppError("UNAUTHENTICATED");
   }
 
@@ -128,7 +135,24 @@ export async function loginAccount(
       expiresAt.toISOString(),
     ],
   );
+  // Mechanism only: never the email, password, token, or CSRF value.
+  await writeAudit(deps, {
+    operation: "session.login",
+    outcome: "success",
+    actorAccountId: account.id,
+    detail: { mechanism: "password" },
+  });
   return { token, csrfToken, accountId: account.id, email: account.email, expiresAt };
+}
+
+// Called by the login routes when the per-email bucket rejects the attempt.
+// The service never sees a rate-limited request, so the route records it.
+export async function recordLoginRateLimited(deps: ServiceDeps): Promise<void> {
+  await writeAudit(deps, {
+    operation: "session.login",
+    outcome: "failure",
+    detail: { reason: "rate_limited" },
+  });
 }
 
 // Revoked, expired (absolute), idle-expired, unknown, and inactive-account
@@ -263,4 +287,10 @@ export async function revokeSession(
     "UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
     [deps.now().toISOString(), principal.sessionId],
   );
+  // No session identifier: it is credential-adjacent and not needed here.
+  await writeAudit(deps, {
+    operation: "session.logout",
+    outcome: "success",
+    actorAccountId: principal.accountId,
+  });
 }

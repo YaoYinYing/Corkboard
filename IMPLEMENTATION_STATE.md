@@ -8,7 +8,7 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–N implemented and pushed |
+| Phase | 0 complete; vertical slices A–N implemented and pushed; slice O implemented on candidate, not pushed |
 | Last pushed checkpoint | `c2aec6a` (operator backup/verify/restore, audited tree `e45dcdf`) on `origin/main`; CI pending |
 | Branch | `main`, clean; the `slice-n-backup` candidate was fast-forwarded |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
@@ -985,6 +985,30 @@ pushed.
   creates sidecars). The implementation is Node-only. No scheduling, remote storage,
   backup-level encryption, key handling, point-in-time recovery, overwrite mode, or
   D1/Workers equivalent. Independent security and contract review is PENDING.
+
+## Vertical slice O — sanitized authentication/OAuth audit events (candidate, not pushed)
+
+- **Write path.** New `src/service/audit.ts` provides `writeAudit`/`boundAuditDetail`.
+  It reuses the existing `audit_events` table and `detail` column (no migration),
+  parameterized SQL, random `evt_` ids, and fail-open inserts (errors swallowed, never
+  logged) so audit failure cannot change an external response or authorization outcome.
+- **Events.** `session.login` success/failure (`invalid_credentials`, `rate_limited`),
+  `session.logout`, `oauth.client.register` success/failure, `oauth.consent`
+  success/denied, `oauth.token.issue` success/failure for code exchange and refresh,
+  `oauth.refresh.reuse` detected, and `oauth.revoke` success when ownership is proven.
+  Rows carry actor/project ids, public client id, internal credential id, sorted scopes,
+  grant type, and bounded constant reasons. No token, code, cookie, CSRF value,
+  password/hash, email, client name, redirect URI, raw IP, body, or path is recorded.
+  `detail` strings/arrays and the serialized document are capped; oversized detail is
+  dropped. Revocation is not audited for no-op/unknown tokens, avoiding an oracle.
+- **Boundaries.** No audit read API/UI, no retention/rotation/deletion (`prune` still
+  never deletes audit rows), no new table, no authorization change. Service-layer events
+  leave `request_id` null because the request id is not threaded into the services.
+- **Tests.** `tests/integration/audit.test.ts` asserts each event, uniform failure
+  details, the sanitization denylist, bounded detail, rate-limited login, and that an
+  injected audit-insert failure leaves login, token issuance, revocation, and logout
+  successful. The full suite passes (379 tests: 378 pass, 1 skipped). Independent
+  security and contract review is PENDING.
 
 ## Implemented and verified at this tree
 

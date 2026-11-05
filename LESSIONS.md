@@ -554,3 +554,21 @@ prevented regression; when to remove the advice.
   an older binary.
 - **Remove when:** the deployment moves to a storage engine with a platform snapshot
   API and the D1/Workers path is implemented.
+
+## 2026-11-04 — An audit sink must not become an oracle or an outage
+
+- **Failure:** Authentication/OAuth lifecycle rows invite three easy mistakes:
+  logging identifiers that are credential-like (session ids, codes, tokens), letting a
+  failing audit insert change the login/token/revocation response, or recording a
+  revocation no-op so the audit stream reveals token existence.
+- **Reproducer:** Inject a trigger that aborts every `audit_events` insert and attempt
+  login, token exchange, and revocation; a non-fail-open path returns an error even
+  though the operation succeeded. Search the rows for a session token or authorization
+  code and find it in a naive implementation.
+- **Fix:** One shared `writeAudit` with parameterized SQL, bounded sanitized `detail`,
+  random ids, and a swallowed/log-free insert; audit revocations only after ownership
+  is proven; use uniform failure reasons and no actor for ambiguous login failures.
+- **Prevents:** Audit failures becoming availability or authorization failures, secret
+  leakage into security metadata, and an audit-derived existence oracle.
+- **Remove when:** audit delivery moves to a durable queue that can report failures
+  without affecting the request path, with its own retention and access controls.

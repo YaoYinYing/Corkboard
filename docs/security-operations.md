@@ -429,6 +429,41 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   body expiry (`message.expire`), with identifiers and outcome only and no body
   content. The optional `detail` column holds sanitized JSON (granted project IDs and
   scope lists); it never holds tokens, keys, or message text.
+- Authentication and OAuth lifecycle events (slice O) are written through the shared
+  `src/service/audit.ts` helper so the column convention is uniform. Every row is
+  sanitized metadata only:
+
+  | Operation | Outcome | Actor | Bounded `detail` |
+  | --- | --- | --- | --- |
+  | `session.login` | `success` | account id | `mechanism` |
+  | `session.login` | `failure` | none | `reason` (`invalid_credentials` / `rate_limited`) |
+  | `session.logout` | `success` | account id | none (never the session id) |
+  | `oauth.client.register` | `success` / `failure` | none | public `client_id` on success; `reason` on failure |
+  | `oauth.consent` | `success` / `denied` | account id | `client_id`, `project_id`, `speaker_id`, sorted `scopes`, `decision` |
+  | `oauth.token.issue` | `success` / `failure` | account id when known | `client_id`, internal `credential_id`, sorted `scopes`, `grant_type`; failures carry `reason` |
+  | `oauth.refresh.reuse` | `detected` | none | `client_id`, internal `credential_id` |
+  | `oauth.revoke` | `success` | none | `client_id`, internal `credential_id`, `token_type`; only when ownership is proven |
+
+  `detail` values are bounded by construction (200 characters per string, 32 array
+  elements, 2,048 characters for the whole document; an oversized document is
+  dropped). Audit rows never contain tokens, authorization codes, session or CSRF
+  values, passwords or hashes, email addresses, client names, redirect URIs, raw IPs,
+  request bodies, or absolute paths. Failure details are uniform constants, so the
+  audit stream exposes no additional account-existence signal.
+- Audit writes are **fail-open**: `writeAudit` swallows insert errors, never logs the
+  error or its parameters, and therefore cannot change a login, token, consent,
+  revocation, or logout response or an authorization outcome. Authorization decisions
+  remain fail-closed and independent of the audit sink. Events use random ids because
+  every authentication/OAuth action is a distinct event and a retry is a separate
+  attempt; only reconcilable transitions such as `message.expire` use a deterministic
+  id with `INSERT OR IGNORE`.
+- There is **no audit read API or UI, and no retention, rotation, or deletion** of
+  `audit_events` yet. `prune` deliberately never deletes audit rows. Rows grow with
+  authentication and OAuth traffic; the operator is responsible for database and
+  backup lifecycle management. Audit rows are not cryptographically sealed or
+  tamper-evident against an operator with database write access. The service layer
+  does not receive the HTTP request id, so `request_id` remains null for these
+  events.
 - Expiry audit rows use a deterministic id derived from the message id and
   `INSERT OR IGNORE`. The HTTP endpoint records the authenticated principal; the
   operator-run worker records a **system actor** (null account and speaker), not the
