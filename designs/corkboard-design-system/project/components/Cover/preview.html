@@ -1,0 +1,88 @@
+<!-- @dsCard height=288 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Corkboard</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--surface); color: var(--ink); font-family: var(--font-sans); overflow: hidden; }
+  .cover { position: relative; height: 288px; overflow: hidden; }
+  .words { position: absolute; left: var(--space-6); right: var(--space-6); bottom: var(--space-6); max-width: 440px; }
+  .name { margin: 0; font-size: 80px; line-height: 0.9; font-weight: 700; color: var(--ink); }
+  .tag { margin: var(--space-2) 0 0; font-size: 14px; line-height: 20px; color: var(--ink-muted); }
+  .art { position: absolute; top: 0; left: 480px; width: 480px; height: 288px; overflow: hidden; }
+  .art svg { display: block; width: 480px; height: 288px; }
+  .brand { fill: var(--brand); }
+  .ink { fill: var(--ink); }
+  .accent { fill: var(--accent); }
+  .danger { fill: var(--danger); }
+  .cut { fill: var(--surface); }
+  .slab { rx: var(--radius-md); }
+  .chip { rx: var(--radius-sm); }
+</style>
+</head>
+<body>
+<div class="cover">
+<div class="art" aria-hidden="true">
+<svg viewBox="0 0 480 288" width="480" height="288" role="presentation">
+<!--
+  blocks      brand 144×216 bled off the top · ink 160×272 bled off the bottom · accent 144×136 flush to the right edge · danger 64×24 once, small because it only ever means a state — about a third of 960×288
+  arrangement one tall ink slab with satellites in the right half; space-4 gutters; vertical stagger, nothing crossing x = 480
+  pattern     plus grid at a space-6 (24px) pitch cut out of the ink slab in surface; chosen from the README's 4px grid and "precise, technical, borders not shadows" character
+  scales      sides in space-1 multiples; gutters space-4; pattern pitch space-6 with 12px (space-3) arms; corners radius-md on slabs, radius-sm on the chip
+-->
+<rect class="brand slab" x="0" y="-24" width="144" height="216"/>
+<rect class="ink slab" x="160" y="40" width="160" height="272"/>
+<rect class="accent slab" x="336" y="16" width="144" height="136"/>
+<rect class="danger chip" x="336" y="176" width="64" height="24"/>
+<rect class="cut" x="183" y="66" width="2" height="12"/><rect class="cut" x="178" y="71" width="12" height="2"/>
+<rect class="cut" x="207" y="66" width="2" height="12"/><rect class="cut" x="202" y="71" width="12" height="2"/>
+<rect class="cut" x="231" y="66" width="2" height="12"/><rect class="cut" x="226" y="71" width="12" height="2"/>
+<rect class="cut" x="255" y="66" width="2" height="12"/><rect class="cut" x="250" y="71" width="12" height="2"/>
+<rect class="cut" x="279" y="66" width="2" height="12"/><rect class="cut" x="274" y="71" width="12" height="2"/>
+<rect class="cut" x="183" y="90" width="2" height="12"/><rect class="cut" x="178" y="95" width="12" height="2"/>
+<rect class="cut" x="207" y="90" width="2" height="12"/><rect class="cut" x="202" y="95" width="12" height="2"/>
+<rect class="cut" x="231" y="90" width="2" height="12"/><rect class="cut" x="226" y="95" width="12" height="2"/>
+<rect class="cut" x="255" y="90" width="2" height="12"/><rect class="cut" x="250" y="95" width="12" height="2"/>
+<rect class="cut" x="279" y="90" width="2" height="12"/><rect class="cut" x="274" y="95" width="12" height="2"/>
+<rect class="cut" x="183" y="114" width="2" height="12"/><rect class="cut" x="178" y="119" width="12" height="2"/>
+<rect class="cut" x="207" y="114" width="2" height="12"/><rect class="cut" x="202" y="119" width="12" height="2"/>
+<rect class="cut" x="231" y="114" width="2" height="12"/><rect class="cut" x="226" y="119" width="12" height="2"/>
+<rect class="cut" x="255" y="114" width="2" height="12"/><rect class="cut" x="250" y="119" width="12" height="2"/>
+<rect class="cut" x="279" y="114" width="2" height="12"/><rect class="cut" x="274" y="119" width="12" height="2"/>
+<rect class="cut" x="183" y="138" width="2" height="12"/><rect class="cut" x="178" y="143" width="12" height="2"/>
+<rect class="cut" x="207" y="138" width="2" height="12"/><rect class="cut" x="202" y="143" width="12" height="2"/>
+<rect class="cut" x="231" y="138" width="2" height="12"/><rect class="cut" x="226" y="143" width="12" height="2"/>
+<rect class="cut" x="255" y="138" width="2" height="12"/><rect class="cut" x="250" y="143" width="12" height="2"/>
+<rect class="cut" x="279" y="138" width="2" height="12"/><rect class="cut" x="274" y="143" width="12" height="2"/>
+<rect class="cut" x="183" y="162" width="2" height="12"/><rect class="cut" x="178" y="167" width="12" height="2"/>
+<rect class="cut" x="207" y="162" width="2" height="12"/><rect class="cut" x="202" y="167" width="12" height="2"/>
+<rect class="cut" x="231" y="162" width="2" height="12"/><rect class="cut" x="226" y="167" width="12" height="2"/>
+<rect class="cut" x="255" y="162" width="2" height="12"/><rect class="cut" x="250" y="167" width="12" height="2"/>
+<rect class="cut" x="279" y="162" width="2" height="12"/><rect class="cut" x="274" y="167" width="12" height="2"/>
+<rect class="cut" x="183" y="186" width="2" height="12"/><rect class="cut" x="178" y="191" width="12" height="2"/>
+<rect class="cut" x="207" y="186" width="2" height="12"/><rect class="cut" x="202" y="191" width="12" height="2"/>
+<rect class="cut" x="231" y="186" width="2" height="12"/><rect class="cut" x="226" y="191" width="12" height="2"/>
+<rect class="cut" x="255" y="186" width="2" height="12"/><rect class="cut" x="250" y="191" width="12" height="2"/>
+<rect class="cut" x="279" y="186" width="2" height="12"/><rect class="cut" x="274" y="191" width="12" height="2"/>
+<rect class="cut" x="183" y="210" width="2" height="12"/><rect class="cut" x="178" y="215" width="12" height="2"/>
+<rect class="cut" x="207" y="210" width="2" height="12"/><rect class="cut" x="202" y="215" width="12" height="2"/>
+<rect class="cut" x="231" y="210" width="2" height="12"/><rect class="cut" x="226" y="215" width="12" height="2"/>
+<rect class="cut" x="255" y="210" width="2" height="12"/><rect class="cut" x="250" y="215" width="12" height="2"/>
+<rect class="cut" x="279" y="210" width="2" height="12"/><rect class="cut" x="274" y="215" width="12" height="2"/>
+<rect class="cut" x="183" y="234" width="2" height="12"/><rect class="cut" x="178" y="239" width="12" height="2"/>
+<rect class="cut" x="207" y="234" width="2" height="12"/><rect class="cut" x="202" y="239" width="12" height="2"/>
+<rect class="cut" x="231" y="234" width="2" height="12"/><rect class="cut" x="226" y="239" width="12" height="2"/>
+<rect class="cut" x="255" y="234" width="2" height="12"/><rect class="cut" x="250" y="239" width="12" height="2"/>
+<rect class="cut" x="279" y="234" width="2" height="12"/><rect class="cut" x="274" y="239" width="12" height="2"/>
+</svg>
+</div>
+<div class="words">
+<h1 class="name">Corkboard</h1>
+<p class="tag">Shared, authenticated, durable message board.</p>
+</div>
+</div>
+</body>
+</html>

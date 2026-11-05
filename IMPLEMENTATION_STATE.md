@@ -1027,6 +1027,33 @@ pushed.
   tested); consent audit fail-open is uncovered (register fail-open is covered);
   fail-open audit can suppress rows; `audit_events` is unbounded.
 
+## Design-system checkpoint (slice P) — web design-system contract (branch `slice-p-final`)
+
+- **Checkpoint.** Branch `slice-p-final` is one squashed checkpoint commit based on
+  `55bd96e28f013dc79f934eae760eb7ff5415b167`. Not pushed; `main` is unchanged and the
+  shipped runtime is untouched.
+- **Files added.** `designs/corkboard-design-system/` with `project/design-system.json`,
+  `project/tokens.json` (light/dark color, type, 4px spacing, radius, shadow),
+  `project/README.md` brand book, and static previews plus READMEs for `Cover`, `Login`,
+  `ProjectList`, `Timeline`, `Filters`, and `MessageBody`; plus
+  `docs/decisions/0001-web-design-system.md`.
+- **Audit.** Independent security and contract audits PASS on tree `00135db`
+  (pre-squash commit `214ef4b`). Their provenance, CSP, and contrast P2s were corrected
+  in pre-squash fixup `b7d91b0`; the sample-data and state-wording items are corrected
+  in this checkpoint. This squashed checkpoint is re-audited before push.
+- **Verification.** `artifact.mjs check` problems 0; `npm ci` exit 0; `npm run check`
+  exit 0 (secret scan, history-secret-scan ok — count varies with refs, typecheck,
+  380 tests: 379 pass, 1 skipped live-D1); `npm run build` exit 0.
+- **Boundary.** No `src/`, test, migration, schema, or runtime change. `src/app/web.ts`
+  still serves system colors; the previews show the intended token contract, not the
+  current shipped rendering.
+- **Follow-up obligations for the application phase.** Compile tokens into one
+  same-origin stylesheet served under the fixed CSP (`default-src 'none';
+  style-src 'self'`), never inline `<style>` or `style=`; keep the system font stacks;
+  implement `prefers-color-scheme` and/or server-rendered `data-theme`; the 3px focus
+  outline with 2px offset; the 60rem measure; and real-browser verification of light
+  and dark, focus visibility, 320px layout, and both locales.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,

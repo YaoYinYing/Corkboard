@@ -1,0 +1,51 @@
+<!-- @dsCard group="Controls" height=400 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Filters — preview</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--surface); color: var(--ink); font-family: var(--font-sans); font-size: 15px; line-height: 22px; }
+  .preview { max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
+  a { color: var(--link); }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, pre:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  h2 { margin: 0 0 var(--space-3); font-size: 20px; line-height: 26px; font-weight: 600; }
+  p { margin: 0; }
+  label { font-size: 14px; line-height: 20px; font-weight: 600; }
+  input { font: inherit; max-width: 100%; width: 100%; padding: 0.35rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-raised); color: var(--ink); }
+  button { font: inherit; max-width: 100%; padding: var(--space-2) var(--space-3); border: 1px solid var(--brand); border-radius: var(--radius-sm); background: var(--brand); color: var(--brand-ink); font-weight: 600; }
+  .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); margin: var(--space-2) 0 var(--space-4); }
+  .filter-field { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; margin: 0; }
+  .filter-field input { width: 100%; min-width: 0; padding: 0.35rem; }
+  .filter-checkbox { flex-direction: row; align-items: center; gap: var(--space-2); }
+  .filter-checkbox input { width: auto; }
+  .filter-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: center; margin: 0; }
+  .hint { color: var(--ink-muted); font-size: 13px; line-height: 18px; }
+  .filter-state { border-left: 4px solid var(--border); padding-left: var(--space-3); overflow-wrap: anywhere; }
+  code { font-family: var(--font-mono); font-size: 15px; }
+</style>
+</head>
+<body>
+<div class="preview">
+<h2 id="filters-heading">Filters</h2>
+<form class="filters" method="get" action="/projects/1" aria-labelledby="filters-heading">
+<p class="filter-field"><label for="filter-type">Type</label>
+<input id="filter-type" name="type" type="text" maxlength="32" value="deploy"></p>
+<p class="filter-field"><label for="filter-sender">Sender speaker ID</label>
+<input id="filter-sender" name="sender" type="text" maxlength="128" aria-describedby="filter-sender-hint">
+<span class="hint" id="filter-sender-hint">Exact project member speaker identifier.</span></p>
+<p class="filter-field"><label for="filter-q">Search summaries</label>
+<input id="filter-q" name="q" type="search" maxlength="100" aria-describedby="filter-q-hint">
+<span class="hint" id="filter-q-hint">Matches summary text only; message bodies are never searched.</span></p>
+<p class="filter-field filter-checkbox"><input id="filter-unread" name="unread" type="checkbox" value="true" checked>
+<label for="filter-unread">Unread only</label></p>
+<p class="filter-field"><label for="filter-limit">Messages per page</label>
+<input id="filter-limit" name="limit" type="number" min="1" max="100" step="1" inputmode="numeric" value="50"></p>
+<p class="filter-actions"><button type="submit">Apply filters</button> <a href="/projects/1">Clear filters</a></p>
+</form>
+<p class="filter-state"><strong>Active filters:</strong> Type: <code>deploy</code> <span aria-hidden="true">·</span> Unread only</p>
+</div>
+</body>
+</html>

@@ -573,6 +573,18 @@ prevented regression; when to remove the advice.
 - **Remove when:** audit delivery moves to a durable queue that can report failures
   without affecting the request path, with its own retention and access controls.
 
+## 2026-11-05 — Design source must name the revision it was cut from
+
+- **Failure:** The design-system ADR recorded a base commit that was not the revision
+  the design files were actually cut from, so the provenance claim could not be
+  audited. The static previews were also described as "truthful renditions" while the
+  shipped UI still uses system colors.
+- **Fix:** Record the exact base and source commit/tree in the ADR, and state that
+  previews demonstrate the intended token contract and DOM structure, not the current
+  shipped rendering.
+- **Prevents:** Unreviewable provenance and design documents that claim more than the
+  product currently does.
+
 ## 2026-11-04 — Audit detail must not echo unvalidated request values
 
 - **Failure:** The token-endpoint failure path copied the raw form `client_id` and

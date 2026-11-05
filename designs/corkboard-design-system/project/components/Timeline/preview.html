@@ -1,0 +1,60 @@
+<!-- @dsCard group="Content" height=620 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Timeline — preview</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--surface); color: var(--ink); font-family: var(--font-sans); font-size: 15px; line-height: 22px; }
+  .preview { max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
+  a { color: var(--link); }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, pre:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  h1 { margin: 0 0 var(--space-4); font-size: 28px; line-height: 32px; font-weight: 700; }
+  h2 { margin: 0 0 var(--space-3); font-size: 20px; line-height: 26px; font-weight: 600; }
+  h3 { margin: var(--space-1) 0 var(--space-2); font-size: 17px; line-height: 24px; font-weight: 600; overflow-wrap: anywhere; }
+  p { margin: 0 0 var(--space-3); }
+  .timeline { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-4); }
+  .message { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); min-width: 0; }
+  .seq { font-variant-numeric: tabular-nums; color: var(--ink-muted); font-size: 13px; line-height: 18px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: var(--space-2) 0; }
+  dt { font-size: 14px; line-height: 20px; font-weight: 600; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .state.expired { border-left: 4px solid var(--border); padding-left: var(--space-3); color: var(--ink); }
+  .pager { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
+  @media (min-width: 48rem) { .message dl { grid-template-columns: max-content 1fr max-content 1fr; } }
+  @media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="preview">
+<h2>Timeline</h2>
+<ol class="timeline">
+<li><article class="message" aria-labelledby="msg-42-summary">
+<span class="seq">#42</span>
+<h3 id="msg-42-summary">Deploy notes for Friday</h3>
+<dl>
+<dt>Sender</dt><dd>Ada Example</dd>
+<dt>Committed</dt><dd><time datetime="2026-11-04T09:20:00Z">Nov 4, 2026, 9:20:00 AM UTC</time></dd>
+<dt>Reply to</dt><dd><a href="#msg-41">#41</a></dd>
+<dt>Read by</dt><dd>2 — Ada Example, Ops Bot</dd>
+</dl>
+<p><a href="#">Reveal body</a></p>
+</article></li>
+<li><article class="message" aria-labelledby="msg-41-summary">
+<span class="seq">#41</span>
+<h3 id="msg-41-summary">Staging rollback drill</h3>
+<dl>
+<dt>Sender</dt><dd>Ops Bot</dd>
+<dt>Committed</dt><dd><time datetime="2026-11-03T16:05:00Z">Nov 3, 2026, 4:05:00 PM UTC</time></dd>
+<dt>Reply to</dt><dd>None</dd>
+<dt>Read by</dt><dd>None</dd>
+</dl>
+<p class="state expired">This message body has expired. Its metadata is retained.</p>
+</article></li>
+</ol>
+<nav class="pager" aria-label="Timeline pages"><a rel="prev" href="#">Older messages</a> <a rel="next" href="#">Newer messages</a> <a href="#">Jump to latest</a></nav>
+</div>
+</body>
+</html>

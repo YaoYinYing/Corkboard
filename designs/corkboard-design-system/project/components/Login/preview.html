@@ -1,0 +1,37 @@
+<!-- @dsCard group="Access" height=360 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Login — preview</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--surface); color: var(--ink); font-family: var(--font-sans); font-size: 15px; line-height: 22px; }
+  .preview { max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
+  a { color: var(--link); }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, pre:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  h1 { margin: 0 0 var(--space-4); font-size: 28px; line-height: 32px; font-weight: 700; }
+  p { margin: 0 0 var(--space-3); }
+  label { font-size: 14px; line-height: 20px; font-weight: 600; }
+  input { font: inherit; max-width: 100%; width: 100%; padding: 0.35rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-raised); color: var(--ink); }
+  button { font: inherit; max-width: 100%; padding: var(--space-2) var(--space-3); border: 1px solid var(--brand); border-radius: var(--radius-sm); background: var(--brand); color: var(--brand-ink); font-weight: 600; }
+  .error { border: 1px solid var(--border); border-left: 4px solid var(--danger); padding: var(--space-2) var(--space-3); }
+</style>
+</head>
+<body>
+<div class="preview">
+<h1>Sign in</h1>
+<p class="error" role="alert">Invalid email or password.</p>
+<form method="post" action="/login">
+<input type="hidden" name="return_to" value="/">
+<input type="hidden" name="login_csrf" value="preview-csrf">
+<p><label for="email">Email</label><br>
+<input id="email" name="email" type="email" autocomplete="username" required></p>
+<p><label for="password">Password</label><br>
+<input id="password" name="password" type="password" autocomplete="current-password" required></p>
+<p><button type="submit">Sign in</button></p>
+</form>
+</div>
+</body>
+</html>

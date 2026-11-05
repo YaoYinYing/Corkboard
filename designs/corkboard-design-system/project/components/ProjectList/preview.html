@@ -1,0 +1,48 @@
+<!-- @dsCard group="Content" height=340 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ProjectList — preview</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--surface); color: var(--ink); font-family: var(--font-sans); font-size: 15px; line-height: 22px; }
+  .preview { max-width: 60rem; margin: 0 auto; padding: var(--space-4); }
+  a { color: var(--link); }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, pre:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  h1 { margin: 0 0 var(--space-4); font-size: 28px; line-height: 32px; font-weight: 700; overflow-wrap: anywhere; }
+  h2 { margin: 0 0 var(--space-2); font-size: 20px; line-height: 26px; font-weight: 600; overflow-wrap: anywhere; }
+  p { margin: 0; }
+  .project-list { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-4); }
+  .project-list article { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); min-width: 0; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: var(--space-2) 0 0; }
+  dt { font-size: 14px; line-height: 20px; font-weight: 600; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .status { color: var(--success); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="preview">
+<h1>Projects</h1>
+<ul class="project-list">
+<li><article aria-labelledby="project-1-title">
+<h2 id="project-1-title"><a href="/projects/1">Release checklist</a></h2>
+<p>Deployments, read receipts, and rollback notes for the shared board.</p>
+<dl>
+<dt>Status</dt><dd class="status">Active</dd>
+<dt>Member</dt><dd>Ada Example</dd>
+</dl>
+</article></li>
+<li><article aria-labelledby="project-2-title">
+<h2 id="project-2-title"><a href="/projects/2">Agent handoff log</a></h2>
+<p>No description.</p>
+<dl>
+<dt>Status</dt><dd class="status">Active</dd>
+<dt>Member</dt><dd>Ops Bot</dd>
+</dl>
+</article></li>
+</ul>
+</div>
+</body>
+</html>
