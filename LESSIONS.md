@@ -851,3 +851,18 @@ prevented regression; when to remove the advice.
 - **Remove when:** Membership administration has an explicit delegated role with a
   reviewed owner-equivalent policy and tests proving the delegation cannot mint
   broader credentials.
+
+## 2026-11-05 — "as before" hid a new portability requirement
+
+- **Failure:** Pinning every package script to `"${npm_node_execpath:?...}"` made
+  the scripts POSIX-`sh`-only, because `cmd.exe` does not parse `${var:?}`. The
+  supply-chain doc said "Scripts run through a POSIX `sh`, as before", which
+  understates the change: the previous chains were also cmd.exe-compatible.
+- **Fix:** The doc states the requirement as new, names the Windows failure, and
+  notes CI runs `ubuntu-latest`. Two related limits are recorded as debt: the secret
+  scans still resolve `git` through `PATH`, and the committed shim test's `tsc`
+  assertion is static (its command never runs `tsc`).
+- **Prevents:** Operators discovering a platform regression only in a Windows run,
+  and readers assuming the documented boundary is broader than it is.
+- **Remove when:** The scripts use a cross-platform wrapper (for example one Node
+  entry script) and the secret scans invoke `git` by absolute path.

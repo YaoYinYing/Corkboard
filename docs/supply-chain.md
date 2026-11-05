@@ -126,4 +126,11 @@ artifact.
 - The `$npm_node_execpath` guard removes PATH shadowing by `node`/`tsc`/`npm` bins
   from dependency packages. It still trusts the npm installation and the Node binary
   npm itself was started with; a compromised or misconfigured npm/node installation
-  is outside this boundary. Scripts run through a POSIX `sh`, as before.
+  is outside this boundary. Every package script now requires a POSIX `sh`:
+  `${npm_node_execpath:?...}` and `$npm_node_execpath` use POSIX parameter
+  expansion that Windows `cmd.exe` does not implement, so `npm run` fails there
+  unless a POSIX script-shell is configured. CI runs `ubuntu-latest`.
+- The secret scans (`scripts/secret-scan.ts`, `scripts/history-secret-scan.ts`)
+  still invoke `git` through `PATH`, so a dependency-declared `git` bin under
+  `node_modules/.bin` could shadow it under `npm run`. This is recorded debt outside
+  the `node`/`tsc`/`npm` guard.
