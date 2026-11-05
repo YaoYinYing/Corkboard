@@ -970,3 +970,22 @@ prevented regression; when to remove the advice.
   improvement, and false "in one transaction" documentation.
 - **Remove when:** `SqlDatabase` gains a documented read-snapshot primitive with
   SQLite and D1 implementations and tests.
+
+## 2026-11-05 — git only parses the last contiguous trailer block
+
+- **Failure:** A checkpoint message with a multi-line `Tests:` value whose
+  continuation lines are unindented, or a blank line
+  between `Tree-SHA` and `Co-Authored-By`, silently breaks `%(trailers)` and
+  `git interpret-trailers`. The human-readable trailers were present, but tooling and
+  the independent audit could not read them, so the exact-revision checkpoint gate
+  was not machine-verifiable. Recent pushed commits (`f7e62be`, `dbb2a46`,
+  `1dfa284`) share the defect; `058e34f` and later parse cleanly.
+- **Reproducer:** `git log -1 --format='%(trailers:key=Tree-SHA,valueonly)' <commit>`
+  returns empty when the trailer paragraph is interrupted by an unindented
+  continuation line or a blank line before `Co-Authored-By`.
+- **Fix:** Keep `Base-SHA`, `Candidate-SHA`, `Tree-SHA`, `Tests`, and
+  `Co-Authored-By` in ONE final paragraph with single-line values; put prose above a
+  blank line. Verify with `%(trailers:key=Tree-SHA,valueonly)` before pushing.
+- **Prevents:** A checkpoint whose provenance looks present in prose but is invisible
+  to tooling, and a re-audit loop over a mechanical formatting defect.
+- **Remove when:** CI enforces the trailer schema on every pushed commit.
