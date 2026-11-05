@@ -38,7 +38,7 @@ verify ChatGPT Web integration.
 | Path | Purpose |
 | --- | --- |
 | `TODO.md` | Normative design and acceptance checklist |
-| `docs/` | Architecture, threat model, API, operations, deployments, campaign contract |
+| `docs/` | Architecture, threat model, API, operations, deployments, runbook, acceptance report, campaign contract |
 | `src/` | TypeScript core, storage/crypto/auth, message service, and Node.js adapter |
 | `migrations/` | Versioned, D1/SQLite-compatible SQL |
 | `tests/` | Unit, contract, integration, and security tests |
@@ -58,6 +58,15 @@ npm run sbom         # offline: reports/sbom.cdx.json (CycloneDX)
 
 Dependency audit, license policy, SBOM output and their limits are documented in
 [`docs/supply-chain.md`](docs/supply-chain.md).
+
+### Operations
+
+[`docs/runbook.md`](docs/runbook.md) is the operator runbook for the self-hosted
+Node.js/SQLite service (install, provisioning, serving, credentials, messages,
+backup/restore, diagnostics, limits, upgrade/rollback).
+[`docs/acceptance-report.md`](docs/acceptance-report.md) records which criteria are
+verified locally or in CI, which are external evidence, and which are untested or not
+implemented. Neither claims a production or staging deployment.
 
 ### Web dashboard
 

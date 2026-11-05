@@ -3,6 +3,30 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — A global option can parse successfully and still be ignored
+
+- **Failure avoided:** The CLI's option table is global, so `--data-dir` parses for every
+  command. But the in-database provisioning commands (`bootstrap-owner`,
+  `create-project`, `create-speaker`, `add-member`, `remove-member`, `issue-key`,
+  `grant-key-project`, `revoke-key-project`, `revoke-key`) never read
+  `values["data-dir"]`; they call `withDb` with no override, which requires
+  `CORKBOARD_DATA_DIR` in the environment. An operator who runs
+  `bootstrap-owner --data-dir /var/lib/corkboard` gets either a `CORKBOARD_DATA_DIR is
+  not set` error or, worse, silently provisions a different directory that happens to be
+  in the environment. The CLI also has no `--help`; `--help` is an unknown option.
+- **Decision:** The runbook states the required environment export for provisioning
+  commands, shows `--data-dir` only for `init`, `expire-bodies`, `prune`, `doctor`,
+  `backup`, and `restore`, and says to confirm flags against the no-argument usage line
+  and the source, not a presumed `--help`.
+- **Reproducer / test:** Source a secrets file with `CORKBOARD_DATA_DIR` removed, then
+  run `bootstrap-owner --email x@example.test --data-dir <dir>`; it fails with
+  `CORKBOARD_DATA_DIR is required` rather than using `<dir>`. `node
+  dist/scripts/corkboard.js --help` exits `1` with `Unknown option '--help'`.
+- **Prevents:** Writing operational instructions from the global option table instead
+  of each command's actual code path, and presenting a silently ignored flag as working.
+- **Remove when:** The CLI gives each command its own option set (or rejects
+  command-inapplicable options) and implements `--help`.
+
 ## 2026-11-05 — A length limit is not a content rule; blank text passes both grapheme and byte caps
 
 - **Failure:** Real-browser evidence at `2a17a75` (Issue #6) showed a message whose

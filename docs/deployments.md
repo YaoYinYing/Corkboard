@@ -6,6 +6,12 @@ human account sessions, and the OAuth 2.1 authorization-server core), and the co
 below are runnable after `npm run build`. Cloudflare Workers/D1/R2 and the ChatGPT Web
 plugin experience are planned and are not implemented or tested.
 
+Operator procedures are in [`runbook.md`](./runbook.md) (v1, 2026-11-05), and the
+verified/unverified criteria matrix is in [`acceptance-report.md`](./acceptance-report.md)
+(v1, 2026-11-05). This file remains the reference for environment variables, flags, the
+backup format, and proxy limits; the runbook does not duplicate them. Neither document
+claims a production or staging deployment.
+
 ## Self-hosted Node.js 24 LTS
 
 Requirements: Node.js 24, a writable data directory, and HTTPS termination by a
