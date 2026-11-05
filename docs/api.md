@@ -2,12 +2,14 @@
 
 **Status: implemented for the Node.js + SQLite vertical slices A–D, the
 bearer-authenticated MCP slice, human account sessions (slice I), the OAuth 2.1
-authorization-server core (slice J), the read-only human web dashboard (slice L,
-with metadata filters, summary search, and bounded replay in slice M; English and
-Simplified Chinese), and the operator observability slice (queue-to-commit histogram
-and authorized per-project counts).** Cloudflare Workers/D1, the ChatGPT Web plugin
-experience, dashboard write actions, and the "Planned, not implemented" section below
-are not implemented. See `IMPLEMENTATION_STATE.md` for the current evidence,
+authorization-server core (slice J), the human web dashboard (slice L, with
+metadata filters, summary search, and bounded replay in slice M; English and
+Simplified Chinese), dashboard project create/edit (slice T), and the operator
+observability slice (queue-to-commit histogram and authorized per-project
+counts).** Cloudflare
+Workers/D1, the ChatGPT Web plugin experience, the remaining dashboard write/admin
+actions, and the "Planned, not implemented" section below are not implemented. See
+`IMPLEMENTATION_STATE.md` for the current evidence,
 [`oauth.md`](./oauth.md) for the OAuth flows, and [`web-ui.md`](./web-ui.md) for the
 dashboard.
 
@@ -33,8 +35,9 @@ token; clients cannot submit an authoritative sender.
 
 A human session authenticates an **account**, never a speaker and never a credential.
 It is accepted only by the three `/api/v1/session` routes, the OAuth sign-in/consent
-pages (which may create a session), and the read-only HTML dashboard pages (which
-derive an owned-speaker viewer; see below). It cannot call `/api/v1/me`, project,
+pages (which may create a session), and the HTML dashboard pages (which derive an
+owned-speaker viewer for reads and for `project.edit` on the project edit/update
+routes; see below). It cannot call `/api/v1/me`, project,
 message, or `/mcp` routes, and a session token is not a valid bearer token. Conversely,
 bearer routes never accept a session cookie. An OAuth access token is a speaker
 credential, not a session.
@@ -183,32 +186,42 @@ denial only; per-IP volumetric limits belong at the reverse proxy. An attacker w
 an email can consume that address's login attempts; the window is small and the bucket
 refills continuously.
 
-## Human web dashboard (read-only)
+## Human web dashboard
 
-Server-rendered HTML beside the JSON API. It is not part of `/api/v1`, is
-**read-only**, and is documented in full in [`web-ui.md`](./web-ui.md).
+Server-rendered HTML beside the JSON API. It is not part of `/api/v1`, and is
+documented in full in [`web-ui.md`](./web-ui.md).
 
 | Route | Method | Notes |
 | --- | --- | --- |
 | `/login` | `GET`, `POST` | Form sign-in. `POST` requires `application/x-www-form-urlencoded` and a matching `login_csrf` hidden field plus `corkboard_web_login` cookie. `return_to` must be a same-origin path. |
 | `/` | `GET` | Projects readable by the account. |
+| `/projects/new` | `GET` | New-project form. |
+| `/projects` | `POST` | Form-encoded create; requires `application/x-www-form-urlencoded`, the `csrf_token` hidden field plus `corkboard_csrf` cookie, and an active owned speaker. `303` to the new timeline. |
 | `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`, `type`, `sender`, `unread`, and `q` use the same identifiers, bounds, and filter semantics as the REST message list below. A blank or whitespace-only value is treated as absent (blank text and number inputs reach the parser as empty values); only non-blank values are validated and can return the HTML `400` page. |
+| `/projects/:projectId` | `POST` | Form-encoded title/summary update; requires `project.edit` plus the same CSRF check. Unknown, foreign, and non-owner projects are a uniform `404`. `303` to the timeline. |
+| `/projects/:projectId/edit` | `GET` | Edit form; requires `project.edit` and is otherwise the same uniform `404`. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet. |
 
 Authorization derives a viewer from active, non-removed memberships of speakers
-owned by the session account, intersects them with `project.read` or `message.read`,
-and then calls the same service functions as the REST API. Filters and cursors are
-parsed only after that authorization; blank or whitespace-only values are dropped
-as absent before the remaining values are passed to `listMessages`;
-the page adds no SQL and never searches message bodies. A project the account
-cannot read is a uniform `404` even when filters are malformed. Every page is
-`no-store` with a strict CSP and no inline script or style. `?lang=zh` selects
-Simplified Chinese; unknown locales fall back to English and `lang` is preserved
-across filters and pager links. Filter, search, and replay behavior, including
-the summary-only `q` limit and pager end conditions, is specified in
-[`web-ui.md`](./web-ui.md). No write, member, credential, key, expiry, or admin
-action exists.
+owned by the session account, intersects them with `project.read`, `message.read`,
+or `project.edit`, and then calls the same service functions as the REST API.
+Filters and cursors are parsed only after that authorization; blank or
+whitespace-only values are dropped as absent before the remaining values are
+passed to `listMessages`; the page adds no SQL and never searches message bodies.
+A project the account cannot read or edit is a uniform `404` even when filters or
+form fields are malformed. Project title and summary reuse the 140-grapheme /
+1024-byte summary bounds; a blank summary is `NULL`. Project create provisions an
+owner membership for the account's deterministic first active owned speaker; it
+does not create a speaker, credential, or credential-to-project grant. The project
+and membership rows are two sequential inserts (the shared database port has no
+interactive transaction), so a failure between them leaves an invisible project
+with no membership; this is fail-closed and recorded as cleanup debt. Every page is `no-store` with a strict
+CSP and no inline script or style. `?lang=zh` selects Simplified Chinese; unknown
+locales fall back to English and `lang` is preserved across filters, pager links,
+and project forms. Filter, search, replay, project form, CSRF, and authorization
+behavior is specified in [`web-ui.md`](./web-ui.md). No message send, expiry,
+member, credential, key, or admin action exists.
 
 ## Endpoints
 
@@ -707,18 +720,20 @@ only and are separate from the per-credential API bucket.
 
 ## Planned, not implemented
 
-HTTP endpoints for project create/edit, membership management, and speaker/credential
-management are deferred (the CLI provides bootstrap, project-create, speaker-create,
-membership, and credential commands in slice A; project edit is not implemented). Also
+HTTP endpoints for membership management and speaker/credential management are
+deferred (the CLI provides bootstrap, project-create, speaker-create, membership, and
+credential commands in slice A). Project create/edit is implemented only as the
+HTML dashboard routes above; there is no `/api/v1` create/edit endpoint. Also
 deferred: the ChatGPT Web plugin installation/linking experience,
 attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
 metadata), account registration/invite provisioning, email verification, password
-reset, and any dashboard write UI. Human sign-in/session read/sign-out is implemented as
-described above, and a read-only dashboard (login, project list, timeline with
-metadata filters, summary-only search, and bounded cursor replay, body reveal,
-English/Simplified Chinese) is implemented per [`web-ui.md`](./web-ui.md); project
-create/edit, speaker/credential management, membership editing, and every state-changing
-dashboard action remain deferred. The bearer-authenticated `/mcp` surface is implemented
+reset, and the remaining dashboard write/admin actions. Human sign-in/session
+read/sign-out is implemented as described above; the dashboard (login, project list,
+project create/edit, timeline with metadata filters, summary-only search, and
+bounded cursor replay, body reveal, English/Simplified Chinese) is implemented per
+[`web-ui.md`](./web-ui.md); speaker/credential management, membership editing,
+project deletion/status changes, and message/expiry writes remain deferred. The
+bearer-authenticated `/mcp` surface is implemented
 (see above and `mcp.md`);
 the OAuth 2.1 authorization-server core is implemented (see above and `oauth.md`), but
 the ChatGPT Web integration is deferred and unverified. Expiry is implemented as the

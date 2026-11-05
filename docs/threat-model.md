@@ -64,26 +64,41 @@ history; audit records; administrative privilege; availability; metadata privacy
     SHA-256 is verified before decryption. Stored-content mismatch fails closed
     (`INTEGRITY_FAILURE`) with no content and no read receipt.
 
-## Human account sessions (slice I)
+## Human account sessions (slice I; dashboard project writes in slice T)
 
-A session authenticates an account to three routes only. It is **not** a speaker
-credential and grants no project, message, MCP, or administrative authority.
+A session authenticates an account to the `/api/v1/session` routes, the OAuth
+sign-in/consent pages, and the HTML dashboard pages. It is **not** a speaker
+credential: it cannot call the bearer REST data routes or `/mcp`, and it grants no
+message, receipt, member-administration, MCP, or global administrative authority.
+The dashboard derives an owned-speaker viewer for `project.read`/`message.read`,
+and, only on the project edit/update routes, for `project.edit`. Create is an
+account operation that also requires an active owned speaker.
 
 - **Session fixation.** The server always generates a new 256-bit session token at
   sign-in and the client cannot supply a session id. A pre-existing cookie value is
   ignored and replaced. Tokens are not accepted in query parameters or response bodies.
-- **CSRF.** The session cookie is `SameSite=Strict`, which blocks cross-site form and
-  fetch attachment in modern browsers, and every state-changing session request
-  (`DELETE /api/v1/session`) additionally requires `X-CSRF-Token` matching an
-  independent random value delivered in the `corkboard_csrf` cookie. The header is
-  compared as a keyed HMAC digest at fixed length; a cross-origin client that cannot
-  read the CSRF cookie cannot construct the header. Login (the only unauthenticated
-  state-changing route) requires `Content-Type: application/json`, which a simple
-  cross-site form or `text/plain` post cannot send; no CORS is enabled, so an
-  `application/json` cross-origin request cannot skip a preflight. There are no other
-  cookie-authenticated state-changing routes. A missing/wrong session is `401` before
-  the CSRF check, so the two failures are distinguishable (`401` vs `403`) but neither
-  reveals account data.
+- **CSRF.** The session cookie uses a strict SameSite policy, which blocks
+  cross-site form and fetch attachment in modern browsers, and every
+  cookie-authenticated state-changing request requires an additional anti-CSRF
+  proof. `DELETE /api/v1/session` and `POST /oauth/consent` require an
+  `X-CSRF-Token` header matching an independent random value delivered in the
+  `corkboard_csrf` cookie; the header is compared as a keyed HMAC digest at fixed
+  length. `POST /projects` and `POST /projects/:projectId` require the
+  non-HttpOnly `corkboard_csrf` cookie plus a matching hidden `csrf_token` field,
+  compared as SHA-256 digests in constant time and then verified against the
+  session's keyed CSRF verifier. The dashboard forms also reject a
+  `Sec-Fetch-Site` value other than `same-origin`/`none` and a non-null browser
+  `Origin` naming a different host, mirroring login. Login (the only
+  unauthenticated state-changing route) requires `Content-Type:
+  application/json`, which a simple cross-site form or `text/plain` post cannot
+  send; no CORS is enabled, so an `application/json` cross-origin request cannot
+  skip a preflight. Failure behavior differs by route class. For
+  `DELETE /api/v1/session` and the OAuth consent form, a missing/wrong session is
+  `401` before the CSRF check and a CSRF failure is `403`, so the two failures are
+  distinguishable but neither reveals account data. The dashboard project form
+  POSTs redirect unauthenticated requests with `303` to the login page; with a
+  valid session but a missing, duplicate, wrong, or unbound CSRF value they return
+  the `400` expired-form page and perform no project or membership write.
 - **Enumeration and timing.** Unknown email, wrong password, inactive account, and an
   account without a password hash all return the same `401 UNAUTHENTICATED`. When there
   is no stored hash the password is verified against a dummy PBKDF2 hash, so the KDF
@@ -116,11 +131,12 @@ credential and grants no project, message, MCP, or administrative authority.
   Workers isolates enforce their own buckets, and a restart clears them. Per-IP and
   volumetric controls remain the reverse proxy's responsibility.
 
-## Read-only human web dashboard (slice L)
+## Human web dashboard (slice L; project create/edit in slice T)
 
 The dashboard adds an HTML rendering surface, not a new authorization system. It
-composes the slice-I session with the existing service authorization and has no
-write actions.
+composes the slice-I session with the existing service authorization. Message
+reads remain read-only; the only project writes are create (`POST /projects`) and
+title/summary edit (`POST /projects/:projectId`).
 
 - **Stored XSS through titles, summaries, or display names.** Project titles and
   summaries, speaker display names, message summaries, reply references, and read
@@ -145,8 +161,10 @@ write actions.
   other than `same-origin`/`none` or a non-null browser `Origin` naming a different
   host; absent/`null` Origin falls back to the double-submit control.
   The other cookie-authenticated state changes are `DELETE /api/v1/session` with
-  its `X-CSRF-Token` and the OAuth consent form `POST /oauth/consent`, which uses
-  the same session-CSRF check.
+  its `X-CSRF-Token`, the OAuth consent form `POST /oauth/consent` with the same
+  session-CSRF check, and the dashboard project forms `POST /projects` and
+  `POST /projects/:projectId`, which use the session-cookie double-submit and
+  fetch-metadata checks described above.
 - **Session fixation.** Sign-in always generates a new random session token and
   ignores any pre-existing session cookie value; the dashboard never accepts a
   session id from input.
@@ -157,12 +175,24 @@ write actions.
 - **Clickjacking.** `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop the
   dashboard from being framed.
 - **Session viewer write isolation.** The session branch returns only the
-  requested `project.read`/`message.read` scope as the principal's `scopes` and
-  the authorization result's `rights`/`capabilities`. A membership may carry
-  `receipt.write` or other write capabilities, but `markRead`, `sendMessage`,
-  expiry, and every non-read scope are rejected for a session viewer. Tests assert
-  this directly, so a future dashboard write cannot silently inherit the
-  membership's write set.
+  requested scope (`project.read`, `message.read`, or `project.edit`) as the
+  principal's `scopes` and the authorization result's `rights`/`capabilities`.
+  It requires both that scope in the membership capabilities and the viewer's
+  declared scope set to contain it, so a viewer resolved for a read scope cannot
+  authorize `project.edit`. A membership may carry `receipt.write`,
+  `message.send`, or member capabilities, but those scopes are rejected for a
+  session viewer. Tests assert a `message.read` viewer cannot authorize
+  `project.edit`, write a receipt, send a message, or run expiry.
+- **Project create/edit.** Create requires an active account with an active owned
+  speaker. It inserts the project and an owner membership for the deterministic
+  first owned speaker (ordered by `created_at`, then `id`) and creates no speaker,
+  credential, or credential-to-project grant. Edit and update require
+  `project.edit`; an unknown, foreign, or non-owner-member project is the same
+  uniform `404` as an unreadable project. Title/summary validation lives in the
+  service. The project and membership inserts are sequential because the shared
+  database port has no interactive transaction, so a failure between them can
+  leave an invisible project with no membership. That is fail-closed, exposes no
+  data, and is recorded as cleanup debt.
 - **Enumeration and cross-account reads.** The viewer is derived only from active,
   non-removed memberships of speakers owned by the session account. A project
   without a qualifying membership is a uniform `404`, whether it is missing,

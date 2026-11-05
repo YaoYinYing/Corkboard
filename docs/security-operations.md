@@ -160,15 +160,19 @@ written) is not prevented; no stronger guarantee is claimed. See
   double-submit value). There is no Origin allowlist; the session cookie's
   `SameSite=Strict` covers subsequent requests.
 - **What a session can do.** Read the signed-in account (`GET /api/v1/session`), sign
-  out (`DELETE`), and open the read-only HTML dashboard, where it is resolved to an
-  owned speaker's active membership for `project.read`/`message.read`. It cannot call
-  the `/api/v1` data routes, send, mark read, expire, or call MCP, and it is not
-  accepted as a bearer token. Speaker write operations still require a separately
-  issued scoped credential.
+  out (`DELETE`), and open the HTML dashboard. Dashboard reads resolve an owned
+  speaker's active membership for `project.read`/`message.read`; the project
+  edit/update routes resolve it for `project.edit`; and `POST /projects` creates a
+  project plus an owner membership for the deterministic first active owned speaker,
+  which requires an active owned speaker but no project membership yet. It cannot
+  call the `/api/v1` data routes, including send, mark read, and expiry, or call MCP,
+  and it is not accepted as a bearer token. Speaker write operations still require a
+  separately issued scoped credential.
 - **Lifetime and revocation.** A session expires after **12 hours absolute** and after
   **30 minutes idle** (refreshed lazily by accepted session-using requests:
-  `GET /api/v1/session` and authenticated dashboard page GETs; `DELETE` validates and
-  revokes without refreshing). Sign-out sets
+  `GET /api/v1/session` and authenticated dashboard requests, including page GETs and
+  the project form POSTs `POST /projects` and `POST /projects/:projectId`; `DELETE`
+  validates and revokes without refreshing). Sign-out sets
   `revoked_at` for that row only and clears the cookies; other sessions stay valid.
   Revoking an account/session directly in SQL takes effect on the next request because
   no authorization cache exists.
@@ -754,8 +758,9 @@ operator snapshot or to any unauthenticated aggregate.
 - Human sessions are implemented as server-side rows with 12-hour absolute / 30-minute
   idle expiry and per-session revocation. The OAuth 2.1 authorization-server core is
   implemented (dynamic public clients, PKCE, rotating refresh tokens, revocation), but
-  the ChatGPT Web plugin experience is not implemented or verified. There is no
-  write/admin browser UI; slice L provides a read-only dashboard (project list,
-  timeline, explicit body reveal) on the same session auth. Registration, email
+  the ChatGPT Web plugin experience is not implemented or verified. Slice L
+  provides the dashboard (project list, timeline, explicit body reveal) and slice
+  T adds project create/edit on the same session auth; message, membership,
+  credential, key, and expiry administration remain CLI/API-only. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not
   perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.

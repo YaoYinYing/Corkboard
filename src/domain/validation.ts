@@ -95,6 +95,24 @@ export function validateSummary(value: unknown): string {
   return summary;
 }
 
+// Project metadata reuses the message-summary bounds rather than introducing a
+// second length rule. A title is required and must not be blank; a blank
+// summary is stored as SQL NULL.
+export function validateProjectTitle(value: unknown): string {
+  const title = requireString(value, "title");
+  if (title.trim() === "") {
+    throw new AppError("VALIDATION_ERROR", "title must not be blank");
+  }
+  return validateSummary(title);
+}
+
+export function validateProjectSummary(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const summary = requireString(value, "summary");
+  if (summary.trim() === "") return null;
+  return validateSummary(summary);
+}
+
 export function validateText(value: unknown): string {
   const text = requireString(value, "text");
   const graphemes = graphemeCount(text);

@@ -1,15 +1,17 @@
-# Read-only human web dashboard
+# Human web dashboard
 
-**Status: implemented locally for Node.js + SQLite (vertical slices L and M, with
-the approved design system tokens applied).**
-The dashboard is server-rendered HTML for a signed-in **account**. It is strictly
-read-only: there is no send, edit, membership, credential, key, expiry,
-moderation, or administrative action. It is not a SPA and ships no frontend
-framework, build step, or client script. Slice M adds metadata filters, a
-summary-only search, bounded cursor replay, and a CSS-only responsive layout.
+**Status: implemented locally for Node.js + SQLite (vertical slices L and M plus
+dashboard project create/edit, with the approved design system tokens applied).**
+The dashboard is server-rendered HTML for a signed-in **account**. Message reads,
+filters, replay, and body reveal remain read-only. The only project writes are create
+and edit; there is no message send, expiry, membership, credential, key, moderation,
+or administrative action. It is not a SPA and ships no frontend framework, build
+step, or client script. Slice M adds metadata filters, a summary-only search, bounded
+cursor replay, and a CSS-only responsive layout.
 
-Cloudflare Workers/D1 parity, account registration/recovery, and any write UI
-remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
+Cloudflare Workers/D1 parity, account registration/recovery, and the remaining
+write/admin surfaces (messages, membership, credentials, keys, expiry) remain
+unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 
 ## Routes
 
@@ -17,8 +19,12 @@ remain unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 | --- | --- | --- |
 | `/login` | `GET` | Sign-in form; issues a login CSRF cookie. |
 | `/login` | `POST` | Form-encoded sign-in with double-submit CSRF and normalized `return_to`. |
-| `/` | `GET` | Readable project list for the account. |
+| `/` | `GET` | Readable project list for the account, with a link to the create form. |
+| `/projects/new` | `GET` | New-project form. |
+| `/projects` | `POST` | Form-encoded project create; redirects after POST. |
 | `/projects/:projectId` | `GET` | Message timeline in ascending server `seq`, with filters, summary search, and cursor replay. |
+| `/projects/:projectId` | `POST` | Form-encoded project edit; redirects after POST. |
+| `/projects/:projectId/edit` | `GET` | Edit form for an owner. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet; constant body, no user input. |
 
@@ -134,6 +140,62 @@ rail: `.error` uses `--danger`, while the tombstone `.state.expired` and the
 active-filter `.filter-state` use `--border`. Project status uses `--success`
 only together with the word "Active", never colour alone.
 
+## Project create and edit
+
+`GET /projects/new` renders a no-JavaScript form with a title and an optional
+summary. `POST /projects` creates the project and redirects (`303`) to its
+timeline. `GET /projects/:projectId/edit` renders the same form with the current
+values, and `POST /projects/:projectId` updates only `title` and `summary` and
+redirects (`303`) to the timeline. The dashboard (`/`) links to the create form;
+the timeline links to the edit form only when the viewer holds `project.edit`.
+The timeline has no create link. Forms preserve `?lang=zh`, including the
+`303` redirect after a successful create or edit.
+
+Both forms submit `application/x-www-form-urlencoded` with a hidden `csrf_token`.
+The request body is bounded to 64 KiB, the same limit as the login form. The
+`title` field is required and must be 1–140 Unicode graphemes and at most 1024
+UTF-8 bytes; a title that is empty or whitespace-only is rejected. The optional
+`summary` uses the same bounds; an empty or whitespace-only summary is stored as
+`NULL`. Project name and summary text are otherwise preserved as entered. Title
+and summary validation lives in the service, using the domain validators in
+`src/domain/validation.ts`; the route maps a service `VALIDATION_ERROR` to the
+safe form error. The HTML `maxlength="140"` is only a convenience and is not the
+authority.
+
+Create requires an authenticated, active account that owns at least one active
+speaker. The service creates the project with that account as
+`owner_account_id` and adds an owner membership — all seven capabilities — for the
+deterministic first active owned speaker (ordered by `created_at`, then `id`, the
+same ordering used to resolve the read viewer). This is what makes the new
+project visible and editable in the dashboard. Create does not create a speaker,
+a credential, or a credential-to-project grant, and there is no member editor in
+this slice. An account with no active owned speaker gets the safe invalid-request
+form error and no project is written.
+
+The project and membership rows are two sequential inserts, because the shared
+SQLite/D1 database port has no interactive transaction. A crash or failure
+between them leaves an invisible project row with no membership. That state is
+fail-closed: no account gains read or edit authority over it and no data is
+exposed, but the orphan is not cleaned up automatically and is recorded as
+cleanup debt.
+
+Edit and update require the owner role as the service layer defines it for
+project administration: `project.edit` in the active membership, the same
+capability that guards message-body expiry. A member without `project.edit`, a
+foreign account, and an unknown project all receive the same uniform `404` page
+as an unreadable project; the page does not reveal whether the project exists.
+The handler resolves the project-edit viewer and parses the body only after that
+authorization; `updateProject` re-authorizes `project.edit` at the service layer
+before validating or writing.
+
+Invalid input re-renders the form with HTTP `400`, an error summary carrying
+`role="alert"`, the localized message "Check the project details and try again.",
+and the entered values escaped in place. Duplicate `title` or `summary` fields
+take this invalid-input path. A duplicate `csrf_token` is rejected earlier by
+the CSRF check as the "form expired" page, not as an invalid field. Internal
+validation messages, SQL, and exception text are never rendered. A successful
+write is not a message send and creates no receipt.
+
 ## Authorization model
 
 A session authenticates an **account**, not a speaker. For every data read the
@@ -160,11 +222,16 @@ The session viewer has no credential and no `credential_project_grants` row.
 `authorizeProject` therefore takes an explicit session branch that checks the
 same project, membership, speaker-ownership, and account state, requires the
 requested scope in the parsed membership capabilities, and returns **only that
-read scope** as the session principal's `scopes` and the authorization result's
-`rights`/`capabilities`. It never returns or authorizes the membership's receipt
-or write capabilities, and it does not substitute a speaker credential or its
-scopes. The `sessionViewer` flag is set in code only and is
-never read from request input; a bearer principal never has it.
+requested scope** as the session principal's `scopes` and the authorization
+result's `rights`/`capabilities`. The branch also requires the viewer's own
+declared scope set to contain the requested scope, so a viewer resolved for
+`message.read` cannot reuse the branch to authorize `project.edit` merely because
+its membership has that capability. The session branch permits `project.read`,
+`message.read`, and `project.edit`; it never authorizes or returns
+`message.send`, `receipt.write`, `member.read`, or `member.manage`, and it does
+not substitute a speaker credential or its scopes. The `sessionViewer` flag is
+set in code only and is never read from request input; a bearer principal never
+has it.
 
 Timeline filters, search, and cursors add no authorization decision. The viewer
 is resolved and the project is authorized before any query parameter is parsed;
@@ -180,17 +247,21 @@ Fail-closed behavior:
   the page does not reveal whether a project exists.
 - A removed membership, a non-member account, a foreign account's project, an
   inactive project/speaker/account, or no eligible speaker is `404`.
+- A member without `project.edit` is also `404` on the edit form and update,
+  even though the read timeline remains available to that member.
 - A revoked, expired, idle-expired, or malformed session redirects to
   `/login?return_to=<normalized current path>`.
 - Body reveal uses `getMessageBody`, which re-authorizes `message.read` after
   decryption and before returning plaintext. An expired body is `410`; an
   integrity failure is a generic safe error page with no partial content.
 
-No dashboard request performs a project, message, membership, credential, or
-read-receipt write, and none marks a message read. The only writes are the session
-row inserted by `POST /login` and the `sessions.last_seen_at` refresh performed by
-authenticated page requests. Read receipt identities are displayed only through
-`listReadReceipts`, which authorizes `message.read` and re-applies the project filter.
+The message read surface performs no project, message, credential, or read-receipt
+write, and no page marks a message read. The writes are the session row inserted
+by `POST /login`, the `sessions.last_seen_at` refresh on authenticated page
+requests, `POST /projects` (project plus owner-membership insert), and
+`POST /projects/:projectId` (project title/summary update). Read receipt identities
+are displayed only through `listReadReceipts`, which authorizes `message.read` and
+re-applies the project filter.
 
 ## Rendering and security
 
@@ -249,6 +320,25 @@ login CSRF cookie, and returns `303` to the normalized target. Login attempts
 share the existing per-email-digest rate limiter and return `429` with
 `Retry-After` on the HTML error page.
 
+### Project form CSRF
+
+The create and edit forms use the session CSRF value issued at sign-in: the
+non-`HttpOnly` `corkboard_csrf` cookie plus a hidden `csrf_token` field. `POST`
+requires the form media type, checks the same `Sec-Fetch-Site`/`Origin` fetch
+metadata as login, requires exactly one non-empty hidden value, compares the
+hidden value and cookie as SHA-256 digests in constant time, and then verifies
+the presented value against the keyed CSRF verifier on the session row. A
+missing, duplicate, or mismatched value, a missing cookie, or a cross-site fetch
+metadata assertion returns the form with HTTP `400` and the "form expired"
+message and performs no project or membership write. Session authentication has
+already run and may refresh `sessions.last_seen_at`; that bookkeeping is the only
+write before the check. The form body is read and bounded before the CSRF check.
+The CSRF check runs before project input validation and before any project
+service call. The edit/update route authorizes the project-edit viewer before
+parsing the body, so an unreadable project remains the uniform `404` even for a
+malformed or oversized body; create has no project to authorize and reads the
+bounded form before checking CSRF.
+
 ## Internationalization
 
 - Resource catalogs for English and Simplified Chinese cover every UI string.
@@ -279,8 +369,10 @@ share the existing per-email-digest rate limiter and return `429` with
 
 ## Limits
 
-- Read-only by design: no write, send, edit, membership, credential, key,
-  expiry, or admin action.
+- Project write scope only: create and edit `title`/`summary`. No message send,
+  expiry, membership editor, credential/key management, registration, or admin
+  action. Creating a project does not create a speaker or credential; an account
+  without an active owned speaker cannot create one from this UI.
 - The project list is bounded to the API maximum (100 per request) and has no UI
   pagination; the REST API still paginates.
 - Search covers message **summaries only**. There is no body search, full-text
@@ -292,15 +384,16 @@ share the existing per-email-digest rate limiter and return `429` with
   arbitrary chosen speaker. It never writes a receipt.
 - Replay offers bounded previous/next pages plus "jump to latest"; there is no
   time scrubber, date filter, infinite scroll, or client-side history.
-- No attachments, file previews, or image rendering; no project create/edit,
-  speaker directory, credential management, membership editor, registration,
-  email verification, password reset, or account settings.
+- No attachments, file previews, or image rendering; no speaker directory,
+  credential management, membership editor, project deletion/status change,
+  registration, email verification, password reset, or account settings.
 - No client-side navigation or live updates; every action is a full page load.
   Responsible JavaScript frameworks, bundlers, and frontend dependencies are not
   used.
-- Server-side rendering only; there is no CSRF protection for state-changing
-  dashboard actions because there are none (login is the only form and uses the
-  double-submit plus fetch-metadata checks). The filter form is `GET` only.
+- Server-side rendering only. Login and the project create/edit forms are
+  `POST` and use the double-submit plus fetch-metadata checks above; the filter
+  form is `GET` only. Project forms have no JavaScript validation, autosave,
+  optimistic update, or client-side routing.
 - Accessibility evidence consists of committed DOM assertions, semantic markup,
   and manual browser inspection. No automated axe audit has been run and no WCAG
   conformance level is claimed. No exact-revision browser matrix or touch-device

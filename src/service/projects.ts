@@ -1,7 +1,11 @@
-// Project enumeration shared by REST and MCP. Membership, credential grant, and
-// scope checks are identical to every other project-scoped path; the only
-// difference is the transport that renders the result.
+// Project enumeration shared by REST and MCP, plus the dashboard's project
+// metadata create/edit. Membership, credential grant, and scope checks are
+// identical to every other project-scoped path; the only difference is the
+// transport that renders the result.
+import { randomBase64url } from "../auth/credentials.ts";
+import { SCOPES } from "../domain/authz.ts";
 import { AppError } from "../domain/errors.ts";
+import { validateProjectSummary, validateProjectTitle } from "../domain/validation.ts";
 import {
   authorizeProject,
   parseScopeJson,
@@ -223,6 +227,101 @@ export async function getProjectStats(
     },
     unread: Number(unread?.unread ?? 0),
   };
+}
+
+export interface ProjectInput {
+  title: string;
+  summary: string | null;
+}
+
+export interface ProjectEditView {
+  id: string;
+  title: string;
+  summary: string | null;
+}
+
+// Dashboard creation is an account operation. The account must be active and
+// own an active speaker; that deterministic first speaker (the same ordering as
+// `resolveSessionViewer`) receives the owner membership, because the dashboard
+// lists and authorizes projects only through memberships. No speaker or
+// credential is created, and no credential grant is inferred.
+export async function createProject(
+  deps: ServiceDeps,
+  principal: Principal,
+  input: ProjectInput,
+): Promise<ProjectSummary> {
+  if (principal.sessionViewer !== true) throw new AppError("FORBIDDEN");
+  const title = validateProjectTitle(input.title);
+  const summary = validateProjectSummary(input.summary);
+
+  const account = await deps.db.first<{ status: string }>(
+    "SELECT status FROM accounts WHERE id = ?",
+    [principal.accountId],
+  );
+  if (account === undefined || account.status !== "active") {
+    throw new AppError("FORBIDDEN");
+  }
+  const speaker = await deps.db.first<{ id: string }>(
+    `SELECT id FROM speakers
+      WHERE owner_account_id = ? AND status = 'active'
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1`,
+    [principal.accountId],
+  );
+  if (speaker === undefined) {
+    throw new AppError("VALIDATION_ERROR", "an active owned speaker is required");
+  }
+
+  const id = `proj_${randomBase64url(16)}`;
+  const now = deps.now().toISOString();
+  await deps.db.run(
+    `INSERT INTO projects (id, owner_account_id, title, summary, status, next_seq, created_at)
+     VALUES (?, ?, ?, ?, 'active', 0, ?)`,
+    [id, principal.accountId, title, summary, now],
+  );
+  await deps.db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    [id, speaker.id, JSON.stringify(SCOPES), now],
+  );
+
+  return { id, title, summary, status: "active", created_at: now };
+}
+
+// The edit form reads through the same `project.edit` authorization as the
+// update. A member without the owner capability, a foreign project, and an
+// unknown project are all NOT_FOUND.
+export async function getProjectForEdit(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+): Promise<ProjectEditView> {
+  await authorizeProject(deps, principal, projectId, "project.edit");
+  const row = await deps.db.first<ProjectEditView>(
+    "SELECT id, title, summary FROM projects WHERE id = ? AND status = 'active'",
+    [projectId],
+  );
+  if (row === undefined) throw new AppError("NOT_FOUND");
+  return row;
+}
+
+export async function updateProject(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+  input: ProjectInput,
+): Promise<ProjectEditView> {
+  // Authorization precedes validation so a denied caller cannot probe input.
+  await authorizeProject(deps, principal, projectId, "project.edit");
+  const title = validateProjectTitle(input.title);
+  const summary = validateProjectSummary(input.summary);
+  const result = await deps.db.run(
+    `UPDATE projects SET title = ?, summary = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'`,
+    [title, summary, deps.now().toISOString(), projectId],
+  );
+  if (result.changes === 0) throw new AppError("NOT_FOUND");
+  return { id: projectId, title, summary };
 }
 
 export async function listProjects(

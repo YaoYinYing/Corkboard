@@ -544,8 +544,8 @@ async function route(
     return handleOAuthRoute(deps, request, url, oauth, loginLimiter, requestId);
   }
 
-  // Read-only human dashboard pages render HTML and use the account session,
-  // never a bearer credential. They share the login attempt limiter.
+  // Human dashboard pages render HTML and use the account session, never a
+  // bearer credential. They share the login attempt limiter.
   if (isWebPath(segments)) {
     return handleWebRoute(deps, request, url, loginLimiter);
   }

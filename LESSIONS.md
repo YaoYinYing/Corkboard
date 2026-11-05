@@ -6,6 +6,27 @@ actionable and prune stale ones.
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 
+## 2026-11-04 — A narrow session viewer must check its own scopes, not only membership capabilities
+
+- **Failure:** Extending the session-viewer authorization branch to permit
+  `project.edit` let a viewer resolved for `message.read` reach the owner capability
+  because the branch checked only the membership capability set. The existing
+  "session viewer can read but can never authorize a write scope" test failed when
+  `expireMessageBody` (which requires `project.edit`) stopped rejecting the read
+  viewer.
+- **Reproducer:** Resolve `resolveSessionViewer(..., "message.read")`, then call
+  `authorizeProject(fx.deps, viewer, projectId, "project.edit")` or
+  `expireMessageBody` with that viewer. Before the fix the membership's all-scope
+  capability authorized the write; after the fix it is `NOT_FOUND`.
+- **Fix:** `authorizeSessionProject` requires both the requested scope in the
+  membership capabilities and `principal.scopes.has(scope)`. The resolver already
+  returns exactly the requested scope, so the declared set is the viewer's real
+  authority.
+- **Prevents:** Privilege amplification from a narrowly resolved session viewer when
+  a new scope is added to the branch.
+- **Remove when:** session viewers are replaced by an explicit capability handle that
+  cannot re-derive a broader scope from membership state.
+
 ## 2026-11-04 — A blank query value from a GET form is not invalid input
 
 - **Failure:** The dashboard's filter form submits its blank text and number inputs

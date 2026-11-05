@@ -1,7 +1,6 @@
-// Server-rendered HTML helpers for the read-only human dashboard. Every dynamic
-// value must pass through escapeHtml before it reaches the document. The strict
-// CSP forbids scripts entirely; styling comes only from the fixed same-origin
-// stylesheet.
+// Server-rendered HTML helpers for the human dashboard. Every dynamic value must
+// pass through escapeHtml before it reaches the document. The strict CSP forbids
+// scripts entirely; styling comes only from the fixed same-origin stylesheet.
 
 /** The only CSP served with dashboard pages and the fixed stylesheet. */
 export const WEB_CSP =

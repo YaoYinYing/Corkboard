@@ -31,10 +31,10 @@ export interface Principal {
   accountId: string;
   scopes: ReadonlySet<Scope>;
   /**
-   * Set only by `resolveSessionViewer`/`sessionAccountPrincipal` for the
-   * read-only human dashboard. It is never derived from request input and never
-   * set by `authenticateBearer`. The flag, not the synthetic credential id,
-   * selects the session authorization branch.
+   * Set only by `resolveSessionViewer`/`sessionAccountPrincipal` for the human
+   * dashboard. It is never derived from request input and never set by
+   * `authenticateBearer`. The flag, not the synthetic credential id, selects the
+   * session authorization branch.
    */
   sessionViewer?: true;
 }
@@ -44,8 +44,8 @@ export interface ProjectAccess {
   rights: Set<Scope>;
   /**
    * The active membership's capability set, filtered to known identifiers.
-   * A session viewer receives only the requested read authority because its
-   * surface is read-only.
+   * A session viewer receives only the requested scope because its authority is
+   * resolved per request.
    */
   capabilities: Set<Scope>;
 }
@@ -156,22 +156,26 @@ export async function authenticateBearer(
 }
 
 // A session viewer is an account viewing as one of its owned speakers. Its
-// authority is exactly the requested read scope, never the membership's write
+// authority is exactly the requested scope, never the membership's other
 // capabilities. It has no credential, grant, or credential-scope intersection:
 // the human authenticated an account, not a speaker credential. Any membership
 // that cannot grant the requested scope is NOT_FOUND so a project the account
-// cannot read is indistinguishable from a missing project.
+// cannot read or edit is indistinguishable from a missing project.
 async function authorizeSessionProject(
   deps: ServiceDeps,
   principal: Principal,
   projectId: string,
   scope: Scope,
 ): Promise<ProjectAccess> {
-  // The session surface is read-only. Even if a future caller passed another
-  // scope, the session viewer can never authorize a write.
-  if (scope !== "project.read" && scope !== "message.read") {
+  // The session surface permits project metadata edits but never message
+  // writes, receipts, or member administration.
+  if (scope !== "project.read" && scope !== "message.read" && scope !== "project.edit") {
     throw new AppError("NOT_FOUND");
   }
+  // The viewer carries only the authority it was resolved for. A read viewer
+  // cannot re-use this branch to authorize project.edit merely because the
+  // underlying membership has the capability.
+  if (!principal.scopes.has(scope)) throw new AppError("NOT_FOUND");
   const project = await deps.db.first<{ status: string }>(
     "SELECT status FROM projects WHERE id = ?",
     [projectId],
@@ -193,17 +197,17 @@ async function authorizeSessionProject(
 
   const capabilities = parseScopeJson(membership.capabilities);
   if (!capabilities.has(scope)) throw new AppError("NOT_FOUND");
-  // Do not return the membership's write capabilities as rights. A caller such
+  // Do not return the membership's other capabilities as rights. A caller such
   // as markRead checks access.rights for receipt.write, so returning the full
-  // set would turn the read-only viewer into a receipt writer.
-  const readAuthority = new Set<Scope>([scope]);
+  // set would turn the narrow session viewer into a receipt writer.
+  const sessionAuthority = new Set<Scope>([scope]);
   authorizeProjectAccess({
     isMember: true,
     membershipRemovedAt: null,
-    rights: readAuthority,
+    rights: sessionAuthority,
     scope,
   });
-  return { rights: readAuthority, capabilities: new Set<Scope>([scope]) };
+  return { rights: sessionAuthority, capabilities: new Set<Scope>([scope]) };
 }
 
 // Decision order: unknown/inactive project, missing membership, or an inactive
@@ -311,16 +315,16 @@ export function sessionAccountPrincipal(session: {
 
 // Derives the deterministic viewer for one project: the first active,
 // non-removed membership (ordered by speaker creation) among speakers owned by
-// the account whose capability set includes the requested read scope. The
-// union across owned speakers is "at least one owned speaker grants it"; a
-// project with no such membership is NOT_FOUND, never FORBIDDEN.
+// the account whose capability set includes the requested scope. The union
+// across owned speakers is "at least one owned speaker grants it"; a project
+// with no such membership is NOT_FOUND, never FORBIDDEN.
 export async function resolveSessionViewer(
   deps: ServiceDeps,
   session: { sessionId: string; accountId: string },
   projectId: string,
   scope: Scope,
 ): Promise<Principal> {
-  if (scope !== "project.read" && scope !== "message.read") {
+  if (scope !== "project.read" && scope !== "message.read" && scope !== "project.edit") {
     throw new AppError("NOT_FOUND");
   }
   const rows = await deps.db.all<{ speaker_id: string; capabilities: string }>(

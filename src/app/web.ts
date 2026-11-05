@@ -1,7 +1,8 @@
-// Read-only human dashboard. Server-rendered HTML only: no inline script, no
-// script at all, no message HTML. Authorization is derived from the account
-// session through `resolveSessionViewer` and then the existing service
-// functions run unchanged. There are no write actions on this surface.
+// Human dashboard. Server-rendered HTML only: no inline script, no script at
+// all, no message HTML. Message reads are read-only; the only writes are project
+// create and title/summary edit. Authorization is derived from the account
+// session through `resolveSessionViewer` and then the existing service functions
+// run unchanged.
 import { randomBase64url } from "../auth/credentials.ts";
 import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 import { AppError, RateLimitError } from "../domain/errors.ts";
@@ -20,13 +21,21 @@ import {
   type MessageMetadata,
   type ReadReceipt,
 } from "../service/messages.ts";
-import { listProjects } from "../service/projects.ts";
+import {
+  createProject,
+  getProjectForEdit,
+  listProjects,
+  updateProject,
+} from "../service/projects.ts";
 import {
   authenticateSession,
   loginAccount,
   recordLoginRateLimited,
   sessionTokenFromCookie,
   validateSession,
+  verifySessionCsrf,
+  CSRF_COOKIE_NAME,
+  type SessionPrincipal,
 } from "../service/sessions.ts";
 import {
   clearedWebLoginCsrfCookie,
@@ -66,6 +75,16 @@ const EN = {
   languageSwitch: "Language",
   dashboardTitle: "Projects",
   dashboardEmpty: "No projects are available for this account.",
+  newProjectTitle: "New project",
+  editProjectTitle: "Edit project",
+  projectTitleLabel: "Title",
+  projectSummaryLabel: "Summary",
+  projectSummaryHint: "Optional, up to 140 characters.",
+  createProjectAction: "Create project",
+  saveProjectAction: "Save changes",
+  cancelAction: "Cancel",
+  projectFormError: "Check the project details and try again.",
+  formExpired: "The form expired. Please try again.",
   memberLabel: "Member",
   statusLabel: "Status",
   statusActive: "Active",
@@ -127,6 +146,16 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   languageSwitch: "语言",
   dashboardTitle: "项目",
   dashboardEmpty: "此账户没有可查看的项目。",
+  newProjectTitle: "新建项目",
+  editProjectTitle: "编辑项目",
+  projectTitleLabel: "标题",
+  projectSummaryLabel: "说明",
+  projectSummaryHint: "可选，最多 140 个字符。",
+  createProjectAction: "创建项目",
+  saveProjectAction: "保存更改",
+  cancelAction: "取消",
+  projectFormError: "请检查项目信息后重试。",
+  formExpired: "表单已过期，请重试。",
   memberLabel: "成员",
   statusLabel: "状态",
   statusActive: "活跃",
@@ -253,7 +282,7 @@ const WEB_CSS = `:root {
 body, .body { font-family: var(--font-sans); font-size: 15px; line-height: 22px; font-weight: 400; }
 body { margin: 0 auto; max-width: 60rem; padding: var(--space-4); background: var(--surface); color: var(--ink); }
 a { color: var(--link); }
-a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, pre:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, pre:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .skip-link { position: absolute; left: -9999px; top: 0; background: var(--surface); padding: var(--space-2); }
 .skip-link:focus { left: var(--space-4); z-index: 1; }
 .site-header { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: baseline; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: var(--space-2); }
@@ -278,8 +307,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .error { border: 1px solid var(--border); border-left: 4px solid var(--danger); padding: var(--space-2) var(--space-3); color: var(--danger); }
 .body-text { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--ink); }
 .code, code, .body-text { font-family: var(--font-mono); font-size: 15px; line-height: 22px; font-weight: 400; }
-input, select, button { font: inherit; max-width: 100%; }
-input, select { background: var(--surface-raised); color: var(--ink); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.35rem; }
+input, select, textarea, button { font: inherit; max-width: 100%; }
+input, select, textarea { background: var(--surface-raised); color: var(--ink); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.35rem; }
 button { padding: var(--space-2) var(--space-3); border: 1px solid var(--brand); border-radius: var(--radius-sm); background: var(--brand); color: var(--brand-ink); font-weight: 600; }
 .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); margin-block: var(--space-2) var(--space-4); }
 .filter-field { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; margin: 0; }
@@ -291,6 +320,9 @@ button { padding: var(--space-2) var(--space-3); border: 1px solid var(--brand);
 .filter-state { border-left: 4px solid var(--border); padding-left: var(--space-3); overflow-wrap: anywhere; }
 .filter-state code { overflow-wrap: anywhere; }
 .pager { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
+.project-form { display: grid; gap: var(--space-3); max-width: 40rem; border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-4); margin-block: var(--space-2) var(--space-4); }
+.project-form textarea { width: 100%; min-width: 0; resize: vertical; }
+.form-actions { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: center; margin: 0; }
 @media (min-width: 48rem) { .message dl { grid-template-columns: max-content 1fr max-content 1fr; } }
 @media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
 `;
@@ -540,6 +572,82 @@ function singleFormParam(form: URLSearchParams, name: string): string | null {
   return values[0] ?? null;
 }
 
+function projectFormValues(
+  form: URLSearchParams,
+): { title: string; summary: string } | null {
+  const title = form.getAll("title");
+  const summary = form.getAll("summary");
+  if (title.length > 1 || summary.length > 1) return null;
+  return { title: title[0] ?? "", summary: summary[0] ?? "" };
+}
+
+// The session CSRF value is the non-HttpOnly cookie issued at sign-in. The
+// form echoes it in a hidden field; a cross-site sender can neither read the
+// cookie nor have it attached to a strict-SameSite POST. The keyed verifier on
+// the session row is the authority, and the cookie equality keeps this a true
+// double submit rather than a bearer value in a form field.
+async function verifyFormCsrf(
+  deps: ServiceDeps,
+  principal: SessionPrincipal,
+  request: Request,
+  form: URLSearchParams,
+): Promise<boolean> {
+  if (!sameOriginFormPost(request)) return false;
+  const cookieCsrf = cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME);
+  const values = form.getAll("csrf_token");
+  if (cookieCsrf === undefined || values.length !== 1) return false;
+  const formCsrf = values[0] ?? "";
+  if (formCsrf === "") return false;
+  const [presented, cookieDigest] = await Promise.all([
+    sha256Hex(ENCODER.encode(formCsrf)),
+    sha256Hex(ENCODER.encode(cookieCsrf)),
+  ]);
+  if (!digestsEqual(presented, cookieDigest)) return false;
+  try {
+    await verifySessionCsrf(deps, principal, formCsrf);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+interface ProjectFormOptions {
+  action: string;
+  headingKey: MessageKey;
+  submitKey: MessageKey;
+  cancelHref: string;
+  csrf: string;
+  values: { title: string; summary: string };
+  status: number;
+  errorKey?: MessageKey;
+}
+
+function renderProjectForm(
+  locale: Locale,
+  url: URL,
+  options: ProjectFormOptions,
+): Response {
+  const error =
+    options.errorKey === undefined
+      ? ""
+      : `<p class="error" role="alert">${escapeHtml(t(locale, options.errorKey))}</p>`;
+  const content = `<h1>${escapeHtml(t(locale, options.headingKey))}</h1>
+${error}<form class="project-form" method="post" action="${escapeHtml(options.action)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
+<p class="filter-field"><label for="project-title">${escapeHtml(t(locale, "projectTitleLabel"))}</label>
+<input id="project-title" name="title" type="text" maxlength="140" required value="${escapeHtml(options.values.title)}"></p>
+<p class="filter-field"><label for="project-summary">${escapeHtml(t(locale, "projectSummaryLabel"))}</label>
+<textarea id="project-summary" name="summary" rows="4" maxlength="140" aria-describedby="project-summary-hint">${escapeHtml(options.values.summary)}</textarea>
+<span class="hint" id="project-summary-hint">${escapeHtml(t(locale, "projectSummaryHint"))}</span></p>
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, options.submitKey))}</button>
+<a href="${escapeHtml(options.cancelHref)}">${escapeHtml(t(locale, "cancelAction"))}</a></p>
+</form>`;
+  return htmlResponse(
+    options.status,
+    renderPage(locale, url, t(locale, options.headingKey), content),
+  );
+}
+
 function renderLogin(
   locale: Locale,
   url: URL,
@@ -695,8 +803,177 @@ ${result.projects
 </ul>`;
 
   const content = `<h1>${escapeHtml(t(locale, "dashboardTitle"))}</h1>
+<p><a href="/projects/new${localeQuery(locale)}">${escapeHtml(t(locale, "newProjectTitle"))}</a></p>
 ${projects}`;
   return htmlResponse(200, renderPage(locale, url, t(locale, "dashboardTitle"), content));
+}
+
+function projectFormResponse(
+  locale: Locale,
+  url: URL,
+  request: Request,
+  options: {
+    action: string;
+    headingKey: MessageKey;
+    submitKey: MessageKey;
+    cancelHref: string;
+    values: { title: string; summary: string };
+    status: number;
+    errorKey?: MessageKey;
+  },
+): Response {
+  return renderProjectForm(locale, url, {
+    ...options,
+    csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+  });
+}
+
+async function handleNewProject(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+): Promise<Response> {
+  await authenticateSession(deps, sessionTokenFromCookie(request.headers.get("cookie")));
+  return projectFormResponse(locale, url, request, {
+    action: `/projects${localeQuery(locale)}`,
+    headingKey: "newProjectTitle",
+    submitKey: "createProjectAction",
+    cancelHref: `/${localeQuery(locale)}`,
+    values: { title: "", summary: "" },
+    status: 200,
+  });
+}
+
+async function handleProjectCreate(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const form = await readForm(request);
+  const parsed = projectFormValues(form);
+  const values = parsed ?? { title: "", summary: "" };
+  const formOptions = {
+    action: `/projects${localeQuery(locale)}`,
+    headingKey: "newProjectTitle" as const,
+    submitKey: "createProjectAction" as const,
+    cancelHref: `/${localeQuery(locale)}`,
+    values,
+  };
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return projectFormResponse(locale, url, request, {
+      ...formOptions,
+      status: 400,
+      errorKey: "formExpired",
+    });
+  }
+  if (parsed === null) {
+    return projectFormResponse(locale, url, request, {
+      ...formOptions,
+      status: 400,
+      errorKey: "projectFormError",
+    });
+  }
+  try {
+    const project = await createProject(deps, sessionAccountPrincipal(session), parsed);
+    return redirect(
+      303,
+      `/projects/${encodeURIComponent(project.id)}${localeQuery(locale)}`,
+    );
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VALIDATION_ERROR") {
+      return projectFormResponse(locale, url, request, {
+        ...formOptions,
+        status: 400,
+        errorKey: "projectFormError",
+      });
+    }
+    throw error;
+  }
+}
+
+async function handleEditProject(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  const project = await getProjectForEdit(deps, viewer, projectId);
+  return projectFormResponse(locale, url, request, {
+    action: `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`,
+    headingKey: "editProjectTitle",
+    submitKey: "saveProjectAction",
+    cancelHref: `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`,
+    values: { title: project.title, summary: project.summary ?? "" },
+    status: 200,
+  });
+}
+
+async function handleProjectUpdate(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  // Authorize and select the viewer before parsing the body, so an unreadable
+  // project is the uniform 404 regardless of payload shape.
+  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  const form = await readForm(request);
+  const parsed = projectFormValues(form);
+  const values = parsed ?? { title: "", summary: "" };
+  const formOptions = {
+    action: `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`,
+    headingKey: "editProjectTitle" as const,
+    submitKey: "saveProjectAction" as const,
+    cancelHref: `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`,
+    values,
+  };
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return projectFormResponse(locale, url, request, {
+      ...formOptions,
+      status: 400,
+      errorKey: "formExpired",
+    });
+  }
+  if (parsed === null) {
+    return projectFormResponse(locale, url, request, {
+      ...formOptions,
+      status: 400,
+      errorKey: "projectFormError",
+    });
+  }
+  try {
+    await updateProject(deps, viewer, projectId, parsed);
+    return redirect(
+      303,
+      `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`,
+    );
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VALIDATION_ERROR") {
+      return projectFormResponse(locale, url, request, {
+        ...formOptions,
+        status: 400,
+        errorKey: "projectFormError",
+      });
+    }
+    throw error;
+  }
 }
 
 function renderFilterForm(
@@ -905,8 +1182,17 @@ async function handleTimeline(
     projectId,
     result.messages.map((message) => message.messageId),
   );
+  // Owners see the edit link; a non-owner's NOT_FOUND simply omits it. This
+  // does not change the read authorization already performed above.
+  let editLink = "";
+  try {
+    await resolveSessionViewer(deps, session, projectId, "project.edit");
+    editLink = ` <span aria-hidden="true">·</span> <a href="/projects/${escapeHtml(projectId)}/edit${localeQuery(locale)}">${escapeHtml(t(locale, "editProjectTitle"))}</a>`;
+  } catch (error) {
+    if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
+  }
 
-  const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a></p>
+  const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a>${editLink}</p>
 <h1>${escapeHtml(project.title)}</h1>
 ${renderFilterForm(locale, projectId, url, filters, limit)}
 <h2>${escapeHtml(t(locale, "timelineTitle"))}</h2>
@@ -985,10 +1271,18 @@ function webError(locale: Locale, url: URL, error: unknown): Response {
 export function isWebPath(segments: readonly string[]): boolean {
   if (segments.length === 0) return true;
   if (segments.length === 1 && segments[0] === "login") return true;
+  if (segments.length === 1 && segments[0] === "projects") return true;
   if (segments.length === 2 && segments[0] === "static" && segments[1] === "app.css") {
     return true;
   }
   if (segments.length === 2 && segments[0] === "projects") return true;
+  if (
+    segments.length === 3 &&
+    segments[0] === "projects" &&
+    segments[2] === "edit"
+  ) {
+    return true;
+  }
   return (
     segments.length === 5 &&
     segments[0] === "projects" &&
@@ -1022,9 +1316,30 @@ export async function handleWebRoute(
       if (method !== "GET") return methodNotAllowed(locale, url, "GET");
       return stylesheetResponse();
     }
+    if (segments.length === 1 && segments[0] === "projects") {
+      if (method !== "POST") return methodNotAllowed(locale, url, "POST");
+      return await handleProjectCreate(deps, request, url, locale);
+    }
     if (segments.length === 2 && segments[0] === "projects") {
+      if (segments[1] === "new") {
+        if (method !== "GET") return methodNotAllowed(locale, url, "GET");
+        return await handleNewProject(deps, request, url, locale);
+      }
+      if (method === "GET") {
+        return await handleTimeline(deps, request, url, locale, segments[1] ?? "");
+      }
+      if (method === "POST") {
+        return await handleProjectUpdate(deps, request, url, locale, segments[1] ?? "");
+      }
+      return methodNotAllowed(locale, url, "GET, POST");
+    }
+    if (
+      segments.length === 3 &&
+      segments[0] === "projects" &&
+      segments[2] === "edit"
+    ) {
       if (method !== "GET") return methodNotAllowed(locale, url, "GET");
-      return await handleTimeline(deps, request, url, locale, segments[1] ?? "");
+      return await handleEditProject(deps, request, url, locale, segments[1] ?? "");
     }
     if (
       segments.length === 5 &&

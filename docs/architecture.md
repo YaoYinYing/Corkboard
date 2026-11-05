@@ -335,30 +335,34 @@ ChatGPT Web account linking, registration, email verification, and
 password reset remain unimplemented. The OAuth authorization-server core is described
 below; a session is not an OAuth grant and an OAuth access token is not a session.
 
-## Read-only human dashboard
+## Human dashboard
 
 `src/app/web.ts` is a platform-neutral HTML surface beside the JSON handlers. It
 adds no storage, crypto, or authorization primitive; it composes the session layer
 with the existing service functions.
 
-- **Routes and rendering.** `handlers.ts` sends `/`, `/login`,
-  `/projects/:projectId`, `/projects/:projectId/messages/:messageId/body`, and
-  `/static/app.css` to `handleWebRoute`. Pages are rendered on the server from
+- **Routes and rendering.** `handlers.ts` sends `/`, `/login`, `/projects`
+  (`POST`), `/projects/new`, `/projects/:projectId` (`GET` and `POST`),
+  `/projects/:projectId/edit`, `/projects/:projectId/messages/:messageId/body`,
+  and `/static/app.css` to `handleWebRoute`. Pages are rendered on the server from
   string templates. `src/app/html.ts` owns the single `escapeHtml` boundary and
   the strict dashboard CSP. There is no client script or inline style, and the
   stylesheet is a constant same-origin body.
 - **Session to viewer.** `resolveSessionViewer` selects active, non-removed
   memberships in the target project whose speaker is owned by the session account,
   where project, speaker, and account are active, and whose capability set includes
-  the required read. It returns the normal `Principal` shape with
-  `sessionViewer: true`, a synthetic `session:` credential id, and only the requested
-  read scope as `scopes`. `sessionAccountPrincipal` is the same shape without a
-  selected speaker for the cross-project listing.
+  the requested scope (`project.read`, `message.read`, or, for the project form,
+  `project.edit`). It returns the normal `Principal` shape with
+  `sessionViewer: true`, a synthetic `session:` credential id, and only that
+  requested scope as `scopes`. `sessionAccountPrincipal` is the same shape without
+  a selected speaker for the cross-project listing.
 - **Authorization reuse.** `authorizeProject` has an explicit session-viewer branch
   that re-checks project, membership, speaker ownership, and account state, then
-  authorizes the requested read capability and returns only that scope as
-  `rights`/`capabilities`; write scopes are never returned. It does not create or
-  consult a credential or grant. The `sessionViewer` flag is set only by
+  checks both the viewer's declared scope set and the membership capability set
+  before returning only the requested scope as `rights`/`capabilities`. The branch
+  permits `project.read`, `message.read`, and `project.edit`; message sends,
+  receipts, and member scopes are never authorized or returned. It does not create
+  or consult a credential or grant. The `sessionViewer` flag is set only by
   the resolver and is never derived from request input; bearer authentication never
   sets it. Bearer authorization is unchanged.
 - **Service reuse.** `listProjects` branches to a session listing that spans all
@@ -370,10 +374,15 @@ with the existing service functions.
   authorization, so there is no dashboard-only SQL path and no body search. To
   make pager end conditions exact, `listMessages` fetches one row beyond `limit`
   and returns an internal `hasMore` boolean; REST and MCP serialize only their
-  existing fields, so their list semantics are unchanged. No dashboard route
-  performs a project, message, membership, credential, or receipt write. `POST
-  /login` inserts the session row and authenticated page requests refresh
-  `sessions.last_seen_at`; those are the only writes.
+  existing fields, so their list semantics are unchanged. `POST /projects` inserts
+  the project and an owner membership for the account's deterministic first active
+  owned speaker; `POST /projects/:projectId` updates title and summary after
+  re-authorizing `project.edit`. The two create inserts are sequential because the
+  database port has no interactive transaction, so a failure between them leaves an
+  invisible project with no membership; that is fail-closed and is recorded as
+  cleanup debt. No dashboard route writes a message, credential, grant, or receipt.
+  `POST /login` inserts the session row and authenticated page requests refresh
+  `sessions.last_seen_at`.
 - **Uniform denial.** The resolver and the session authorization branch return
   `NOT_FOUND` whenever the account has no qualifying membership, so an unreadable
   project is indistinguishable from a missing one. A revoked or expired session is

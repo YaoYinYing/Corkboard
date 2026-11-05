@@ -8,11 +8,11 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix on `slice-filter-final`, not pushed |
-| Last pushed checkpoint | `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`) on `origin/main`; earlier pushed checkpoints include `58e548f` (UI design tokens, tree `09e3153`) and `f06c4ac` (slice O, tree `496e9ae`) |
-| Branch | `main` at `48c52bc` (`origin/main`); slice-S filter fix on `slice-filter-final`, not pushed; slice-O P2 fixes on `slice-o-p2-fixes`, not pushed |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) on `slice-admin`, not pushed |
+| Last pushed checkpoint | `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`) on `origin/main`; earlier pushed checkpoints include `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `main` at `704d115` (`origin/main`); slice-T project create/edit on `slice-admin`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
-| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
+| Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, membership, credentials, keys, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
 ## Checkpoint history
 
@@ -42,7 +42,8 @@ as the work it describes.
 | `c2aec6a` | `e45dcdf` | Slice N final: pre-snapshot DB cap, bounded listings, redaction/sanitization, mid-stream digest cap, docs | security PASS; contract PASS (delta on `e45dcdf`) |
 | `f06c4ac` | `496e9ae` | Vertical slice O: sanitized authentication/OAuth lifecycle audit events | security PASS; contract PASS (two independent audits) |
 | `4a8bde8` | `dd59cff` | Vertical slice R: queue-to-commit histogram and authorized per-project counts (audited candidate, replayed onto `58e548f`) | audits PASS; P2 fixes squashed as `48c52bc` (tree `dba3fab`) on `origin/main` |
-| `b4666e2` | `a56d6d4` | Slice S: dashboard filter blank-value fix; blank/whitespace-only values are absent for `type`, `sender`, `limit`, `unread`, and both cursors instead of `400`; `q=` was already tolerated; non-blank validation is unchanged | evidence: GitHub Issue #6, real browser at `58e548f`; regression test `blank timeline filter values are absent, not invalid`; squashed into this checkpoint; `npm ci` exit 0; `npm run check` exit 0 (392 tests: 391 pass, 1 skipped live-D1); `npm run build` exit 0 |
+| `704d115` | `7a13790` | Slice S: dashboard filter blank-value fix; blank/whitespace-only values are absent for `type`, `sender`, `limit`, `unread`, and both cursors instead of `400`; `q=` was already tolerated; non-blank validation is unchanged | pushed on `origin/main` (tree `7a13790e6585a608fddbad71ec6fa24ec7446689`); evidence: GitHub Issue #6, real browser at `58e548f`; regression test `blank timeline filter values are absent, not invalid`; `npm ci` exit 0; `npm run check` exit 0 (392 tests: 391 pass, 1 skipped live-D1); `npm run build` exit 0 |
+| this checkpoint | commit trailer | Slice T: dashboard project create/edit (`GET /projects/new`, `POST /projects`, `GET /projects/:projectId/edit`, `POST /projects/:projectId`), session double-submit CSRF, owner-only `project.edit`, en/zh forms, 303 redirects | independent review PENDING; `npm ci` exit 0; `npm run check` exit 0 (402 tests: 401 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; on `slice-admin`, not pushed |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
@@ -1146,6 +1147,68 @@ pushed.
   finalization performed by another process is not observed. The stats endpoint is a
   current-row snapshot (not time-windowed), counts project rows so its cost grows with
   project size, and is not wired into the dashboard UI. D1 remains unexecuted.
+
+## Vertical slice T — dashboard project create/edit (base `704d115`)
+
+- **Checkpoint.** One squashed checkpoint on `slice-admin`, based on `704d115`. Not
+  pushed. Independent review PENDING. The commit trailer records the final `Tree-SHA`;
+  both audits passed on the pre-squash combined tree and the P2 doc/test fixes are
+  included here.
+- **Scope.** Adds four server-rendered routes: `GET /projects/new`, `POST /projects`,
+  `GET /projects/:projectId/edit`, and `POST /projects/:projectId`. The forms use the
+  existing account-session authentication, the 64 KiB form-body limit, the session
+  `corkboard_csrf` cookie plus a hidden field (double submit), the same
+  `Sec-Fetch-Site`/`Origin` checks as login, and `303` redirect-after-POST to the
+  project timeline. English and Simplified Chinese strings and token-only CSS are
+  included. The dashboard links to the create form and the timeline links to the edit
+  form for owners. There is still no inline script or style.
+- **Create authorization and writes.** Create requires an active session account with
+  at least one active owned speaker. The service inserts the project with
+  `owner_account_id` set to the session account and inserts an owner membership (all
+  seven capabilities) for the deterministic first active owned speaker
+  (`created_at ASC, id ASC`, the same ordering as `resolveSessionViewer`). This is what
+  makes the project visible and editable. It creates no speaker, credential, or
+  credential-to-project grant. An account with no active owned speaker gets the safe
+  invalid-request form error and no project is written.
+- **Edit/update authorization.** The handler resolves a session viewer for
+  `project.edit` before reading the body, then `getProjectForEdit`/`updateProject`
+  re-authorize `project.edit` at the service layer. This is the same owner capability
+  that guards message expiry. Unknown, foreign, and non-owner-member projects are the
+  uniform `404`; the read timeline remains available to an ordinary member.
+  `authorizeSessionProject` now permits `project.edit` and additionally requires
+  `principal.scopes.has(scope)`, so a viewer resolved for `message.read` cannot use the
+  branch to authorize the owner path. It still never authorizes `message.send`,
+  `receipt.write`, `member.read`, or `member.manage`.
+- **Validation and rendering.** `validateProjectTitle` and `validateProjectSummary`
+  reuse the existing summary bounds (1–140 graphemes, ≤1024 UTF-8 bytes); titles are
+  required and non-blank, and a blank summary stores `NULL`. Validation lives in the
+  service; the route maps `VALIDATION_ERROR` to a safe form error. Invalid or
+  duplicate `title`/`summary` fields re-render HTTP `400` with an escaped
+  `role="alert"` error summary and the entered values; a duplicate `csrf_token` is
+  rejected earlier as the "form expired" page. Internal validation text and SQL are
+  never rendered. Project metadata is escaped in the form, dashboard, and timeline.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (secret scan, history scan,
+  typecheck, 402 tests: 401 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0.
+  New integration tests cover create/edit happy paths, visibility, the dashboard
+  create link and the absence of a timeline create link, `?lang=zh` redirect
+  preservation, owner membership capabilities and deterministic first-speaker
+  selection, no implicit speaker/credential/grant creation, cleared summary,
+  CSRF missing/wrong/no-cookie/cross-origin/`Sec-Fetch-Site`/unbound-matching-pair
+  failures with no write, unauthenticated redirects, uniform 404 for
+  foreign/unknown/non-owner projects (including authorization before body parsing),
+  create without an owned speaker, duplicate title/summary/`csrf_token` handling,
+  invalid fields with escaped preservation, XSS-safe rendering, oversized bodies,
+  and HTML that exposes no session token or credential content while request logs
+  carry no content or CSRF value.
+- **Limitations.** There is no speaker creation, credential management, grant editor,
+  membership editor, project deletion, or status change in this UI. Create is two
+  sequential inserts (the `SqlDatabase` port has no interactive transaction), so a
+  failure between them could leave an invisible project with no membership; it is
+  fail-closed and does not expose data. The owner role is the `project.edit`
+  membership capability, not a separate role column. An account with no active owned
+  speaker cannot create a project here. Cloudflare/D1 parity and a real-browser
+  visual pass for the new forms remain unexecuted; visual evidence is a separate
+  step.
 
 ## Implemented and verified at this tree
 

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createApp } from "../../src/app/handlers.ts";
+import { createApp, type RequestLogEntry } from "../../src/app/handlers.ts";
 import { WEB_LOGIN_CSRF_COOKIE } from "../../src/app/cookies.ts";
 import { WEB_CSP } from "../../src/app/html.ts";
 import { generateSpeakerToken, hashSecret } from "../../src/auth/credentials.ts";
@@ -135,6 +135,46 @@ async function loginAs(
     cookie: `${SESSION_COOKIE_NAME}=${session}`,
     response,
   };
+}
+
+async function loginAsWithCsrf(
+  app: App,
+  email: string,
+  password: string,
+): Promise<{ cookie: string; csrf: string }> {
+  const loginCsrf = await loginFormCsrf(app);
+  const response = await loginSubmit(app, loginCsrf, {
+    return_to: "/",
+    login_csrf: loginCsrf,
+    email,
+    password,
+  });
+  assert.equal(response.status, 303);
+  const cookies = response.headers.getSetCookie();
+  const session = cookieValue(cookies, SESSION_COOKIE_NAME);
+  const csrf = cookieValue(cookies, CSRF_COOKIE_NAME);
+  assert.ok(session);
+  assert.ok(csrf);
+  return {
+    cookie: `${SESSION_COOKIE_NAME}=${session}; ${CSRF_COOKIE_NAME}=${csrf}`,
+    csrf,
+  };
+}
+
+function postForm(
+  app: App,
+  path: string,
+  cookie: string | undefined,
+  fields: Record<string, string>,
+): Promise<Response> {
+  return call(app, path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      ...(cookie === undefined ? {} : { cookie }),
+    },
+    body: new URLSearchParams(fields).toString(),
+  });
 }
 
 async function getPage(
@@ -1460,4 +1500,508 @@ test("the Node adapter buffers the login form body and serves the full page flow
   });
   assert.equal(chinese.status, 200);
   assert.ok((await chinese.text()).includes("项目"));
+});
+
+test("an authenticated account creates a project and the owner can edit it", async (t) => {
+  const { fx, app } = await withApp(t);
+  await addPasswordAccount(fx, "acct_c", "c@example.test", "create secret");
+  await fx.addSpeaker("spk_c", "acct_c");
+  const { cookie, csrf } = await loginAsWithCsrf(app, "c@example.test", "create secret");
+
+  const form = await getPage(app, "/projects/new", cookie);
+  assert.equal(form.status, 200);
+  assertHardened(form.response);
+  assert.ok(form.html.includes('name="csrf_token"'));
+  assert.ok(form.html.includes('method="post" action="/projects"'));
+  assert.ok(form.html.includes('<label for="project-title">'));
+  assert.ok(form.html.includes('<label for="project-summary">'));
+  assert.ok(form.html.includes('<a href="/">Cancel</a>'));
+
+  const chinese = await getPage(app, "/projects/new?lang=zh", cookie);
+  assert.equal(chinese.status, 200);
+  assert.match(chinese.html, /<html lang="zh-Hans" dir="ltr">/);
+  assert.ok(chinese.html.includes("新建项目"));
+  assert.ok(chinese.html.includes('method="post" action="/projects?lang=zh"'));
+
+  const countRows = async (table: string): Promise<number> =>
+    (await fx.db.all<{ id: number }>(`SELECT 1 AS id FROM ${table}`)).length;
+  const before = {
+    speakers: await countRows("speakers"),
+    credentials: await countRows("credentials"),
+    grants: await countRows("credential_project_grants"),
+  };
+
+  const created = await postForm(app, "/projects", cookie, {
+    csrf_token: csrf,
+    title: "Created project",
+    summary: "Created summary",
+  });
+  assert.equal(created.status, 303);
+  const location = created.headers.get("location");
+  assert.ok(location);
+  assert.match(location, /^\/projects\/proj_[A-Za-z0-9_-]+$/);
+  const projectId = location.slice("/projects/".length);
+
+  const membership = await fx.db.first<{ capabilities: string }>(
+    "SELECT capabilities FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
+    [projectId, "spk_c"],
+  );
+  assert.ok(membership);
+  assert.deepEqual([...JSON.parse(membership.capabilities)].sort(), [...SCOPES].sort());
+  // Create writes the project and owner membership only; no speaker,
+  // credential, or credential-to-project grant is created implicitly.
+  assert.deepEqual(
+    {
+      speakers: await countRows("speakers"),
+      credentials: await countRows("credentials"),
+      grants: await countRows("credential_project_grants"),
+    },
+    before,
+  );
+
+  const dashboard = await getPage(app, "/", cookie);
+  assert.equal(dashboard.status, 200);
+  assert.ok(dashboard.html.includes("Created project"));
+  assert.ok(dashboard.html.includes("Created summary"));
+  assert.ok(dashboard.html.includes('href="/projects/new"'));
+
+  const timeline = await getPage(app, location, cookie);
+  assert.equal(timeline.status, 200);
+  assert.ok(timeline.html.includes("Created project"));
+  assert.ok(timeline.html.includes(`href="/projects/${projectId}/edit"`));
+  // Create is linked from the dashboard, not from the timeline.
+  assert.equal(timeline.html.includes('href="/projects/new"'), false);
+
+  const edit = await getPage(app, `/projects/${projectId}/edit`, cookie);
+  assert.equal(edit.status, 200);
+  assertHardened(edit.response);
+  assert.ok(edit.html.includes('value="Created project"'));
+  assert.ok(edit.html.includes("Created summary"));
+
+  const updated = await postForm(app, `/projects/${projectId}`, cookie, {
+    csrf_token: csrf,
+    title: "Edited project",
+    summary: "Edited summary",
+  });
+  assert.equal(updated.status, 303);
+  assert.equal(updated.headers.get("location"), `/projects/${projectId}`);
+  const row = await fx.db.first<{ title: string; summary: string | null }>(
+    "SELECT title, summary FROM projects WHERE id = ?",
+    [projectId],
+  );
+  assert.deepEqual(row, { title: "Edited project", summary: "Edited summary" });
+
+  const localizedCreate = await postForm(app, "/projects?lang=zh", cookie, {
+    csrf_token: csrf,
+    title: "本地化创建",
+  });
+  assert.equal(localizedCreate.status, 303);
+  const localizedLocation = localizedCreate.headers.get("location");
+  assert.ok(localizedLocation);
+  assert.match(localizedLocation, /^\/projects\/proj_[A-Za-z0-9_-]+\?lang=zh$/);
+});
+
+test("project create requires an active owned speaker and writes nothing otherwise", async (t) => {
+  const { fx, app } = await withApp(t);
+  await addPasswordAccount(fx, "acct_ns", "ns@example.test", "no speaker secret");
+  const { cookie, csrf } = await loginAsWithCsrf(app, "ns@example.test", "no speaker secret");
+  const response = await postForm(app, "/projects", cookie, {
+    csrf_token: csrf,
+    title: "No owner",
+  });
+  assert.equal(response.status, 400);
+  assert.ok((await response.text()).includes('role="alert"'));
+  assert.equal((await fx.db.all<{ id: string }>("SELECT id FROM projects")).length, 0);
+});
+
+test("create assigns the owner membership to the deterministic first owned speaker", async (t) => {
+  const { fx, app } = await withApp(t);
+  await addPasswordAccount(fx, "acct_two", "two@example.test", "two speakers");
+  await fx.db.run(
+    `INSERT INTO speakers (id, owner_account_id, display_name, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["spk_later", "acct_two", "Later", "2026-11-03T12:00:00.000Z"],
+  );
+  await fx.db.run(
+    `INSERT INTO speakers (id, owner_account_id, display_name, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["spk_first", "acct_two", "First", "2026-11-03T11:00:00.000Z"],
+  );
+  const { cookie, csrf } = await loginAsWithCsrf(app, "two@example.test", "two speakers");
+
+  const created = await postForm(app, "/projects", cookie, {
+    csrf_token: csrf,
+    title: "Two speakers",
+  });
+  assert.equal(created.status, 303);
+  const location = created.headers.get("location");
+  assert.ok(location);
+  const projectId = location.slice("/projects/".length);
+  const memberships = await fx.db.all<{ speaker_id: string; capabilities: string }>(
+    "SELECT speaker_id, capabilities FROM project_memberships WHERE project_id = ?",
+    [projectId],
+  );
+  assert.equal(memberships.length, 1);
+  assert.equal(memberships[0]?.speaker_id, "spk_first");
+  assert.deepEqual([...JSON.parse(memberships[0]?.capabilities ?? "[]")].sort(), [...SCOPES].sort());
+});
+
+test("project update redirects after POST and persists a cleared summary", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicProject(fx);
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "correct horse");
+
+  const updated = await postForm(app, "/projects/proj_a", cookie, {
+    csrf_token: csrf,
+    title: "Owner title",
+    summary: "   ",
+  });
+  assert.equal(updated.status, 303);
+  assert.equal(updated.headers.get("location"), "/projects/proj_a");
+
+  const row = await fx.db.first<{ title: string; summary: string | null; updated_at: string | null }>(
+    "SELECT title, summary, updated_at FROM projects WHERE id = ?",
+    ["proj_a"],
+  );
+  assert.equal(row?.title, "Owner title");
+  assert.equal(row?.summary, null);
+  assert.ok(row?.updated_at);
+
+  const localized = await postForm(app, "/projects/proj_a?lang=zh", cookie, {
+    csrf_token: csrf,
+    title: "本地化标题",
+    summary: "本地化说明",
+  });
+  assert.equal(localized.status, 303);
+  assert.equal(localized.headers.get("location"), "/projects/proj_a?lang=zh");
+
+  const dashboard = await getPage(app, "/", cookie);
+  assert.ok(dashboard.html.includes("本地化标题"));
+});
+
+test("project write forms require a matching double-submit CSRF value", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicProject(fx);
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "correct horse");
+  const before = await fx.db.first<{ title: string }>(
+    "SELECT title FROM projects WHERE id = ?",
+    ["proj_a"],
+  );
+  const projectCount = async (): Promise<number> =>
+    (await fx.db.all<{ id: string }>("SELECT id FROM projects")).length;
+
+  const missing = await postForm(app, "/projects/proj_a", cookie, { title: "Hijacked" });
+  assert.equal(missing.status, 400);
+  const missingHtml = await missing.text();
+  assert.ok(missingHtml.includes('role="alert"'));
+  assert.ok(missingHtml.includes("The form expired"));
+
+  const wrong = await postForm(app, "/projects/proj_a", cookie, {
+    csrf_token: "wrong-value",
+    title: "Hijacked",
+  });
+  assert.equal(wrong.status, 400);
+
+  const noCookie = await postForm(app, "/projects/proj_a", cookie.split("; ")[0], {
+    csrf_token: csrf,
+    title: "Hijacked",
+  });
+  assert.equal(noCookie.status, 400);
+
+  const crossSite = await call(app, "/projects/proj_a", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie,
+      origin: "https://evil.example",
+    },
+    body: new URLSearchParams({ csrf_token: csrf, title: "Hijacked" }).toString(),
+  });
+  assert.equal(crossSite.status, 400);
+
+  const crossSiteFetch = await call(app, "/projects/proj_a", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie,
+      "sec-fetch-site": "cross-site",
+    },
+    body: new URLSearchParams({ csrf_token: csrf, title: "Hijacked" }).toString(),
+  });
+  assert.equal(crossSiteFetch.status, 400);
+
+  // A matching cookie/form pair is still rejected when it is not the session's
+  // CSRF value: the double submit is only the outer check.
+  const sessionOnly = cookie.split("; ")[0];
+  const unboundValue = "unbound-double-submit-value";
+  const unbound = await call(app, "/projects/proj_a", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: `${sessionOnly}; ${CSRF_COOKIE_NAME}=${unboundValue}`,
+    },
+    body: new URLSearchParams({ csrf_token: unboundValue, title: "Hijacked" }).toString(),
+  });
+  assert.equal(unbound.status, 400);
+  assert.ok((await unbound.text()).includes("The form expired"));
+
+  const after = await fx.db.first<{ title: string }>(
+    "SELECT title FROM projects WHERE id = ?",
+    ["proj_a"],
+  );
+  assert.deepEqual(after, before);
+
+  const countBeforeCreate = await projectCount();
+  const createMissing = await postForm(app, "/projects", cookie, {
+    title: "Should not exist",
+  });
+  assert.equal(createMissing.status, 400);
+  assert.equal(await projectCount(), countBeforeCreate);
+});
+
+test("unauthenticated project write routes redirect to the login form", async (t) => {
+  const { app } = await withApp(t);
+
+  for (const [path, method] of [
+    ["/projects/new", "GET"],
+    ["/projects", "POST"],
+    ["/projects/proj_a", "POST"],
+    ["/projects/proj_a/edit", "GET"],
+  ] as const) {
+    const response = await call(app, path, {
+      method,
+      ...(method === "POST"
+        ? {
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: "title=x",
+          }
+        : {}),
+    });
+    assert.equal(response.status, 303, `${method} ${path}`);
+    const location = response.headers.get("location");
+    assert.ok(location);
+    assert.ok(location.startsWith("/login?return_to=%2Fprojects"), `${method} ${path}`);
+    assert.equal(new URL(location, "http://localhost").origin, "http://localhost");
+  }
+});
+
+test("foreign, unknown, and non-owner project edit/update are uniform 404", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicProject(fx);
+  await basicProject(fx, "acct_d", "spk_d", "proj_d", "d@example.test", "d secret");
+  await fx.db.run("UPDATE projects SET title = ? WHERE id = ?", [
+    "SECRET OWNER TITLE",
+    "proj_a",
+  ]);
+
+  // Foreign account: the project exists but is indistinguishable from a miss.
+  const other = await loginAsWithCsrf(app, "d@example.test", "d secret");
+  for (const path of ["/projects/proj_a/edit", "/projects/proj_missing/edit"]) {
+    const page = await getPage(app, path, other.cookie);
+    assert.equal(page.status, 404, path);
+    assert.equal(page.html.includes("SECRET OWNER TITLE"), false, path);
+  }
+  const foreignUpdate = await postForm(app, "/projects/proj_a", other.cookie, {
+    csrf_token: other.csrf,
+    title: "Stolen",
+  });
+  assert.equal(foreignUpdate.status, 404);
+  // Authorization precedes body parsing: a malformed body changes nothing.
+  const foreignJson = await call(app, "/projects/proj_a", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: other.cookie },
+    body: "not json",
+  });
+  assert.equal(foreignJson.status, 404);
+
+  // An active member without project.edit is a 404 on the owner-only routes,
+  // while the read-only timeline remains available.
+  await addPasswordAccount(fx, "acct_m", "m@example.test", "member secret");
+  await fx.addSpeaker("spk_m", "acct_m");
+  await fx.addMembership("proj_a", "spk_m", [
+    "project.read",
+    "message.read",
+    "message.send",
+    "receipt.write",
+  ]);
+  const member = await loginAsWithCsrf(app, "m@example.test", "member secret");
+  const memberTimeline = await getPage(app, "/projects/proj_a", member.cookie);
+  assert.equal(memberTimeline.status, 200);
+  // The timeline renders the edit link only for a project.edit viewer.
+  assert.equal(memberTimeline.html.includes('href="/projects/proj_a/edit"'), false);
+  const memberEdit = await getPage(app, "/projects/proj_a/edit", member.cookie);
+  assert.equal(memberEdit.status, 404);
+  assert.equal(memberEdit.html.includes("SECRET OWNER TITLE"), false);
+  const memberUpdate = await postForm(app, "/projects/proj_a", member.cookie, {
+    csrf_token: member.csrf,
+    title: "Member edit",
+  });
+  assert.equal(memberUpdate.status, 404);
+
+  const row = await fx.db.first<{ title: string }>(
+    "SELECT title FROM projects WHERE id = ?",
+    ["proj_a"],
+  );
+  assert.deepEqual(row, { title: "SECRET OWNER TITLE" });
+});
+
+test("invalid project input re-renders the form with escaped values and no write", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicProject(fx);
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "correct horse");
+
+  for (const fields of [
+    { title: "", summary: "keep me" },
+    { title: "   ", summary: "" },
+    { title: "a".repeat(141), summary: "" },
+    { title: "valid", summary: "b".repeat(141) },
+  ]) {
+    const response = await postForm(app, "/projects/proj_a", cookie, {
+      csrf_token: csrf,
+      ...fields,
+    });
+    assert.equal(response.status, 400, JSON.stringify(fields).slice(0, 40));
+    const html = await response.text();
+    assert.ok(html.includes('role="alert"'), "error summary");
+    assert.ok(html.includes("Check the project details"), "localized error");
+    assert.ok(html.includes(`value="${fields.title}"`), "title preserved");
+    assert.ok(html.includes(`>${fields.summary}</textarea>`), "summary preserved");
+    assert.equal(html.includes("<script>alert"), false);
+  }
+
+  const duplicateBody =
+    new URLSearchParams({ csrf_token: csrf, title: "one", summary: "" }).toString() +
+    "&title=two";
+  const duplicate = await call(app, "/projects/proj_a", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie,
+    },
+    body: duplicateBody,
+  });
+  assert.equal(duplicate.status, 400);
+
+  const duplicateSummaryBody =
+    new URLSearchParams({ csrf_token: csrf, title: "valid", summary: "one" }).toString() +
+    "&summary=two";
+  const duplicateSummary = await call(app, "/projects/proj_a", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie,
+    },
+    body: duplicateSummaryBody,
+  });
+  assert.equal(duplicateSummary.status, 400);
+  assert.ok((await duplicateSummary.text()).includes("Check the project details"));
+
+  const duplicateCsrfBody =
+    new URLSearchParams({ csrf_token: csrf, title: "valid", summary: "" }).toString() +
+    `&csrf_token=${encodeURIComponent(csrf)}`;
+  const duplicateCsrf = await call(app, "/projects/proj_a", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie,
+    },
+    body: duplicateCsrfBody,
+  });
+  assert.equal(duplicateCsrf.status, 400);
+  assert.ok((await duplicateCsrf.text()).includes("The form expired"));
+
+  const row = await fx.db.first<{ title: string }>(
+    "SELECT title FROM projects WHERE id = ?",
+    ["proj_a"],
+  );
+  assert.deepEqual(row, { title: "proj_a" });
+
+  // Valid input is still escaped everywhere it is rendered.
+  const xssTitle = `"><script>alert(1)</script>`;
+  const xssSummary = `<b>summary</b> & "quoted"`;
+  const accepted = await postForm(app, "/projects/proj_a", cookie, {
+    csrf_token: csrf,
+    title: xssTitle,
+    summary: xssSummary,
+  });
+  assert.equal(accepted.status, 303);
+  const edit = await getPage(app, "/projects/proj_a/edit", cookie);
+  assert.ok(edit.html.includes("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
+  assert.ok(edit.html.includes("&lt;b&gt;summary&lt;/b&gt; &amp; &quot;quoted&quot;"));
+  assert.equal(edit.html.includes("<script>alert(1)</script>"), false);
+  const dashboard = await getPage(app, "/", cookie);
+  assert.equal(dashboard.html.includes("<script>alert(1)</script>"), false);
+});
+
+test("oversized project form bodies fail safely without a write", async (t) => {
+  const { fx, app } = await withApp(t);
+  await addPasswordAccount(fx, "acct_o", "o@example.test", "oversize secret");
+  await fx.addSpeaker("spk_o", "acct_o");
+  const { cookie, csrf } = await loginAsWithCsrf(app, "o@example.test", "oversize secret");
+
+  const response = await call(app, "/projects", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie,
+    },
+    body: `csrf_token=${encodeURIComponent(csrf)}&title=${"a".repeat(70_000)}`,
+  });
+  assert.equal(response.status, 413);
+  const html = await response.text();
+  assert.ok(html.includes('role="alert"'));
+  assert.equal(html.includes("a".repeat(1000)), false);
+
+  const projects = await fx.db.all<{ id: string }>("SELECT id FROM projects");
+  assert.equal(projects.length, 0);
+});
+
+test("project write HTML exposes no session token or credential content and logs carry no content or CSRF value", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  const entries: RequestLogEntry[] = [];
+  const app = createApp(fx.deps, {
+    loginRateLimit: { perMinute: 600, burst: 100 },
+    logger: (entry) => entries.push(entry),
+  });
+  await addPasswordAccount(fx, "acct_l", "l@example.test", "log secret");
+  await fx.addSpeaker("spk_l", "acct_l");
+  const { cookie, csrf } = await loginAsWithCsrf(app, "l@example.test", "log secret");
+
+  const title = "SECRET-TITLE-<b>";
+  const summary = "SECRET-SUMMARY-CONTENT";
+  const created = await postForm(app, "/projects", cookie, {
+    csrf_token: csrf,
+    title,
+    summary,
+  });
+  assert.equal(created.status, 303);
+  const projectId = created.headers.get("location")?.slice("/projects/".length);
+  assert.ok(projectId);
+
+  for (const path of [
+    "/projects/new",
+    "/",
+    `/projects/${projectId}/edit`,
+    `/projects/${projectId}`,
+  ]) {
+    const page = await getPage(app, path, cookie);
+    assert.equal(page.status, 200, path);
+    const sessionToken = cookie.slice(
+      `${SESSION_COOKIE_NAME}=`.length,
+      cookie.indexOf(";"),
+    );
+    assert.equal(page.html.includes(sessionToken), false, path);
+    assert.equal(page.html.includes("log secret"), false, path);
+  }
+
+  const edit = await getPage(app, `/projects/${projectId}/edit`, cookie);
+  assert.ok(edit.html.includes("SECRET-TITLE-&lt;b&gt;"));
+  assert.equal(edit.html.includes("SECRET-TITLE-<b>"), false);
+
+  const logs = JSON.stringify(entries);
+  for (const forbidden of [title, summary, csrf, "l@example.test", "log secret"]) {
+    assert.equal(logs.includes(forbidden), false, forbidden);
+  }
+  assert.ok(logs.includes("/projects"));
 });
