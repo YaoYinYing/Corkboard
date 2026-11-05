@@ -536,3 +536,21 @@ prevented regression; when to remove the advice.
 - **Prevents:** A filter that changes the data but not the UI state.
 - **Remove when:** the unread control becomes a three-way selector whose state
   is derived from one source instead of a true-only checkbox.
+
+## 2026-11-04 — A byte-for-byte restore still needs the manifest's snapshot
+
+- **Failure:** A database + blob copy taken without SQLite's online snapshot can
+  capture a torn `-wal` state or omit recent commits; conversely, copying the
+  sidecars into a restored directory can replay stale WAL frames against a database
+  the snapshot already includes.
+- **Reproducer:** Back up a live WAL installation by reading the main file while a
+  writer commits, then restore with its old `-wal`/`-shm`; integrity or sequence
+  invariants can fail.
+- **Fix:** Use `VACUUM INTO` on a read-only connection to produce one standalone
+  snapshot, never copy sidecars, and state the snapshot's highest
+  `schema_migrations` version in the manifest. Verify the snapshot's digest before
+  opening it, and refuse a schema newer than the running build.
+- **Prevents:** Torn snapshots, stale-WAL replay, and restoring a newer schema into
+  an older binary.
+- **Remove when:** the deployment moves to a storage engine with a platform snapshot
+  API and the D1/Workers path is implemented.

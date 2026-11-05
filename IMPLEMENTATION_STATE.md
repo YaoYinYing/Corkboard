@@ -8,10 +8,10 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–M implemented and pushed |
+| Phase | 0 complete; vertical slices A–N implemented (N is an unaudited candidate on `slice-n-backup`) |
 | Last pushed checkpoint | `47c5af8` (dashboard filters/search/replay, audited tree `aaab817`) on `origin/main`; CI pending |
-| Branch | `main`, clean; the `slice-m-dashboard-filters` candidate was fast-forwarded |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits) |
+| Branch | `slice-n-backup` candidate from base `57df294`; not pushed |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: operator backup and verified restore candidate on `slice-n-backup`; independent review PENDING; security PENDING |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
@@ -40,6 +40,7 @@ as the work it describes.
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | independent review PENDING |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | independent review PENDING; security PENDING |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | independent review PENDING; security PENDING |
+| candidate (`slice-n-backup`) | pending | Vertical slice N: operator `backup`, `verify`, and non-destructive `restore` for the SQLite + blob pair | independent review PENDING; security PENDING |
 
 ## GitHub Issue coordination
 
@@ -904,6 +905,60 @@ pushed.
   folding is the ASCII-only SQLite `LIKE` behavior. No Workers/D1 parity,
   automated axe/WCAG audit, or touch-device matrix is claimed. Independent
   security and contract review is PENDING.
+
+## Vertical slice N — operator backup and verified restore (candidate on `slice-n-backup`)
+
+- **Scope.** Adds three Node/SQLite operator commands and one service module
+  (`src/service/backup.ts`): `backup --data-dir --out [--json]`,
+  `verify --backup [--json]`, and `restore --backup --data-dir [--json]`. No
+  scheduler, remote/cloud upload, backup encryption beyond the existing ciphertext,
+  key export, rotation, overwrite/`--force`, D1/Workers path, or production deployment.
+- **Snapshot and blob policy.** `backup` opens the source database read-only and uses
+  SQLite `VACUUM INTO`, producing one consistent standalone database without
+  `-wal`/`-shm` sidecars; writers are not blocked for the blob copy. Every regular file
+  in `blobs` is then copied exactly (orphans included, opaque names preserved,
+  `0600`); directories, symlinks, devices, and other non-file entries are rejected and
+  the partial output is removed. The source is never modified.
+- **Manifest.** `manifest.json` format `corkboard-backup` version `1` records
+  `created_at` UTC, database file/size/SHA-256, sorted blob names/sizes/SHA-256,
+  counts, and the highest applied schema version. It is bounded (8 MiB, 100,000 blob
+  entries), validates blob names as plain basenames, and contains no keys, tokens,
+  emails, bodies, or absolute paths. Output directory `0700`, files `0600`; existing
+  `--out` refused.
+- **Verification.** `verify` checks manifest schema/version/bounds, required and
+  unexpected files, non-file/symlink rejection, every size and SHA-256, runs
+  `PRAGMA integrity_check` on the snapshot read-only (only after its digest matches),
+  rejects schema newer than the bundled migrations or a schema/manifest mismatch, and
+  cross-checks every non-null `body_objects.storage_key` against the manifest. Stable
+  `BACKUP_*` codes; exit `0` clean, `1` issues, `2` cannot inspect.
+- **Restore.** Verifies first, then requires an absent or empty non-symlinked target
+  outside the backup directory. Copies database and blobs into a `0700` temporary
+  sibling, re-hashes each file against the manifest, repeats integrity and schema
+  checks, and atomically renames the staging directory into place. A failure removes
+  staging and leaves no partial install; existing files are never overwritten and no
+  secrets or keys are read or written.
+- **CLI conventions.** Usage/config failures exit `2` before filesystem work (including
+  missing required flags and parse errors); runtime/validation failures exit `1`.
+  `--json` prints exactly one object on stdout, including `{ok:false,code,...}`
+  failures; human output is short lines. No body, token, key, email, or absolute path
+  is printed.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (reported in the checkpoint
+  trailer with exact counts); `npm run build` exit 0. New integration tests cover a
+  full seed → backup → verify → restore → decrypt round trip, counts and DB digest,
+  modes, empty installation, orphan/zero-byte blobs, concurrent writer snapshot
+  integrity/sequence invariants, and one-line JSON/exit codes. Security tests cover
+  database and blob digest/size tampering, missing/malformed/unsupported manifests,
+  path-traversal blob names, missing/extra files, symlinked blob entries (never
+  followed), backup rejection of source symlinks with output cleanup, symlinked and
+  dangling restore targets, non-empty target with source untouched, and CLI exit `2`
+  versus `1`.
+- **Limitations.** The post-snapshot blob copy can miss a blob deleted by a concurrent
+  expiry in that window; `verify`'s reference cross-check detects it, and a quiesced
+  backup gives a byte-exact pair. `VACUUM INTO` can temporarily slow the source while
+  reading, and a live WAL read may touch `-shm` coordination bytes. No scheduling,
+  remote storage, backup-level encryption, key handling, point-in-time recovery,
+  overwrite mode, or D1/Workers equivalent. Independent security and contract review is
+  PENDING.
 
 ## Implemented and verified at this tree
 

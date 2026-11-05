@@ -263,7 +263,63 @@ exit-2 error. Run it on a schedule (for example hourly or daily) and alert on no
 is **no repair/fix mode**: resolve
 `BLOB_ORPHANED`/`BLOB_MISSING`, `SCHEMA_INCOMPLETE`, or stuck rows through the documented
 backup/expiry/provisioning procedures, not by deleting files in place. Backup-integrity
-verification is not part of this command yet.
+verification is a separate command (`verify` below), not part of `doctor`.
+
+### Backup and verified restore
+
+```sh
+# create a new backup directory; refuses to overwrite anything
+node dist/scripts/corkboard.js backup \
+  --data-dir /var/lib/corkboard \
+  --out /srv/backups/corkboard-$(date -u +%Y%m%dT%H%M%SZ) \
+  --json
+
+# validate the manifest, sizes, digests, integrity, and schema compatibility
+node dist/scripts/corkboard.js verify --backup /srv/backups/corkboard-20261104T120000Z --json
+
+# restore into a new/empty directory (never over an existing installation)
+node dist/scripts/corkboard.js restore \
+  --backup /srv/backups/corkboard-20261104T120000Z \
+  --data-dir /var/lib/corkboard-restored \
+  --json
+```
+
+| Option | Commands | Meaning |
+| --- | --- | --- |
+| `--data-dir <dir>` | `backup`, `restore` | Source data directory (`backup`) or absent/empty target (`restore`) |
+| `--out <dir>` | `backup` | New backup directory; its parent must already exist |
+| `--backup <dir>` | `verify`, `restore` | Existing backup directory to inspect or restore |
+| `--json` | all three | Print exactly one JSON object on stdout |
+
+`backup` snapshots the database with SQLite `VACUUM INTO` (one consistent standalone
+file; no `-wal`/`-shm` copy) and then copies every regular file in `blobs` exactly,
+including orphans. The output directory is `0700`, files are `0600`, and an existing
+`--out` is refused. `manifest.json` records the database/blob sizes and SHA-256 values,
+sorted blob names, counts, and the source schema version; it contains no keys, tokens,
+emails, bodies, or absolute paths. Symlinked or non-file blob entries are rejected and
+the partial output is removed. The source is opened read-only and is never modified.
+Keys are not included; back them up separately and restore them before starting the
+service.
+
+`verify` checks the manifest schema/version and bounds, every size/digest, required and
+extra files, `PRAGMA integrity_check` on the snapshot, that the schema is not newer than
+the bundled migrations and matches the manifest, and that every non-null
+`body_objects.storage_key` is present in the blob list. `restore` runs `verify` first,
+requires an absent or empty non-symlinked target, stages the copy in a temporary sibling
+directory, re-hashes each file, repeats the integrity/schema checks, and atomically
+renames the directory into place. A failure leaves no partial installation and never
+overwrites an existing file. There is no `--force`.
+
+Exit codes for all three commands: `0` success/clean, `1` failure or verification
+issues (`RESTORE_TARGET_NOT_EMPTY`, `RESTORE_TARGET_SYMLINK`, `BACKUP_OUT_EXISTS`, and
+the stable `BACKUP_*` issue codes in the JSON output), `2` usage/config error before
+touching the filesystem or a backup directory that cannot be inspected at all. With
+`--json`, failures also print one JSON object (`{ok:false,code,...}`) on stdout.
+
+Verify after every backup and before every restore; keep a `verify` run on a schedule
+and perform a full restore into a scratch directory quarterly. The manifest/blob policy,
+consistency caveat, key-separation warning, and uncovered scope are in
+[`security-operations.md`](./security-operations.md#backup-and-verified-restore).
 
 Reverse proxy must preserve the `Authorization` header, strip untrusted forwarding
 headers, set body-size limits, and provide TLS. The application must not be exposed

@@ -447,6 +447,52 @@ measured are `null`; reconciliation internally reads all referenced storage keys
 diagnostic cannot create `-wal`/`-shm` files; with both sidecars present it reads the live
 WAL. There is no repair mode and no D1/Workers implementation yet.
 
+## Backup, verification, and restore
+
+The operator CLI exposes `backup`, `verify`, and `restore` over the same SQLite file
+and blob directory. They implement a bounded disaster-recovery capability, not a
+scheduler, remote replication, key management, or a D1/Workers path.
+
+- **Snapshot mechanism.** `backup` opens the source database read-only and runs SQLite
+  `VACUUM INTO`. This is the portable consistent-snapshot primitive: it respects WAL
+  visibility, produces one standalone database file, and needs no `-wal`/`-shm` sidecar
+  copy. The source is never written. Writers are not blocked for the blob copy.
+- **Blob policy.** After the snapshot, every regular file in `blobs` is copied exactly
+  (orphans included) with its opaque name and `0600` mode. Symlinks, directories,
+  devices, and other non-file entries are rejected rather than followed or dropped, and
+  a failed run removes the output directory it created. Blobs committed before the
+  snapshot normally exist when the copy begins; an expiry deleting one in that window
+  is the remaining race, so `verify` independently cross-checks every non-null
+  `body_objects.storage_key` against the manifest.
+- **Manifest.** `manifest.json` (format `corkboard-backup`, version `1`) is bounded to
+  8 MiB and 100,000 blob entries and records the database size/SHA-256, sorted blob
+  names/sizes/SHA-256, counts, UTC creation time, and source schema version. It carries
+  no keys, tokens, bodies, emails, or absolute paths. Names are validated as plain
+  basenames, so a manifest cannot address a path outside the backup.
+- **Verification.** `verify` validates the manifest and every listed size/digest,
+  required/extra entries, non-file and symlink rejection, `PRAGMA integrity_check`,
+  schema compatibility, and blob reference coverage. It opens only the backup database,
+  read-only; a tampered database is rejected by digest before it is parsed. Issues use
+  stable `BACKUP_*` codes and exit `1`; a backup directory that cannot be inspected
+  exits `2`.
+- **Restore.** `restore` verifies first, then requires an absent or empty non-symlinked
+  target outside the backup directory. It stages database and blobs in a `0700`
+  sibling directory, re-hashes every copied file against the manifest, repeats the
+  integrity and schema checks on the staged database, and renames the directory into
+  place atomically. Failure removes the staging directory, so no partial installation
+  is left behind. Existing files are never overwritten and there is no `--force`.
+- **Migration compatibility.** Restore accepts a backup whose highest applied
+  `schema_migrations` version is at most the highest migration bundled with the running
+  build. A newer schema (`BACKUP_SCHEMA_AHEAD`) and a schema/manifest mismatch are
+  refused; an older schema is restored as-is and the normal opener applies pending
+  migrations on first start. Backups never record or apply migrations themselves, and
+  the migration-version check is independent of the normal opener's `SCHEMA_TOO_NEW`
+  guard.
+- **Secrets stay separate.** No command reads or writes `CORKBOARD_ROOT_KEY`,
+  `CORKBOARD_CREDENTIAL_PEPPER`, or a secrets file. Ciphertext in a backup is
+  unrecoverable without the independently stored key set, and a backup never weakens
+  the requirement that key material live outside the data directory.
+
 ## MCP transport
 
 `POST/GET/DELETE /mcp` uses the official `@modelcontextprotocol/sdk` Web-standard

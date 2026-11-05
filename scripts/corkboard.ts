@@ -12,6 +12,14 @@ import { hashPassword } from "../src/auth/password.ts";
 import { SCOPES, type Scope } from "../src/domain/authz.ts";
 import { normalizeEmail, validateLoginPassword } from "../src/domain/validation.ts";
 import { startServer } from "../src/platforms/node/main.ts";
+import {
+  BackupError,
+  BackupInspectError,
+  RestoreError,
+  createBackup,
+  restoreBackup,
+  verifyBackup,
+} from "../src/service/backup.ts";
 import { DoctorError, formatDoctorReport, runDoctor } from "../src/service/doctor.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
 import {
@@ -31,6 +39,8 @@ const DEFAULT_CAPABILITIES: readonly Scope[] = [
 
 const OPTIONS = {
   "data-dir": { type: "string" },
+  out: { type: "string" },
+  backup: { type: "string" },
   "secrets-file": { type: "string" },
   email: { type: "string" },
   account: { type: "string" },
@@ -780,6 +790,123 @@ async function doctorCommand(values: Values, extraPositionals: number): Promise<
   if (report.issues.length > 0) process.exitCode = 1;
 }
 
+// Backup/verify/restore argument failures exit 2 before touching the
+// filesystem; validation findings and runtime refusals exit 1.
+class BackupCliError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BackupCliError";
+  }
+}
+
+function backupOption(value: string | undefined, name: string): string {
+  if (value === undefined || value === "") {
+    throw new BackupCliError(`${name} is required`);
+  }
+  return value;
+}
+
+function printVerifyIssues(report: {
+  issues: Array<{ code: string; file?: string }>;
+  issues_truncated: boolean;
+}): void {
+  const listed = report.issues
+    .map((issue) => (issue.file === undefined ? issue.code : `${issue.code}(${issue.file})`))
+    .join(", ");
+  const suffix = report.issues_truncated ? ", ... (truncated)" : "";
+  console.log(report.issues.length === 0 ? "issues: none" : `issues: ${listed}${suffix}`);
+}
+
+// Creates a consistent SQLite snapshot plus an exact copy of the blob
+// directory into a new 0700 directory. Never writes to the source.
+async function backupCommand(values: Values): Promise<void> {
+  const dataDir = backupOption(values["data-dir"], "--data-dir");
+  const outDir = backupOption(values.out, "--out");
+  try {
+    const summary = await createBackup({ dataDir, outDir });
+    if (values.json === true) {
+      console.log(JSON.stringify(summary));
+      return;
+    }
+    console.log(`database: ${summary.database.file} (${summary.database.size} bytes, sha256:${summary.database.sha256})`);
+    console.log(`blobs: ${summary.blobs} (${summary.blob_bytes} bytes)`);
+    console.log(`schema: version ${summary.schema_version}`);
+    console.log(`created_at: ${summary.created_at}`);
+  } catch (error) {
+    if (error instanceof BackupError) {
+      if (values.json === true) {
+        console.log(JSON.stringify({ ok: false, code: error.code }));
+      } else {
+        console.error(`corkboard: ${error.message}`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
+}
+
+// Validates the manifest, every size/digest, required and unexpected entries,
+// PRAGMA integrity_check, schema compatibility, and blob referential integrity.
+async function verifyBackupCommand(values: Values): Promise<void> {
+  const backupDir = backupOption(values.backup, "--backup");
+  let report;
+  try {
+    report = await verifyBackup({ backupDir });
+  } catch (error) {
+    if (error instanceof BackupInspectError) throw new BackupCliError(error.message);
+    throw error;
+  }
+  if (values.json === true) {
+    console.log(JSON.stringify(report));
+  } else {
+    console.log(`ok: ${report.ok ? "yes" : "no"}`);
+    console.log(
+      `database: ${report.database === null ? "unavailable" : `${report.database.file} (${report.database.size} bytes)`}`,
+    );
+    console.log(
+      `blobs: ${report.blobs === null ? "unavailable" : `${report.blobs.count} (${report.blobs.bytes} bytes)`}`,
+    );
+    console.log(`schema: ${report.schema_version === null ? "unavailable" : `version ${report.schema_version}`}`);
+    printVerifyIssues(report);
+  }
+  if (!report.ok) process.exitCode = 1;
+}
+
+// Verifies first, then installs into a temporary sibling and renames it. The
+// target must be absent or empty; nothing is ever overwritten.
+async function restoreCommand(values: Values): Promise<void> {
+  const backupDir = backupOption(values.backup, "--backup");
+  const dataDir = backupOption(values["data-dir"], "--data-dir");
+  try {
+    const summary = await restoreBackup({ backupDir, dataDir });
+    if (values.json === true) {
+      console.log(JSON.stringify(summary));
+      return;
+    }
+    console.log(`restored: schema version ${summary.schema_version}`);
+    console.log(`database: ${summary.database.file} (${summary.database.size} bytes, sha256:${summary.database.sha256})`);
+    console.log(`blobs: ${summary.blobs} (${summary.blob_bytes} bytes)`);
+  } catch (error) {
+    if (error instanceof BackupInspectError) throw new BackupCliError(error.message);
+    if (error instanceof RestoreError) {
+      if (values.json === true) {
+        console.log(
+          JSON.stringify({ ok: false, code: error.code, issues: error.issues }),
+        );
+      } else {
+        console.error(`corkboard: ${error.message}`);
+        for (const issue of error.issues) {
+          console.error(issue.file === undefined ? issue.code : `${issue.code}(${issue.file})`);
+        }
+      }
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
+}
+
 async function main(): Promise<void> {
   const { positionals, values } = parseArgs({
     args: process.argv.slice(2),
@@ -815,12 +942,18 @@ async function main(): Promise<void> {
       return pruneCommand(values);
     case "doctor":
       return doctorCommand(values, positionals.length - 1);
+    case "backup":
+      return backupCommand(values);
+    case "verify":
+      return verifyBackupCommand(values);
+    case "restore":
+      return restoreCommand(values);
     case "serve":
       await startServer();
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|serve> [options]; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|backup|verify|restore|serve> [options]; backup accepts --data-dir and --out; verify accepts --backup; restore accepts --backup and --data-dir; all three accept --json; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }
@@ -866,11 +999,14 @@ if (isEntryPoint()) {
     const parseCode = (error as { code?: unknown }).code;
     const parseFailure =
       typeof parseCode === "string" && parseCode.startsWith("ERR_PARSE_ARGS");
+    const backupCommandName =
+      command === "backup" || command === "verify" || command === "restore";
     const exitCode =
       error instanceof DoctorCliError ||
       command === "doctor" ||
       error instanceof PruneCliError ||
-      (command === "prune" && parseFailure)
+      error instanceof BackupCliError ||
+      ((command === "prune" || backupCommandName) && parseFailure)
         ? 2
         : 1;
     console.error(`corkboard: ${message}`);

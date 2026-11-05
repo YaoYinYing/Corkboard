@@ -477,13 +477,104 @@ domains, and credentials. Never copy production key material or speaker tokens i
 staging environment, CI, or a test fixture. CI holds no deployment secrets. A staging
 deployment that uses production-derived keys is not an acceptable rehearsal.
 
-## Backup and restore
+## Backup and verified restore
 
-1. Stop writes or use SQLite online backup with WAL checkpoint.
-2. Back up the database and the blob directory together; they are a pair.
-3. Store key material in a separate secret manager/backup with access control.
-4. Quarterly: restore into a scratch directory, start the server, fetch a known body,
-   and verify a tampered blob fails.
+The SQLite database and the blob directory are one recovery unit. The operator CLI
+provides three explicit commands — `backup`, `verify`, and `restore` — and none of
+them reads, writes, prints, or backs up key material. Schedule backups and
+verification externally; nothing runs on a timer.
+
+### Backup consistency and blob policy
+
+- `backup` opens the source database **read-only** and creates the snapshot with
+  SQLite `VACUUM INTO`. This is SQLite's consistent online backup: it reads under
+  SQLite's own isolation rules (including a live WAL), writes one standalone
+  database file, and does not copy `-wal`/`-shm` sidecars. Writers are not blocked for
+  the duration of the blob copy. The source database and blobs are never modified or
+  deleted.
+- Blobs are copied **after** the snapshot, byte-for-byte, from every regular file in
+  `<data-dir>/blobs`. Orphan blobs are preserved so the restored directory is a
+  faithful copy; opaque file names are unchanged. Directories, symlinks, devices, and
+  other non-file entries are rejected and the partial backup is removed. Symlinks are
+  never followed.
+- A committed message references a blob written before it committed, so a blob
+  referenced by the snapshot normally exists when the copy runs. One race remains: an
+  expiry that deletes a blob after the snapshot but before the copy can leave a
+  referenced blob missing. `verify` cross-checks every non-null
+  `body_objects.storage_key` against the manifest and fails, so run `verify`
+  immediately; take backups on a quiesced installation when a byte-exact pair is
+  required.
+- The output directory is created `0700` and must not exist beforehand. Files
+  (`manifest.json`, the database, every blob) are `0600`. A failed run removes the
+  directory it created and leaves the source untouched.
+
+### Manifest
+
+`manifest.json` is bounded (at most 8 MiB and 100,000 blob entries) and contains only:
+
+- format `corkboard-backup`, `format_version` `1`, `created_at` UTC;
+- the database file name (`corkboard.sqlite`), byte size, and SHA-256;
+- the sorted blob list (opaque name, byte size, SHA-256) and counts;
+- the source schema version (highest applied `schema_migrations` row).
+
+It never contains keys, tokens, emails, message summaries or bodies, absolute paths,
+or file contents. Blob names are validated as plain basenames, so a manifest cannot
+traverse out of the backup directory.
+
+### Verify
+
+`verify --backup <dir>` validates the manifest schema/version and bounds, every
+listed size and digest, required files, extra or unlisted files, and that no entry is
+a symlink or non-file. It then opens the database read-only and runs
+`PRAGMA integrity_check`, rejects a schema newer than the bundled migrations, requires
+the manifest's schema version to match, and requires every referenced storage key to
+appear in the blob list. Exit `0` clean, `1` issues (stable codes), `2` cannot inspect
+(missing/unreadable/symlinked backup directory).
+
+Run `verify` after every backup, before every restore, and on a schedule (for example
+daily or weekly) against recent backups. A backup that has never been verified is not
+known to be recoverable. Perform a full `restore` into a scratch directory and fetch a
+known body quarterly (see the release gate's disaster rehearsal).
+
+### Restore
+
+`restore --backup <dir> --data-dir <dir>` verifies first and refuses to continue on
+any issue. The target must be absent or an **empty real directory**; a non-empty
+target, a symlink (including a dangling one), or a target inside the backup directory
+is refused. Restore does not overwrite existing files and has no `--force`/overwrite
+mode.
+
+The restore writes into a temporary sibling directory (`0700`), copies the database
+and blobs at `0600`, re-hashes each copied file against the manifest, runs
+`PRAGMA integrity_check` and the same schema check on the staged database, then
+renames the staging directory into place atomically. A failure removes the staging
+directory and leaves no partial installation. `-wal`/`-shm` sidecars are never copied
+because the snapshot is a single consistent database.
+
+After restoring:
+
+1. Put the separately backed-up `CORKBOARD_ROOT_KEY` and
+   `CORKBOARD_CREDENTIAL_PEPPER` in place first (do not regenerate them).
+2. Start the service, then verify a known speaker token authenticates and a known
+   message body decrypts.
+3. Run `doctor --data-dir <dir>` and confirm schema, integrity, and blob counts.
+
+### Keys are backed up separately
+
+**Backups contain ciphertext and metadata, not key material.** A stolen backup does
+not yield plaintext without the root key, and a lost key makes every restored body
+unreadable. Store `CORKBOARD_ROOT_KEY` and `CORKBOARD_CREDENTIAL_PEPPER` in a separate
+secret manager or protected backup with independent access control; never place them
+in the data directory, a backup directory, or this repository. A restore without the
+matching key set is not a recovery.
+
+### What is not covered
+
+Scheduled/automatic backups, remote or cloud upload, backup encryption beyond the
+existing AES-256-GCM ciphertext, key export, key rotation, automatic overwrite, point-
+in-time recovery, and a D1/Workers equivalent. A backup is a point-in-time copy; it does
+not rewrite or expire previously backed-up plaintext-adjacent metadata, and expiry is a
+tombstone rather than comprehensive erasure.
 
 ## Incident response
 
