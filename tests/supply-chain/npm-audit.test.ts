@@ -98,18 +98,26 @@ test("audit fails closed without npm_execpath", () => {
   }
 });
 
-test("check and audit scripts never invoke bare npm", () => {
+test("package scripts use $npm_node_execpath and never bare node, tsc, or npm", () => {
   const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
     scripts: Record<string, string>;
   };
-  for (const name of ["check", "audit"]) {
-    const command = pkg.scripts[name] ?? "";
-    assert.doesNotMatch(command, /(^|[\s;&|])npm\s/, `${name} must not call npm`);
+  for (const [name, command] of Object.entries(pkg.scripts)) {
+    assert.doesNotMatch(
+      command,
+      /(^|[\s;&|"'=])(node|tsc|npm)\s/,
+      `${name} must not resolve node, tsc, or npm through PATH`,
+    );
+    assert.match(
+      command,
+      /npm_node_execpath/,
+      `${name} must use the trusted node path`,
+    );
   }
   assert.match(pkg.scripts.check ?? "", /scripts\/secret-scan\.ts/);
   assert.match(pkg.scripts.check ?? "", /scripts\/history-secret-scan\.ts/);
   assert.match(pkg.scripts.check ?? "", /scripts\/license-report\.ts/);
-  assert.match(pkg.scripts.check ?? "", /tsc --noEmit/);
-  assert.match(pkg.scripts.check ?? "", /node --test/);
+  assert.match(pkg.scripts.check ?? "", /typescript\/lib\/tsc\.js --noEmit/);
+  assert.match(pkg.scripts.check ?? "", /--test/);
   assert.match(pkg.scripts.audit ?? "", /scripts\/npm-audit\.ts/);
 });

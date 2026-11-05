@@ -88,6 +88,29 @@ test("legacy object-form license declarations are classified", () => {
   assert.equal(fallback.flagged.length, 0);
 });
 
+test("unusable declarations fall back to the lock entry, then missing", () => {
+  const unusable: unknown[] = ["", [], { url: "https://example.test/license" }, { type: 123 }];
+  for (const raw of unusable) {
+    const report = buildLicenseReport({
+      packages: { "node_modules/x": { version: "1.0.0", license: "MIT" } },
+      readPackageJson: () => ({ name: "x", version: "1.0.0", license: raw }),
+    });
+    assert.equal(
+      report.dependencies[0]?.status,
+      "permissive",
+      `fallback for ${JSON.stringify(raw)}`,
+    );
+  }
+
+  const missing = buildLicenseReport({
+    packages: {
+      "node_modules/x": { version: "1.0.0", license: { url: "https://example.test" } },
+    },
+    readPackageJson: () => ({ name: "x", version: "1.0.0", license: "" }),
+  });
+  assert.equal(missing.dependencies[0]?.status, "missing");
+});
+
 test("lock paths cannot escape node_modules or be absolute", () => {
   assert.equal(isSafePackagePath("node_modules/a"), true);
   assert.equal(isSafePackagePath("node_modules/@scope/a"), true);

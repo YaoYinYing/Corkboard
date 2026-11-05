@@ -9,18 +9,18 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "lint": "npm run typecheck",
-    "test": "node --test --test-reporter=spec \"tests/**/*.test.ts\"",
-    "test:contract": "node --test --test-reporter=spec \"tests/contract/**/*.test.ts\"",
-    "test:security": "node --test --test-reporter=spec \"tests/security/**/*.test.ts\"",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.ts",
-    "check": "node --experimental-strip-types scripts/secret-scan.ts && node --experimental-strip-types scripts/history-secret-scan.ts && node --experimental-strip-types scripts/license-report.ts && tsc --noEmit && node --test --test-reporter=spec \"tests/**/*.test.ts\"",
-    "audit": "node --experimental-strip-types scripts/npm-audit.ts",
-    "licenses": "node scripts/license-report.ts",
-    "sbom": "node scripts/sbom.ts",
-    "secret-scan": "node scripts/secret-scan.ts",
-    "secret-scan:history": "node scripts/history-secret-scan.ts"
+    "typecheck": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" node_modules/typescript/lib/tsc.js --noEmit",
+    "lint": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" node_modules/typescript/lib/tsc.js --noEmit",
+    "test": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --test --test-reporter=spec \"tests/**/*.test.ts\"",
+    "test:contract": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --test --test-reporter=spec \"tests/contract/**/*.test.ts\"",
+    "test:security": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --test --test-reporter=spec \"tests/security/**/*.test.ts\"",
+    "build": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" node_modules/typescript/lib/tsc.js -p tsconfig.build.json && \"$npm_node_execpath\" scripts/copy-migrations.ts",
+    "check": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/secret-scan.ts && \"$npm_node_execpath\" --experimental-strip-types scripts/history-secret-scan.ts && \"$npm_node_execpath\" scripts/license-report.ts && \"$npm_node_execpath\" node_modules/typescript/lib/tsc.js --noEmit && \"$npm_node_execpath\" --test --test-reporter=spec \"tests/**/*.test.ts\"",
+    "audit": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/npm-audit.ts",
+    "licenses": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/license-report.ts",
+    "sbom": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/sbom.ts",
+    "secret-scan": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/secret-scan.ts",
+    "secret-scan:history": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/history-secret-scan.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

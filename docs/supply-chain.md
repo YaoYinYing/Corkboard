@@ -25,23 +25,30 @@ when it flags an entry (the report is still written).
 given the lockfile and installed tree. It does **not** include `npm audit`, which
 requires the registry. CI runs `npm run audit` as a separate step.
 
-Neither `check` nor `audit` invokes a bare `npm`. `check` chains `node` with each
-script, `tsc --noEmit`, and `node --test`; `audit` calls
-`scripts/npm-audit.ts`, which runs `process.execPath` + `npm_execpath` with
-`audit --audit-level=high`, propagates npm's exit status, and fails closed (exit `2`)
-when `npm_execpath` is unset. The two integration tests that build `dist` also invoke
-npm through `npm_execpath` rather than `PATH`. This prevents a dependency-provided
-`npm` shim in `node_modules/.bin` from making the checks exit `0` without running.
+No package script resolves `node`, `tsc`, or `npm` through `PATH`. Every script
+starts with `"${npm_node_execpath:?npm_node_execpath is not set - run via npm}"`,
+the absolute Node binary npm puts in the script environment; an unset variable exits
+nonzero with that message. The TypeScript compiler is invoked as
+`$npm_node_execpath node_modules/typescript/lib/tsc.js`, and the test runner as
+`$npm_node_execpath --test`. `audit` calls `scripts/npm-audit.ts`, which runs
+`process.execPath` + `npm_execpath` with `audit --audit-level=high`, propagates npm's
+exit status, and fails closed (exit `2`) when `npm_execpath` is unset. The contract
+and integration tests that build `dist` invoke npm as `process.execPath` +
+`npm_execpath`, not `npm_execpath` alone. This prevents a dependency-provided `node`,
+`tsc`, or `npm` shim in `node_modules/.bin` from making the checks exit `0` without
+running.
 
 The scan is **lockfile-driven**: it iterates every `node_modules/` entry in
 `package-lock.json`, whether or not that package is present in the installed tree.
 For each entry it prefers the `license`/`licenses` declaration in
-`node_modules/<path>/package.json`; if that file is unreadable or declares no
-license, it falls back to the `license` field recorded in the lock entry. A package
-absent from `node_modules` is therefore still reported from lock metadata, and a lock
-entry with no declaration anywhere is `missing`. The legacy object form
-`{"type": "MIT", "url": "..."}` and `licenses` arrays are reduced to their `type`
-strings. Lock paths containing `..`, absolute paths, or empty segments are rejected
+`node_modules/<path>/package.json`; if that file is unreadable or yields no usable
+license string, it falls back to the `license` field recorded in the lock entry. An
+unusable declaration is an empty/whitespace string, an empty array, an object without
+a string `type` (for example `{url}`), or `{"type": 123}`. A package absent from
+`node_modules` is therefore still reported from lock metadata, and a lock entry with
+no usable declaration anywhere is `missing`. The legacy object form
+`{"type": "MIT", "url": "..."}` and `licenses` arrays are reduced to their string
+types. Lock paths containing `..`, absolute paths, or empty segments are rejected
 with exit `2` rather than read.
 
 ### License policy
@@ -116,3 +123,7 @@ artifact.
   `name@version` deduplication apply.
 - The lockfile pins integrity hashes; there is no automated update bot, no
   reproducible-build proof, and no review of upstream release provenance here.
+- The `$npm_node_execpath` guard removes PATH shadowing by `node`/`tsc`/`npm` bins
+  from dependency packages. It still trusts the npm installation and the Node binary
+  npm itself was started with; a compromised or misconfigured npm/node installation
+  is outside this boundary. Scripts run through a POSIX `sh`, as before.

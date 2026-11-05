@@ -72,32 +72,32 @@ export interface BuildInput {
   readPackageJson: (path: string) => unknown;
 }
 
-function declaredLicense(pkg: unknown): unknown {
+// Reduces every legacy declaration form to usable strings; an unusable value
+// (empty string, empty array, {url}, {type: 123}) yields undefined so the caller
+// can fall back to the lock entry.
+function licenseString(raw: unknown): string | undefined {
+  if (typeof raw === "string") {
+    const value = raw.trim();
+    return value === "" ? undefined : value;
+  }
+  if (Array.isArray(raw)) {
+    const parts = raw
+      .map(licenseString)
+      .filter((value): value is string => value !== undefined);
+    return parts.length > 0 ? parts.join(" OR ") : undefined;
+  }
+  if (typeof raw === "object" && raw !== null && "type" in raw) {
+    return licenseString((raw as { type?: unknown }).type);
+  }
+  return undefined;
+}
+
+function packageLicense(pkg: unknown): string | undefined {
   if (typeof pkg !== "object" || pkg === null) {
     return undefined;
   }
   const { license, licenses } = pkg as { license?: unknown; licenses?: unknown };
-  if (license !== undefined) {
-    // Legacy object form: {"type": "MIT", "url": "..."}.
-    if (typeof license === "object" && license !== null && "type" in license) {
-      return (license as { type?: unknown }).type;
-    }
-    return license;
-  }
-  if (!Array.isArray(licenses)) {
-    return undefined;
-  }
-  return licenses
-    .map((entry) => {
-      if (typeof entry === "string") {
-        return entry;
-      }
-      if (typeof entry === "object" && entry !== null && "type" in entry) {
-        return (entry as { type?: unknown }).type;
-      }
-      return undefined;
-    })
-    .filter((entry): entry is string => typeof entry === "string");
+  return licenseString(license) ?? licenseString(licenses);
 }
 
 export function classifyLicense(declared: unknown): {
@@ -175,7 +175,7 @@ export function buildLicenseReport({
       typeof pkg === "object" && pkg !== null
         ? (pkg as { name?: unknown; version?: unknown })
         : {};
-    const declared = declaredLicense(pkg) ?? declaredLicense(entry);
+    const declared = packageLicense(pkg) ?? packageLicense(entry);
     const { license, status } = classifyLicense(declared);
     dependencies.push({
       name: typeof record.name === "string" ? record.name : nameFromPath(path),
