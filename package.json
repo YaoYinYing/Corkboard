@@ -15,8 +15,10 @@
     "test:contract": "node --test --test-reporter=spec \"tests/contract/**/*.test.ts\"",
     "test:security": "node --test --test-reporter=spec \"tests/security/**/*.test.ts\"",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.ts",
-    "check": "npm run secret-scan && npm run secret-scan:history && npm run typecheck && npm test",
+    "check": "npm run secret-scan && npm run secret-scan:history && npm run licenses && npm run typecheck && npm test",
     "audit": "npm audit --audit-level=high",
+    "licenses": "node scripts/license-report.ts",
+    "sbom": "node scripts/sbom.ts",
     "secret-scan": "node scripts/secret-scan.ts",
     "secret-scan:history": "node scripts/history-secret-scan.ts"
   },

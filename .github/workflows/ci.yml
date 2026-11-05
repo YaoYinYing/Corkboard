@@ -23,7 +23,14 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run secret-scan
       - run: npm run secret-scan:history
+      - run: npm run licenses
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm run sbom
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: supply-chain-reports
+          path: reports/
+          if-no-files-found: error
       - run: npm run audit

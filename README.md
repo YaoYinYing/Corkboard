@@ -40,7 +40,7 @@ verify ChatGPT Web integration.
 | `src/` | TypeScript core, storage/crypto/auth, message service, and Node.js adapter |
 | `migrations/` | Versioned, D1/SQLite-compatible SQL |
 | `tests/` | Unit, contract, integration, and security tests |
-| `scripts/` | Secret scans, migration copy, and the bootstrap CLI |
+| `scripts/` | Secret scans, license/SBOM reports, migration copy, and the bootstrap CLI |
 
 ## Local development
 
@@ -48,8 +48,14 @@ Requires Node.js 24 LTS.
 
 ```sh
 npm install
-npm run check        # staged + history secret scan, typecheck, tests
+npm run check        # offline: secret scans, license scan, typecheck, tests
+npm run audit        # network: npm advisory database, high/critical only
+npm run licenses     # offline: reports/licenses.{txt,json}
+npm run sbom         # offline: reports/sbom.cdx.json (CycloneDX)
 ```
+
+Dependency audit, license policy, SBOM output and their limits are documented in
+[`docs/supply-chain.md`](docs/supply-chain.md).
 
 ### Web dashboard
 

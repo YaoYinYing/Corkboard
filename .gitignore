@@ -10,6 +10,7 @@ ORIGINAL_DESIGN.md
 node_modules/
 dist/
 coverage/
+reports/
 
 # local runtime data and secrets
 .env

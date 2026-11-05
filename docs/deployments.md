@@ -416,4 +416,5 @@ Never commit `ORIGINAL_DESIGN.md` (it contains a credential-bearing proxy URL) o
 secrets file. Secrets default outside the data directory; if you override the location,
 keep it out of the repository. CI runs a secret scan over staged files and full history.
 The public archive copy under `docs/` is labeled and has the credential userinfo
-removed.
+removed. Dependency audit, license reporting, and SBOM generation are described in
+[`supply-chain.md`](./supply-chain.md).
