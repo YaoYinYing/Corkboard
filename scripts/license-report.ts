@@ -2,7 +2,7 @@
 // Builds a stable dependency license report from package-lock.json and the
 // installed node_modules/*/package.json files. Offline: no registry access.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // MIT-compatible licenses accepted without a separate notice review.
@@ -127,6 +127,17 @@ function nameFromPath(path: string): string {
   return index === -1 ? path : path.slice(index + "node_modules/".length);
 }
 
+// Lock paths are untrusted input. Reject absolute paths, traversal, and empty
+// segments so a tampered lock cannot make the scan read outside node_modules.
+export function isSafePackagePath(path: string): boolean {
+  if (!path.startsWith("node_modules/")) {
+    return false;
+  }
+  return path
+    .split("/")
+    .every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
 export function buildLicenseReport({
   packages,
   readPackageJson,
@@ -135,6 +146,9 @@ export function buildLicenseReport({
   for (const [path, entry] of Object.entries(packages)) {
     if (!path.startsWith("node_modules/")) {
       continue;
+    }
+    if (!isSafePackagePath(path)) {
+      throw new Error(`unsafe package path in lockfile: ${path}`);
     }
     let pkg: unknown;
     try {
@@ -208,11 +222,23 @@ function main(): void {
     process.exit(2);
   }
 
-  const report = buildLicenseReport({
-    packages,
-    readPackageJson: (path) =>
-      JSON.parse(readFileSync(join(root, path, "package.json"), "utf8")),
-  });
+  const nodeModules = resolve(root, "node_modules");
+  let report: LicenseReport;
+  try {
+    report = buildLicenseReport({
+      packages,
+      readPackageJson: (path) => {
+        const file = resolve(root, path, "package.json");
+        if (!file.startsWith(`${nodeModules}${sep}`)) {
+          throw new Error(`refusing to read outside node_modules: ${path}`);
+        }
+        return JSON.parse(readFileSync(file, "utf8"));
+      },
+    });
+  } catch (error) {
+    console.error(`licenses: invalid lockfile entry: ${String(error)}`);
+    process.exit(2);
+  }
   const outDir = join(root, "reports");
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "licenses.txt"), textReport(report));

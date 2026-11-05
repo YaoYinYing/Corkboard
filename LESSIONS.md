@@ -785,6 +785,22 @@ prevented regression; when to remove the advice.
   an active membership" and grant deletion is expressed in the same statement, or
   every adapter ships a verified transaction implementation.
 
+## 2026-11-05 — never resolve `npm` through `PATH` from an npm script
+
+- **Failure:** `scripts/sbom.ts` called `execFileSync("npm", ...)`. `npm run`
+  prepends `node_modules/.bin` to `PATH`, so a dependency-provided `npm` shim could
+  run instead of the real CLI even with `npm ci --ignore-scripts`, forging the SBOM.
+- **Reproducer:** Put an executable `npm` shim in `node_modules/.bin`, then run the
+  script through `npm run` while `npm_execpath` is available; the shim runs before the
+  fix. `tests/supply-chain/sbom.test.ts` pins the opposite outcome.
+- **Fix:** Invoke `process.execPath` with `process.env.npm_execpath`, and exit `2` with
+  a clear error when `npm_execpath` is unset. Never rely on a shell/PATH lookup for
+  npm inside repository scripts.
+- **Prevents:** Dependency-controlled execution of the supply-chain tooling and forged
+  reports.
+- **Remove when:** Scripts no longer spawn npm, or a reviewed helper resolves the
+  installed CLI path without consulting `PATH`.
+
 ## 2026-11-05 — `npm sbom` names the root from the working directory
 
 - **Failure:** Running `npm sbom --sbom-format cyclonedx` inside a worktree named

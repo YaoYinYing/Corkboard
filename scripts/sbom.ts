@@ -27,11 +27,21 @@ function main(): void {
     process.exit(2);
   }
 
+  // Resolve the installed npm CLI explicitly. Never let PATH pick an `npm`:
+  // `npm run` prepends node_modules/.bin, so a dependency could shadow it.
+  const npmExecPath = process.env.npm_execpath;
+  if (!npmExecPath) {
+    console.error(
+      "sbom: npm_execpath is not set; run `npm run sbom` (or invoke npm's CLI explicitly)",
+    );
+    process.exit(2);
+  }
+
   let output: string;
   try {
     output = execFileSync(
-      "npm",
-      ["sbom", "--sbom-format", "cyclonedx", "--sbom-type", "application"],
+      process.execPath,
+      [npmExecPath, "sbom", "--sbom-format", "cyclonedx", "--sbom-type", "application"],
       { encoding: "utf8", maxBuffer: 64 << 20, stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (error) {

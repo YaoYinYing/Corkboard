@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   buildLicenseReport,
   classifyLicense,
+  isSafePackagePath,
   type LockEntry,
 } from "../../scripts/license-report.ts";
 
@@ -61,4 +62,23 @@ test("buildLicenseReport labels scope, sorts stably, and flags unreadable metada
     ],
   );
   assert.equal(report.dependencies[1]?.scope, "runtime");
+});
+
+test("lock paths cannot escape node_modules", () => {
+  assert.equal(isSafePackagePath("node_modules/a"), true);
+  assert.equal(isSafePackagePath("node_modules/@scope/a"), true);
+  assert.equal(isSafePackagePath("node_modules/../outside"), false);
+  assert.equal(isSafePackagePath("node_modules/a/../../outside"), false);
+  assert.equal(isSafePackagePath("/tmp/node_modules/a"), false);
+
+  assert.throws(
+    () =>
+      buildLicenseReport({
+        packages: { "node_modules/../outside": { version: "1.0.0" } },
+        readPackageJson: () => {
+          throw new Error("must not read");
+        },
+      }),
+    /unsafe package path in lockfile/,
+  );
 });

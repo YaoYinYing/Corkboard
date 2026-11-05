@@ -13,7 +13,7 @@ install.
 | Command | Network | Writes | Purpose |
 | --- | --- | --- | --- |
 | `npm run audit` | **yes** (npm advisory database) | nothing | `npm audit --audit-level=high`; fails on high/critical advisories |
-| `npm run licenses` | no (after install) | `reports/licenses.txt`, `reports/licenses.json` | Declared licenses of every installed dependency, runtime/dev labeled, flagged when missing, unknown, or non-permissive |
+| `npm run licenses` | no (after install) | `reports/licenses.txt`, `reports/licenses.json` | Declared licenses for every `package-lock.json` dependency entry, runtime/dev labeled, flagged when missing, unknown, or non-permissive |
 | `npm run sbom` | no (after install) | `reports/sbom.cdx.json` | CycloneDX JSON from npm's built-in `npm sbom` |
 | `npm run check` | no | `reports/licenses.*` | Secret scans, the license scan, typecheck, and tests |
 
@@ -25,6 +25,15 @@ when it flags an entry (the report is still written).
 given the lockfile and installed tree. It does **not** include `npm audit`, which
 requires the registry. CI runs `npm run audit` as a separate step.
 
+The scan is **lockfile-driven**: it iterates every `node_modules/` entry in
+`package-lock.json`, whether or not that package is present in the installed tree.
+For each entry it prefers the `license`/`licenses` declaration in
+`node_modules/<path>/package.json`; if that file is unreadable or declares no
+license, it falls back to the `license` field recorded in the lock entry. A package
+absent from `node_modules` is therefore still reported from lock metadata, and a lock
+entry with no declaration anywhere is `missing`. Lock paths containing `..`, absolute
+paths, or empty segments are rejected with exit `2` rather than read.
+
 ### License policy
 
 The allowlist for automatic acceptance is MIT-compatible:
@@ -34,22 +43,31 @@ only of those identifiers.
 
 - `notice`: a recognized reciprocal license (for example GPL, LGPL, AGPL, MPL, EPL,
   CDDL, CC-BY-SA) is present. Do not redistribute without the required notice and a
-  review; the check fails and the entry must be resolved or explicitly accepted.
+  review.
 - `missing`: no `license`/`licenses` declaration is readable in
-  `node_modules/<pkg>/package.json`.
+  `node_modules/<pkg>/package.json` and the lock entry has none either.
 - `unknown`: an unparsed or unrecognized declaration, including `SEE LICENSE IN ...`
   and proprietary strings.
 
-A flagged dependency blocks `npm run check` until it is removed, replaced, or a
-reviewed exception is recorded. There are currently no exceptions.
+A flagged dependency blocks `npm run check` (exit `1`) until the package is removed or
+replaced, or the allowlist in `scripts/license-report.ts` is deliberately changed in a
+reviewed commit. There is no per-run exception flag or suppression list.
 
 ### SBOM
 
 `npm run sbom` requires npm >= 9.6 (Node 24 ships npm 11) and an installed tree; it
-reports an error if `node_modules` is missing. The output is CycloneDX 1.5 JSON with
-the root component named from `package.json` (npm otherwise derives the display name
-from the working directory). The CycloneDX serial number and timestamp change on
-every run, so the file is an artifact, not a reproducible build input.
+reports an error if `node_modules` is missing. The script runs the installed npm CLI
+through `process.execPath` + `npm_execpath` and fails closed if `npm_execpath` is
+unset; it never resolves `npm` through `PATH`, which `npm run` prepends with
+`node_modules/.bin`. The output is CycloneDX 1.5 JSON with the root component named
+from `package.json` (npm otherwise derives the display name from the working
+directory). The CycloneDX serial number and timestamp change on every run, so the
+file is an artifact, not a reproducible build input.
+
+npm applies its own component selector and deduplicates by `name@version`, so
+repeated install paths collapse and dev/optional entries follow npm's selector
+rather than the license report's lockfile listing. Use the license report when the
+runtime/dev split matters.
 
 If `npm sbom` is unavailable, the documented fallback requires network:
 
@@ -76,15 +94,15 @@ artifact.
 - `npm audit` depends on the registry advisory database and on npm's mapping of
   advisories to versions; it is not exhaustive and unavailable air-gapped. Offline
   runs are not attempted, and a missing network is a failed step in CI, never a pass.
-- The license report trusts declared package metadata. It does not read license texts,
-  generate a NOTICE file, scan vendored or non-registry files, or validate SPDX
-  expression syntax beyond the token check above.
-- Runtime/dev is taken from the npm lockfile's `dev`/`devOptional` flags for the
-  installed tree, not from a second resolver. Optional platform-specific packages not
-  installed on this host are absent.
+- The license report trusts declared package metadata, whether from the installed
+  `package.json` or the lock-entry fallback. It does not read license texts, generate
+  a NOTICE file, scan vendored or non-registry files, or validate SPDX expression
+  syntax beyond the token check above.
+- Runtime/dev is taken from the lockfile's `dev`/`devOptional` flags, not from a
+  second resolver. Optional platform-specific packages not installed on this host are
+  reported from the lock entry as well.
 - The SBOM reflects the installed tree and lockfile. It has no signature, provenance
-  attestation, or vulnerability data, and npm's default component selection applies.
+  attestation, or vulnerability data, and npm's default component selection and
+  `name@version` deduplication apply.
 - The lockfile pins integrity hashes; there is no automated update bot, no
   reproducible-build proof, and no review of upstream release provenance here.
-- `npm run sbom` and `npm sbom` may include or omit dev dependencies according to npm's
-  own selector; the license report labels dev entries explicitly.
