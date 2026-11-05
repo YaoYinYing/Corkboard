@@ -201,10 +201,12 @@ bounds every `detail` string/array and drops a `detail` document that still exce
 
 The write is fail-open by design: an insert error is swallowed and never logged, so the
 audit sink cannot alter an external response or an authorization outcome. Audit rows are
-metadata, never authority — no route reads them and no authorization path consults them.
-Body-integrity failures and message expiry keep their existing separate writers; expiry
-retains its deterministic id with `INSERT OR IGNORE` for reconciliation. There is no
-audit retention/deletion job and no read API or UI; `prune` never deletes these rows.
+metadata, never authority — no authorization path consults them. The only read is the
+authorized session-only `GET /overview`, which displays at most 20 sanitized
+`audit_events` rows for the account's own actions and readable projects; there is no
+audit read API. Body-integrity failures and message expiry keep their existing separate
+writers; expiry retains its deterministic id with `INSERT OR IGNORE` for reconciliation.
+There is no audit retention, rotation, or deletion job; `prune` never deletes these rows.
 
 ## Retention and pruning
 
@@ -361,7 +363,7 @@ below; a session is not an OAuth grant and an OAuth access token is not a sessio
 adds no storage, crypto, or authorization primitive; it composes the session layer
 with the existing service functions.
 
-- **Routes and rendering.** `handlers.ts` sends `/`, `/login`, `/projects`
+- **Routes and rendering.** `handlers.ts` sends `/`, `/overview`, `/login`, `/projects`
   (`POST`), `/projects/new`, `/projects/:projectId` (`GET` and `POST`),
   `/projects/:projectId/edit`, `/projects/:projectId/members` (`GET` and `POST`),
   `/projects/:projectId/members/:speakerId/remove` (`POST`),
@@ -380,7 +382,7 @@ with the existing service functions.
   `/projects/:projectId/members`, `/projects/:projectId/members/:speakerId/remove`,
   `/speakers/:speakerId/key`, and
   `/speakers/:speakerId/credentials/:credentialId/revoke`, plus POSTs to the
-  GET-only paths `isWebPath` also names (`/projects/new`,
+  GET-only paths `isWebPath` also names (`/overview`, `/projects/new`,
   `/projects/:projectId/edit`,
   `/projects/:projectId/messages/:messageId/body`, `/speakers`,
   `/speakers/:speakerId/credentials`, and
@@ -443,6 +445,24 @@ with the existing service functions.
   `credential_project_grants` rows for the project.
   `POST /login` inserts the session row and authenticated page requests refresh
   `sessions.last_seen_at`.
+- **Service overview.** `src/service/overview.ts` composes `listProjects` with
+  `sessionAccountPrincipal`, so the overview's project set is exactly the
+  dashboard's readable, non-removed membership set and adds no authorization
+  branch. It bounds that set to 100 (the API maximum) and reports truncation.
+  Message counts are one grouped parameterized aggregate over the authorized IDs;
+  storage is a sum of `body_objects.cipher_length` for live (`storage_key IS NOT
+  NULL`) rows; credential state counts reuse `credentialState` from the inventory,
+  select only expiry/revocation columns, return at most 1,001 rows for the overflow
+  check, and count the first 1,000 (the limit bounds result size, not scan work;
+  see `web-ui.md` Limits) with an explicit incomplete state above 1,000; audit rows
+  are the 20 newest where the account is the actor or the project is authorized,
+  selecting only `id` (internal dedup key, never rendered), `created_at`,
+  `operation`, `outcome`, and `project_id`. Audit project predicates are chunked
+  (≤49 IDs) with a literal `LIMIT 20` to respect D1's bound-parameter cap, then
+  merged, deduplicated by event id, and re-sorted. There is no traffic or error
+  summary because the schema has no per-tenant source. The caps bound result size,
+  not table work: the tables involved have no supporting index yet (see
+  `web-ui.md` Limits).
 - **Uniform denial.** The resolver and the session authorization branch return
   `NOT_FOUND` whenever the account has no qualifying membership, so an unreadable
   project is indistinguishable from a missing one. A revoked or expired session is
@@ -706,11 +726,15 @@ authenticate a speaker and does not touch the per-credential limiter.
 The registry is process-local and in-memory: values reset on restart and are not shared
 across processes or Workers isolates. There is no persistence, no cross-project
 aggregation, and no history. Per-project message counts are not part of this operator
-snapshot. They are exposed only through `GET /api/v1/projects/:projectId/stats`, which
-runs the same `project.read` authorization as project detail and returns project-scoped
-ready/pending/expired counts plus the calling speaker's unread count. An unknown project
-and a project the caller does not belong to are the same `NOT_FOUND`, and the query
-selects no message content. These are documented limitations, not hidden behavior.
+snapshot. They are exposed only through two authorized surfaces:
+`GET /api/v1/projects/:projectId/stats`, which runs the same `project.read`
+authorization as project detail and returns project-scoped ready/pending/expired
+counts plus the calling speaker's unread count; and `GET /overview`, which derives
+ready/pending/expired counts for the session account's readable project set (bounded
+to 100) and never adds a cross-tenant aggregate. An unknown project and a project the
+caller does not belong to are the same `NOT_FOUND` on the stats endpoint, and neither
+surface selects message content. These are documented limitations, not hidden
+behavior.
 
 ## Deliberate deferments
 

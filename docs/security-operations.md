@@ -581,10 +581,12 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   every authentication/OAuth action is a distinct event and a retry is a separate
   attempt; only reconcilable transitions such as `message.expire` use a deterministic
   id with `INSERT OR IGNORE`.
-- There is **no audit read API or UI, and no retention, rotation, or deletion** of
-  `audit_events` yet. `prune` deliberately never deletes audit rows. Rows grow with
-  authentication and OAuth traffic; the operator is responsible for database and
-  backup lifecycle management. Audit rows are not cryptographically sealed or
+- **No audit read API** exists; the authorized session-only `GET /overview` displays at
+  most 20 sanitized `audit_events` rows for the account's own actions and readable
+  projects. No authorization path consults audit data. There is **no retention,
+  rotation, or deletion** of `audit_events`; `prune` deliberately never deletes audit
+  rows. Rows grow with authentication and OAuth traffic; the operator is responsible
+  for database and backup lifecycle management. Audit rows are not cryptographically sealed or
   tamper-evident against an operator with database write access. No audit call site
   passes a request id to `writeAudit`, so `request_id` remains null for these events
   (the HTTP layer does have one; it is simply not forwarded).
@@ -853,7 +855,7 @@ rather than comprehensive erasure.
 
 ### Authorized per-project counts
 
-`GET /api/v1/projects/:projectId/stats` is the only per-project count surface. It
+There are two authorized per-project count surfaces. `GET /api/v1/projects/:projectId/stats`
 requires the normal `project.read` decision (active membership, explicit credential
 grant, and scope), exactly like project detail, and returns only:
 
@@ -869,6 +871,18 @@ without a grant receives `FORBIDDEN`, consistent with project detail. The respon
 contains no summaries, bodies, message/speaker/account IDs, or tokens, and the route
 is read-only (`POST` and other methods return `405`). Do not add these counts to the
 operator snapshot or to any unauthenticated aggregate.
+
+The second surface is the session-only HTML `GET /overview`. It derives the same
+ready/pending/expired counts for the signed-in account's readable project set (the
+`listProjects` session set, bounded to 100) and adds stored-byte totals, owned-speaker
+credential state counts, and at most 20 sanitized account/project audit rows. It is
+read-only for project/message/credential/audit data; the shared authenticated-page
+`sessions.last_seen_at` refresh still applies. The audit query selects only `id`
+(internal dedup key, never rendered), `created_at`, `operation`, `outcome`, and
+`project_id`, chunked so no query exceeds D1's 100-bound-parameter limit, merged
+and deduplicated by event id, and hides a project ID outside the readable set. It
+shows no traffic or error summary, because there is no per-tenant source. See
+[`web-ui.md`](./web-ui.md) for the full contract.
 
 ## Known limits
 
@@ -891,6 +905,14 @@ operator snapshot or to any unauthenticated aggregate.
   request histogram measures HTTP duration and the separate queue-to-commit histogram
   measures message finalization delay; per-project counts require an authorized
   `project.read` view and are not in the operator snapshot.
+- The authorized `GET /overview` row caps (100 projects, 20 audit rows, 1,001
+  credential rows scanned) bound **result size**, not table work. This read-only
+  slice adds no migration, and `body_objects(project_id)`,
+  `audit_events(actor_account_id, created_at)`, `audit_events(project_id, created_at)`,
+  `credentials(speaker_id)`, and `speakers(owner_account_id)` are unindexed. Add
+  reviewed indexes with measured SQLite/D1 query plans before treating the caps as a
+  scan-cost bound. Credential counts above 1,000 rows are explicitly marked
+  incomplete.
 - Human sessions are implemented as server-side rows with 12-hour absolute / 30-minute
   idle expiry and per-session revocation. The OAuth 2.1 authorization-server core is
   implemented (dynamic public clients, PKCE, rotating refresh tokens, revocation), but
@@ -899,7 +921,9 @@ operator snapshot or to any unauthenticated aggregate.
   adds project create/edit, slice X adds the account-scoped speaker directory
   and one-time project-scoped credential issuance on the same session auth, and the
   membership-editor slice adds the per-project member list, add, and remove routes,
-  and the credential-inventory slice adds per-speaker listing and soft revocation.
+  the credential-inventory slice adds per-speaker listing and soft revocation, and
+  the service-overview slice adds the authorized read-only `GET /overview` (counts,
+  stored-byte totals, credential states, and 20 sanitized audit rows).
   Message send, expiry, credential rotation, and per-credential grant editing remain
   CLI/API-only. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not

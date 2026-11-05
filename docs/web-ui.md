@@ -2,8 +2,8 @@
 
 **Status: implemented locally for Node.js + SQLite (vertical slices L and M plus
 dashboard project create/edit, speaker credential issuance, per-speaker credential
-inventory and revocation, and the per-project membership editor, with the approved
-design system tokens applied).**
+inventory and revocation, the per-project membership editor, and the authorized
+account service overview, with the approved design system tokens applied).**
 The dashboard is server-rendered HTML for a signed-in **account**. Message reads,
 filters, replay, and body reveal remain read-only. The writes are project create,
 project title/summary edit, issuing one speaker credential with explicit project
@@ -26,7 +26,8 @@ rotate operation. See `IMPLEMENTATION_STATE.md` for the current evidence.
 | --- | --- | --- |
 | `/login` | `GET` | Sign-in form; issues a login CSRF cookie. |
 | `/login` | `POST` | Form-encoded sign-in with double-submit CSRF and normalized `return_to`. |
-| `/` | `GET` | Readable project list for the account, with a link to the create form. |
+| `/` | `GET` | Readable project list for the account, with links to the create form, speakers, and service overview. |
+| `/overview` | `GET` | Authorized account overview: readable projects with ready/pending/expired counts, stored body bytes, owned-speaker credential states, and up to 20 recent sanitized audit events. |
 | `/projects/new` | `GET` | New-project form. |
 | `/projects` | `POST` | Form-encoded project create; redirects after POST. |
 | `/projects/:projectId` | `GET` | Message timeline in ascending server `seq`, with filters, summary search, and cursor replay. |
@@ -421,6 +422,63 @@ membership; an already removed row returns `NOT_FOUND`. Credential issuance is
 available here, and the credential inventory and soft revocation are described
 above; credential rotation and per-credential grant editing remain CLI-only.
 
+## Service overview
+
+`GET /overview` is a read-only, session-only page linked from the project list.
+It makes no project, message, credential, or audit write, has no form and no CSRF
+surface, and evaluates no query parameter other than `lang`; the shared
+authenticated-page refresh of `sessions.last_seen_at` still applies. A revoked, expired, idle-expired, or malformed
+session redirects to `/login`; a bearer `Authorization` header is never read, and
+the service function rejects any principal that is not a session viewer with
+`FORBIDDEN`.
+
+**Authority.** The page reuses `listProjects` with `sessionAccountPrincipal`, so
+the project set is exactly the account's readable dashboard project list: active
+projects where an active speaker owned by the signed-in account has an active,
+non-removed membership whose parsed capabilities include `project.read`. It does
+not add ownership, membership, or aggregate privileges and never exposes a global
+or another tenant's total. An account with no readable project sees the ordinary
+empty state. The project set is bounded to **100** (the API maximum); when the
+service reports another page, the page states that only the first 100 readable
+projects are shown. Every per-project figure is therefore scoped to those
+authorized project IDs.
+
+**Content.**
+
+- Per readable project: `ready`, `pending`, and `expired` message counts from one
+  grouped aggregate over `messages`. `ready` and `expired` require a committed
+  `seq`; `pending` is the provisional `seq IS NULL` row, matching
+  `GET /api/v1/projects/:projectId/stats`.
+- Stored body pressure: the sum of `body_objects.cipher_length` for the authorized
+  projects, excluding rows whose `storage_key` is `NULL` (a blob deleted by
+  expiry). This is computed from stored metadata; it is not a filesystem or object
+  store measurement, and orphaned pending-send blobs still occupy the counted
+  size. The page also shows a total across the listed projects.
+- Credential states for the account's owned speakers: counts of `active`,
+  `expired`, `revoked`, and `unknown`, using the exact `credentialState`
+  derivation of the credential inventory (revocation wins over expiry; an
+  unparseable expiry is `unknown`). Only `expires_at` and `revoked_at` are
+  selected; no token, prefix, verifier, or scope value is read. The query returns
+  at most 1,001 rows (`LIMIT 1001`, ordered by `created_at`, `id`) for the overflow
+  check and counts the first 1,000; when a 1,001st row exists the page states that
+  the counts cover only the first 1,000 credentials and are incomplete, rather than
+  silently understating. `LIMIT` bounds result size, not scan work (see Limits).
+- Up to **20** recent audit events where `audit_events.actor_account_id` is the
+  signed-in account or `project_id` is one of the at most 100 **listed readable**
+  project IDs, newest first by `(created_at, id)`. Only `id` (internal dedup key,
+  never rendered), `created_at`, `operation`, `outcome`, and `project_id` are
+  selected; the `detail` column is never read, and a project ID
+  outside the authorized set is not rendered. The page never shows event detail,
+  tokens, prefixes, verifiers, bodies, summaries, email addresses, or IPs.
+- **Traffic and error summaries are not available in this slice.** The current
+  schema has no per-tenant traffic or error source, and the page does not show
+  process-global counters to a tenant. It states this limitation explicitly
+  rather than presenting a global total as the account's data.
+
+All dynamic values are escaped. The page carries the same `no-store`, `nosniff`,
+`no-referrer`, `X-Frame-Options: DENY`, and strict CSP headers as every other
+dashboard response.
+
 ## Authorization model
 
 A session authenticates an **account**, not a speaker. For every data read the
@@ -484,7 +542,9 @@ Fail-closed behavior:
   integrity failure is a generic safe error page with no partial content.
 
 The message read surface performs no project, message, credential, or read-receipt
-write, and no page marks a message read. The writes are the session row inserted
+write, and no page marks a message read. The service overview makes no project,
+message, credential, or audit write; the shared authenticated-page
+`sessions.last_seen_at` refresh still applies. The writes are the session row inserted
 by `POST /login`, the `sessions.last_seen_at` refresh on authenticated page
 requests, `POST /projects` (project plus owner-membership insert),
 `POST /projects/:projectId` (project title/summary update),
@@ -622,7 +682,22 @@ bounded form before checking CSRF.
   changed only through the CLI, and rotation is the revoke-then-issue flow above,
   not an atomic operation.
 - The project list is bounded to the API maximum (100 per request) and has no UI
-  pagination; the REST API still paginates.
+  pagination; the REST API still paginates. The service overview uses the same
+  100-project bound and states when the set is truncated.
+- The service overview has no traffic or error summary because the schema has no
+  per-tenant source for them; it shows no global/process counter. Its storage
+  figure is stored-metadata ciphertext size, not a live object-store or
+  filesystem measurement, and orphaned pending-send blobs are included while
+  expiry-deleted blobs are excluded. Audit events are capped at the 20 newest
+  matching rows; there is no audit pagination, filtering, or detail view.
+  Credential counts are incomplete above 1,000 rows and say so.
+- The row caps bound **result size**, not table work. This read-only slice adds
+  no migration, and the current schema has no index on
+  `body_objects(project_id)`, `audit_events(actor_account_id, created_at)`,
+  `audit_events(project_id, created_at)`, `credentials(speaker_id)`, or
+  `speakers(owner_account_id)`. The overview's aggregates and scans can therefore
+  read more rows than they return; add reviewed indexes with measured query plans
+  (SQLite and D1) before claiming the caps bound scan cost.
 - Search covers message **summaries only**. There is no body search, full-text
   index, ranking, highlighting, saved search, or search across projects.
 - `type` and `sender` are exact-match filters using the API identifiers. The

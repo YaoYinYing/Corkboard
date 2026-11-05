@@ -3,6 +3,39 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — A tenant aggregate must start from the authorized row set, not from a global count
+
+- **Failure avoided:** An overview page invites `SELECT COUNT(*) FROM projects` or
+  process-global traffic/error counters. Either would disclose another tenant's
+  existence or volume, and a per-tenancy claim built on a global number is simply
+  false. The same page also invites rendering `audit_events.detail`, which is
+  sanitized by convention but is not needed for a summary and can grow with future
+  call sites.
+- **Decision:** Derive the project set from the existing session `listProjects`
+  (the same readable, non-removed membership set as the dashboard), bound it to the
+  API maximum, and aggregate message counts/storage/audit rows only over those IDs.
+  Budget queries: one grouped message aggregate, one grouped storage aggregate, one
+  credential-state read, one account-actored audit read (`LIMIT 20`), and one audit
+  read per ≤49-project chunk (up to four queries at the 100-project cap), merged and
+  deduplicated by event `id` then re-sorted. Audit selects only `id` (the internal
+  dedup key, never rendered), `created_at`, `operation`, `outcome`, and `project_id`,
+  and hides a project ID outside the authorized set. Chunking keeps every query under
+  D1's 100-bound-parameter limit; the literal `LIMIT 20` also avoids a bound parameter
+  there. Credential states reuse `credentialState` from the
+  inventory instead of re-deriving revoked/expired/unknown. Where no per-tenant
+  source exists (traffic, errors), say so; never substitute a global metric.
+- **Reproducer / test:** Seed two tenants with projects, messages, credentials, and
+  audit rows; log in as one and assert the other tenant's title, project ID,
+  operation, and credential do not appear, and that an audit `detail` value never
+  reaches the page. `tests/integration/overview.test.ts` also covers the 20-event
+  cap, empty states, en/zh, bearer rejection, revoked-session redirect, and the real
+  Node adapter path.
+- **Prevents:** Cross-tenant disclosure through aggregates, presenting global
+  process metrics as tenant data, and audit-detail leakage into a summary page.
+- **Remove when:** A tenant-scoped traffic/error counter exists with its own
+  authenticated contract, or the overview moves to a reviewed analytics service with
+  the same isolation tests.
+
 ## 2026-11-05 — Revocation is not rotation, and a credential ID is not speaker-wide authority
 
 - **Failure avoided:** A dashboard credential list invites three mistakes: gating it

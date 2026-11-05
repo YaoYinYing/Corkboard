@@ -335,7 +335,7 @@ function requireCredentialId(credentialId: string): void {
 // and buffers writes for D1's batch emulation). There is no snapshot claim: an
 // ownership transfer between reads can only make a later read return empty,
 // never add a foreign speaker's rows.
-function credentialState(
+export function credentialState(
   revokedAt: string | null,
   expiresAt: string | null,
   nowMs: number,

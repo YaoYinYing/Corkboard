@@ -184,6 +184,19 @@ title/summary edit (`POST /projects/:projectId`). Dashboard credential issuance
   `message.send`, or member capabilities, but those scopes are rejected for a
   session viewer. Tests assert a `message.read` viewer cannot authorize
   `project.edit`, write a receipt, send a message, or run expiry.
+- **Service overview.** `GET /overview` is session-only and read-only for
+  project/message/credential/audit data; the shared authenticated-page
+  `sessions.last_seen_at` refresh still applies. Its
+  project set is the same `listProjects` readable set used by the dashboard
+  (bounded to 100), so per-project counts, stored-size sums, and audit rows carry
+  the session account's existing `project.read` authority and never a global or
+  another tenant's aggregate. The audit query selects only `id` (internal dedup
+  key, never rendered), `created_at`, `operation`, `outcome`, and `project_id`;
+  `detail`, bodies, summaries, tokens, prefixes, verifiers, emails, and IPs are not
+  selected or rendered. A project ID
+  outside the authorized set is hidden. There is no traffic or error summary
+  because the schema has no per-tenant source, and process-global metrics are not
+  shown to a tenant. A bearer credential cannot use the page.
 - **Project create/edit.** Create requires an active account with an active owned
   speaker. It inserts the project and an owner membership for the deterministic
   first owned speaker (ordered by `created_at`, then `id`) and creates no speaker,
@@ -370,9 +383,12 @@ Authentication and OAuth lifecycle metadata is written to `audit_events` through
   failure reasons are bounded constants. Revocation is audited only when ownership is
   proven, so the audit stream adds no existence or account signal beyond the HTTP
   response.
-- **Availability and growth.** There is no audit read API/UI and no retention,
-  rotation, or deletion; `prune` never removes audit rows. Authentication/OAuth traffic
-  therefore grows the table, and operators must size and back it up accordingly.
+- **Availability and growth.** No audit read API exists; the authorized session-only
+  `GET /overview` displays at most 20 sanitized `audit_events` rows for the account's
+  own actions and readable projects. No authorization path consults audit data. There
+  is no retention, rotation, or deletion; `prune` never removes audit rows.
+  Authentication/OAuth traffic therefore grows the table, and operators must size and
+  back it up accordingly.
   `request_id` is null on every audit row because no call site passes the HTTP request
   id to `writeAudit`; the request id itself is available at the HTTP layer.
 

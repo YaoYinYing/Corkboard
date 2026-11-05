@@ -23,6 +23,10 @@ import {
   type ReadReceipt,
 } from "../service/messages.ts";
 import {
+  getAccountOverview,
+  type AccountOverview,
+} from "../service/overview.ts";
+import {
   addProjectMember,
   authorizeProjectOwner,
   createProject,
@@ -199,6 +203,29 @@ const EN = {
   memberDuplicate: "That speaker is already an active member.",
   memberLastOwner: "The last owner membership cannot be removed.",
   removeMemberAction: "Remove",
+  overviewLink: "Service overview",
+  overviewTitle: "Service overview",
+  overviewProjectCountLabel: "Readable projects",
+  overviewTruncated: "Showing the first 100 readable projects.",
+  overviewMessagesHeading: "Message state",
+  overviewReadyLabel: "Ready",
+  overviewPendingLabel: "Pending",
+  overviewExpiredLabel: "Expired",
+  overviewStorageLabel: "Stored body size",
+  overviewStorageTotalLabel: "Total stored body size",
+  overviewTotalsHeading: "Totals",
+  overviewCredentialsHeading: "Credential states",
+  overviewCredentialsTruncated:
+    "Credential counts cover the first 1000 credentials and are therefore incomplete.",
+  overviewAuditHeading: "Recent administrative events",
+  overviewAuditEmpty: "No recent audit events.",
+  overviewOperationLabel: "Operation",
+  overviewOutcomeLabel: "Outcome",
+  overviewProjectLabel: "Project",
+  overviewTimeLabel: "Time",
+  overviewUnavailableHeading: "Traffic and error summaries",
+  overviewUnavailableBody:
+    "Traffic and error summaries are not available for this account; the current schema has no per-tenant source.",
 } as const;
 
 type MessageKey = keyof typeof EN;
@@ -314,6 +341,27 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   memberDuplicate: "该说话者已经是活跃成员。",
   memberLastOwner: "无法移除最后一个所有者成员。",
   removeMemberAction: "移除",
+  overviewLink: "服务概览",
+  overviewTitle: "服务概览",
+  overviewProjectCountLabel: "可查看的项目",
+  overviewTruncated: "仅显示前 100 个可查看的项目。",
+  overviewMessagesHeading: "消息状态",
+  overviewReadyLabel: "就绪",
+  overviewPendingLabel: "处理中",
+  overviewExpiredLabel: "已过期",
+  overviewStorageLabel: "正文存储大小",
+  overviewStorageTotalLabel: "正文存储总大小",
+  overviewTotalsHeading: "合计",
+  overviewCredentialsHeading: "凭证状态",
+  overviewCredentialsTruncated: "凭证计数仅覆盖前 1000 个凭证，因此并不完整。",
+  overviewAuditHeading: "最近的审计事件",
+  overviewAuditEmpty: "暂无最近审计事件。",
+  overviewOperationLabel: "操作",
+  overviewOutcomeLabel: "结果",
+  overviewProjectLabel: "项目",
+  overviewTimeLabel: "时间",
+  overviewUnavailableHeading: "流量与错误摘要",
+  overviewUnavailableBody: "此账户无法查看流量与错误摘要；当前数据库结构没有按租户统计的数据来源。",
 };
 
 const CATALOGS: Readonly<Record<Locale, Readonly<Record<MessageKey, string>>>> = {
@@ -913,9 +961,118 @@ ${result.projects
 </ul>`;
 
   const content = `<h1>${escapeHtml(t(locale, "dashboardTitle"))}</h1>
-<p><a href="/projects/new${localeQuery(locale)}">${escapeHtml(t(locale, "newProjectTitle"))}</a> <span aria-hidden="true">·</span> <a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "speakersTitle"))}</a></p>
+<p><a href="/projects/new${localeQuery(locale)}">${escapeHtml(t(locale, "newProjectTitle"))}</a> <span aria-hidden="true">·</span> <a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "speakersTitle"))}</a> <span aria-hidden="true">·</span> <a href="/overview${localeQuery(locale)}">${escapeHtml(t(locale, "overviewLink"))}</a></p>
 ${projects}`;
   return htmlResponse(200, renderPage(locale, url, t(locale, "dashboardTitle"), content));
+}
+
+function formatByteCount(locale: Locale, bytes: number): string {
+  const formatter = new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US");
+  const value = Number.isFinite(bytes) && bytes >= 0 ? Math.trunc(bytes) : 0;
+  return `${formatter.format(value)} B`;
+}
+
+// Every value below is either a server-generated identifier/label or a
+// sanitized audit column; all of them still pass through `escapeHtml`.
+function renderOverview(
+  locale: Locale,
+  url: URL,
+  overview: AccountOverview,
+): Response {
+  const projectTitles = new Map(
+    overview.projects.map((project) => [project.id, project.title]),
+  );
+  const projectItems =
+    overview.projects.length === 0
+      ? `<p class="empty">${escapeHtml(t(locale, "dashboardEmpty"))}</p>`
+      : `<ul class="project-list">
+${overview.projects
+  .map((project) => {
+    const titleId = `overview-project-${escapeHtml(project.id)}-title`;
+    return `<li><article aria-labelledby="${titleId}">
+<h2 id="${titleId}"><a href="/projects/${escapeHtml(project.id)}${localeQuery(locale)}">${escapeHtml(project.title)}</a></h2>
+<h3>${escapeHtml(t(locale, "overviewMessagesHeading"))}</h3>
+<dl>
+<dt>${escapeHtml(t(locale, "overviewReadyLabel"))}</dt><dd>${project.messages.ready}</dd>
+<dt>${escapeHtml(t(locale, "overviewPendingLabel"))}</dt><dd>${project.messages.pending}</dd>
+<dt>${escapeHtml(t(locale, "overviewExpiredLabel"))}</dt><dd>${project.messages.expired}</dd>
+<dt>${escapeHtml(t(locale, "overviewStorageLabel"))}</dt><dd>${escapeHtml(formatByteCount(locale, project.storageBytes))}</dd>
+</dl>
+</article></li>`;
+  })
+  .join("\n")}
+</ul>`;
+
+  const totals = `<dl>
+<dt>${escapeHtml(t(locale, "overviewReadyLabel"))}</dt><dd>${overview.totals.ready}</dd>
+<dt>${escapeHtml(t(locale, "overviewPendingLabel"))}</dt><dd>${overview.totals.pending}</dd>
+<dt>${escapeHtml(t(locale, "overviewExpiredLabel"))}</dt><dd>${overview.totals.expired}</dd>
+<dt>${escapeHtml(t(locale, "overviewStorageTotalLabel"))}</dt><dd>${escapeHtml(formatByteCount(locale, overview.totals.storageBytes))}</dd>
+</dl>`;
+
+  const credentialStates = `<dl>
+<dt>${escapeHtml(t(locale, "statusActive"))}</dt><dd>${overview.credentials.active}</dd>
+<dt>${escapeHtml(t(locale, "statusExpired"))}</dt><dd>${overview.credentials.expired}</dd>
+<dt>${escapeHtml(t(locale, "statusRevoked"))}</dt><dd>${overview.credentials.revoked}</dd>
+<dt>${escapeHtml(t(locale, "statusUnknown"))}</dt><dd>${overview.credentials.unknown}</dd>
+</dl>`;
+
+  const auditItems =
+    overview.auditEvents.length === 0
+      ? `<p class="empty">${escapeHtml(t(locale, "overviewAuditEmpty"))}</p>`
+      : `<ul class="project-list">
+${overview.auditEvents
+  .map((event) => {
+    const project =
+      event.projectId === null
+        ? escapeHtml(t(locale, "noneLabel"))
+        : `<a href="/projects/${escapeHtml(event.projectId)}${localeQuery(locale)}">${escapeHtml(projectTitles.get(event.projectId) ?? event.projectId)}</a>`;
+    return `<li><article>
+<dl>
+<dt>${escapeHtml(t(locale, "overviewTimeLabel"))}</dt><dd><time datetime="${escapeHtml(event.createdAt)}">${escapeHtml(formatCommittedAt(locale, event.createdAt))}</time></dd>
+<dt>${escapeHtml(t(locale, "overviewOperationLabel"))}</dt><dd><code>${escapeHtml(event.operation)}</code></dd>
+<dt>${escapeHtml(t(locale, "overviewOutcomeLabel"))}</dt><dd>${escapeHtml(event.outcome)}</dd>
+<dt>${escapeHtml(t(locale, "overviewProjectLabel"))}</dt><dd>${project}</dd>
+</dl>
+</article></li>`;
+  })
+  .join("\n")}
+</ul>`;
+
+  const credentialsTruncated = overview.credentialsTruncated
+    ? `\n<p class="hint">${escapeHtml(t(locale, "overviewCredentialsTruncated"))}</p>`
+    : "";
+  const truncated = overview.projectsTruncated
+    ? `\n<p class="hint">${escapeHtml(t(locale, "overviewTruncated"))}</p>`
+    : "";
+  const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a></p>
+<h1>${escapeHtml(t(locale, "overviewTitle"))}</h1>
+<h2>${escapeHtml(t(locale, "overviewProjectCountLabel"))}</h2>
+<p>${overview.projects.length}</p>${truncated}
+${projectItems}
+<h2>${escapeHtml(t(locale, "overviewTotalsHeading"))}</h2>
+${totals}
+<h2>${escapeHtml(t(locale, "overviewCredentialsHeading"))}</h2>
+${credentialStates}${credentialsTruncated}
+<h2>${escapeHtml(t(locale, "overviewAuditHeading"))}</h2>
+${auditItems}
+<h2>${escapeHtml(t(locale, "overviewUnavailableHeading"))}</h2>
+<p class="empty">${escapeHtml(t(locale, "overviewUnavailableBody"))}</p>`;
+  return htmlResponse(200, renderPage(locale, url, t(locale, "overviewTitle"), content));
+}
+
+async function handleOverview(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const overview = await getAccountOverview(deps, sessionAccountPrincipal(session));
+  return renderOverview(locale, url, overview);
 }
 
 function projectFormResponse(
@@ -1981,6 +2138,7 @@ function webError(locale: Locale, url: URL, error: unknown): Response {
 export function isWebPath(segments: readonly string[]): boolean {
   if (segments.length === 0) return true;
   if (segments.length === 1 && segments[0] === "login") return true;
+  if (segments.length === 1 && segments[0] === "overview") return true;
   if (segments.length === 1 && segments[0] === "projects") return true;
   if (segments.length === 1 && segments[0] === "speakers") return true;
   if (segments.length === 2 && segments[0] === "static" && segments[1] === "app.css") {
@@ -2063,6 +2221,10 @@ export async function handleWebRoute(
     if (segments.length === 2 && segments[0] === "static" && segments[1] === "app.css") {
       if (method !== "GET") return methodNotAllowed(locale, url, "GET");
       return stylesheetResponse();
+    }
+    if (segments.length === 1 && segments[0] === "overview") {
+      if (method !== "GET") return methodNotAllowed(locale, url, "GET");
+      return await handleOverview(deps, request, url, locale);
     }
     if (segments.length === 1 && segments[0] === "speakers") {
       if (method !== "GET") return methodNotAllowed(locale, url, "GET");

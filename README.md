@@ -21,7 +21,7 @@ expiry, HTTP API, bootstrap CLI), a **bearer-authenticated MCP Streamable HTTP**
 endpoint at `/mcp`, **human account sessions** (password sign-in, session read,
 sign-out), a **human web dashboard** (project list, project create/edit, speaker
 directory, one-time project-scoped credential issuance, per-project membership
-editor, ascending timeline, explicit
+editor, authorized account service overview, ascending timeline, explicit
 body reveal, English and Simplified Chinese), and an **OAuth 2.1
 authorization-server core** (dynamic public clients, PKCE, consent, rotating refresh
 tokens, revocation) are implemented and tested locally. Cloudflare Workers/D1/R2, the
@@ -65,7 +65,8 @@ membership, start the server and open `http://127.0.0.1:8787/login` (use a TLS
 reverse proxy outside loopback development). The dashboard supports project create
 and edit, a speaker directory, one-time issuance of a project-scoped speaker
 credential, per-speaker credential inventory and soft revocation, a project-owner
-membership editor, the message timeline, and explicit body reveal, in English or
+membership editor, an authorized read-only service overview, the message timeline,
+and explicit body reveal, in English or
 Simplified Chinese (`?lang=zh`). Messages and read state remain read-only; there is
 no message send, credential rotation, or admin action. See
 [`docs/web-ui.md`](docs/web-ui.md) for the authorization model, CSP, accessibility,

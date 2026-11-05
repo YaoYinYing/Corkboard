@@ -4,9 +4,9 @@
 bearer-authenticated MCP slice, human account sessions (slice I), the OAuth 2.1
 authorization-server core (slice J), the human web dashboard (slice L, with
 metadata filters, summary search, and bounded replay in slice M; English and
-Simplified Chinese), dashboard project create/edit (slice T), and the operator
+Simplified Chinese), dashboard project create/edit (slice T), the operator
 observability slice (queue-to-commit histogram and authorized per-project
-counts).** Cloudflare
+counts), and the authorized account service overview.** Cloudflare
 Workers/D1, the ChatGPT Web plugin experience, the remaining dashboard write/admin
 actions, and the "Planned, not implemented" section below are not implemented. See
 `IMPLEMENTATION_STATE.md` for the current evidence,
@@ -195,6 +195,7 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | --- | --- | --- |
 | `/login` | `GET`, `POST` | Form sign-in. `POST` requires `application/x-www-form-urlencoded` and a matching `login_csrf` hidden field plus `corkboard_web_login` cookie. `return_to` must be a same-origin path. |
 | `/` | `GET` | Projects readable by the account. |
+| `/overview` | `GET` | Authorized account overview. Reuses the readable project set (`listProjects` with the session account), bounded to 100 with a truncation note; per-project ready/pending/expired counts; stored `body_objects.cipher_length` sums excluding deleted blobs; owned-speaker credential active/expired/revoked/unknown counts; and at most 20 newest audit rows (`id` selected only as an internal dedup key and never rendered; `created_at`, `operation`, `outcome`, `project_id`; never `detail`) where the account is the actor or the project is one of the readable ones. Read-only for project/message/credential/audit data (`GET` only, session only); the shared authenticated-page `sessions.last_seen_at` refresh still applies. Traffic and error summaries have no per-tenant source and are not shown. |
 | `/projects/new` | `GET` | New-project form. |
 | `/projects` | `POST` | Form-encoded create; requires `application/x-www-form-urlencoded`, the `csrf_token` hidden field plus `corkboard_csrf` cookie, and an active owned speaker. `303` to the new timeline. |
 | `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`, `type`, `sender`, `unread`, and `q` use the same identifiers, bounds, and filter semantics as the REST message list below. A blank or whitespace-only value is treated as absent (blank text and number inputs reach the parser as empty values); only non-blank values are validated and can return the HTML `400` page. |
@@ -234,6 +235,24 @@ CSP and no inline script or style. `?lang=zh` selects Simplified Chinese; unknow
 locales fall back to English and `lang` is preserved across filters, pager links,
 and project forms. Filter, search, replay, project form, CSRF, and authorization
 behavior is specified in [`web-ui.md`](./web-ui.md).
+
+`GET /overview` is a read-only session page with no form and no project, message,
+credential, or audit write; the shared authenticated-page `sessions.last_seen_at`
+refresh still applies. Its
+project set is exactly the dashboard's readable project list (`listProjects`
+with `sessionAccountPrincipal`, bounded to 100; the page states when more exist),
+so every count is scoped to authorized project IDs and no cross-tenant aggregate
+exists. Message counts are one grouped parameterized aggregate matching
+`GET /api/v1/projects/:projectId/stats`; storage is the sum of
+`body_objects.cipher_length` for non-deleted (`storage_key IS NOT NULL`) rows;
+credential counts reuse the inventory's `credentialState` derivation and select
+only `expires_at`/`revoked_at`. Audit rows are the 20 newest where
+`actor_account_id` is the session account or `project_id` is a readable project;
+only non-secret columns are selected and a project ID outside the readable set is
+not rendered. The page shows no traffic or error summary because the current
+schema has no per-tenant source, and it never exposes process-global metrics.
+A bearer credential cannot use the page; it reads only the session cookie. See
+[`web-ui.md`](./web-ui.md).
 
 The speaker directory is account-scoped: `GET /speakers` lists only rows whose
 `owner_account_id` is the session account, and shows active project grants (active,
@@ -449,8 +468,10 @@ shared across processes or Workers isolates, keeps no persistence or history, an
 aggregates no cross-project view. The request latency histogram measures HTTP request
 duration; `queue_to_commit_ms` measures message finalization delay as described above.
 Per-project message counts are deliberately **not** part of this operator snapshot;
-they are exposed only through the authorized per-project stats endpoint below, so a
-project's existence and volume are never disclosed to an unauthorized caller.
+they are exposed only through two authorized surfaces: the per-project stats endpoint
+below (one project under `project.read`) and `GET /overview` (the session account's
+readable project set, bounded to 100). Neither surface discloses a project's existence
+or volume to an unauthorized caller.
 Disabling the endpoint does not stop the counters; it only hides the route.
 
 ### `GET /api/v1/me`
@@ -784,8 +805,9 @@ read/sign-out is implemented as described above; the dashboard (login, project l
 project create/edit, timeline with metadata filters, summary-only search, and
 bounded cursor replay, body reveal, English/Simplified Chinese) is implemented per
 [`web-ui.md`](./web-ui.md); the speaker directory, credential issuance, and the
-per-project HTML membership editor are implemented; the dashboard credential
-inventory and soft revocation are implemented; credential rotation and
+per-project HTML membership editor and the authorized service overview are
+implemented; the dashboard credential inventory and soft revocation are
+implemented; credential rotation and
 per-credential grant editing, project deletion/status changes, and
 message/expiry writes remain deferred or CLI-only. The
 bearer-authenticated `/mcp` surface is implemented
