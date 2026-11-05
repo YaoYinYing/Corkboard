@@ -11,6 +11,7 @@ import {
   requestTooLargeResponse,
   type RequestLogEntry,
 } from "../../app/handlers.ts";
+import { isWebPath } from "../../app/web.ts";
 import { rateLimitConfigFromEnv } from "../../app/rate-limit.ts";
 import { oauthBaseUrlFromEnv } from "../../app/oauth.ts";
 import {
@@ -58,14 +59,15 @@ export async function readCappedBody(
   return Buffer.concat(chunks);
 }
 
-// Only routes that read a body are buffered. Rejected methods/routes never
-// consume the request stream, so an oversized POST to /healthz is not buffered.
+// Only body-bearing POSTs are buffered. Every dashboard form posts to a web
+// path, so the web router owns that side of the contract and a new dashboard
+// form needs no second route list here. GET/HEAD/DELETE stay unbuffered, and
+// an oversized body is still capped by MAX_REQUEST_BODY_BYTES.
 function needsBody(method: string, pathname: string): boolean {
   if (method !== "POST") return false;
   const segments = pathname.split("/").filter((segment) => segment !== "");
   if (segments.length === 1 && segments[0] === "mcp") return true;
-  // Dashboard sign-in is a form POST; without this the body is never buffered.
-  if (segments.length === 1 && segments[0] === "login") return true;
+  if (segments.length > 0 && isWebPath(segments)) return true;
   if (segments.length === 2 && segments[0] === "oauth") {
     return (
       segments[1] === "register" ||

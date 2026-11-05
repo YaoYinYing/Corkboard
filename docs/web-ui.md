@@ -152,7 +152,14 @@ The timeline has no create link. Forms preserve `?lang=zh`, including the
 `303` redirect after a successful create or edit.
 
 Both forms submit `application/x-www-form-urlencoded` with a hidden `csrf_token`.
-The request body is bounded to 64 KiB, the same limit as the login form. The
+The request body is bounded to 64 KiB, the same limit as the login form. The Node
+adapter buffers POST bodies on every non-root web path the router recognizes:
+sign-in, project create/edit, and POSTs to GET-only pages such as `/projects/new`,
+`/projects/:projectId/edit`, `/projects/:projectId/messages/:messageId/body`, and
+`/static/app.css`. Those GET-only POSTs still get the router's `405`, but their
+body is buffered up to the cap first; the root `/` is excluded. GET, HEAD, and
+DELETE requests stay unbuffered. A chunked or declared body over the cap is
+rejected with `413` by the adapter before the handler runs. The
 `title` field is required and must be 1–140 Unicode graphemes and at most 1024
 UTF-8 bytes; a title that is empty or whitespace-only is rejected. The optional
 `summary` uses the same bounds; an empty or whitespace-only summary is stored as

@@ -8,9 +8,9 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) on `slice-admin`, not pushed |
-| Last pushed checkpoint | `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`) on `origin/main`; earlier pushed checkpoints include `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
-| Branch | `main` at `704d115` (`origin/main`); slice-T project create/edit on `slice-admin`, not pushed |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) on `slice-adapter-final`, not pushed |
+| Last pushed checkpoint | `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`) on `origin/main`; earlier pushed checkpoints include `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `main` at `01538a0` (`origin/main` is `01538a0`); slice-V adapter fix on `slice-adapter-final`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, membership, credentials, keys, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
@@ -45,6 +45,7 @@ as the work it describes.
 | `704d115` | `7a13790` | Slice S: dashboard filter blank-value fix; blank/whitespace-only values are absent for `type`, `sender`, `limit`, `unread`, and both cursors instead of `400`; `q=` was already tolerated; non-blank validation is unchanged | pushed on `origin/main` (tree `7a13790e6585a608fddbad71ec6fa24ec7446689`); evidence: GitHub Issue #6, real browser at `58e548f`; regression test `blank timeline filter values are absent, not invalid`; `npm ci` exit 0; `npm run check` exit 0 (392 tests: 391 pass, 1 skipped live-D1); `npm run build` exit 0 |
 | this checkpoint | commit trailer | Slice T: dashboard project create/edit (`GET /projects/new`, `POST /projects`, `GET /projects/:projectId/edit`, `POST /projects/:projectId`), session double-submit CSRF, owner-only `project.edit`, en/zh forms, 303 redirects | independent review PENDING; `npm ci` exit 0; `npm run check` exit 0 (402 tests: 401 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; on `slice-admin`, not pushed |
 | this checkpoint | commit trailer | Issue #7: backup snapshot excludes documented in-progress `.tmp-<32 lowercase hex>` blob entries instead of copying them or failing when a concurrent writer renames them away; a non-regular entry with a temp name and every other entry still fail closed; verify remains strict about temp entries in a backup directory; docs state the exact rule, including that excluded temps still count toward the 100,000-entry enumeration cap | on `slice-backup-flake`, not pushed; independent review PASS (security zero findings; contract PASS with doc/test P2s addressed); reproduction before fix: 8/8 `createBackup` attempts failed with `BACKUP_BLOB_ENTRY_INVALID` on `.tmp-*` entries, after fix: 0/400; deterministic integration test (`documented in-progress temp blobs are excluded from the snapshot`, fails on base with `blobs` 5 vs 4) and security test (temp-named symlink rejected); renamed-away race branch covered by the out-of-tree concurrency reproducer, not a committed deterministic test; `npm ci` exit 0; `npm run check` exit 0 twice (404 tests: 403 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0 |
+| this checkpoint | commit trailer | Slice V: Node adapter buffers dashboard project form POST bodies (`POST /projects`, `POST /projects/:projectId`) via `isWebPath`; HTTP-level create/edit/CSRF/oversize/auth tests through `startServer` | independent review PENDING; Base-SHA `01538a0c78d553bdc36ab20a8769dfa5b9894e48`; `npm ci` exit 0; `npm run check` exit 0 (405 tests: 404 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; on `slice-adapter-final`, not pushed; evidence: GitHub Issue #6 comment 6653112857 |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
@@ -1210,6 +1211,42 @@ pushed.
   speaker cannot create a project here. Cloudflare/D1 parity and a real-browser
   visual pass for the new forms remain unexecuted; visual evidence is a separate
   step.
+
+## Vertical slice V — Node adapter dashboard form bodies (base `01538a0`)
+
+- **Checkpoint.** This checkpoint on `slice-adapter-final`; not pushed.
+  Independent review PENDING.
+- **Bug and evidence.** The shipped Node adapter's body predicate omitted the
+  dashboard project form routes. `toWebRequest` built a body-less `Request` for
+  `POST /projects` and `POST /projects/:projectId`, the handlers read an empty
+  form, and the missing `csrf_token` produced `400` "The form expired.". This was
+  observed in the real-browser capture documented in GitHub Issue #6 comment
+  6653112857. The in-process `createApp` web tests passed because they bypass the
+  adapter; this repeats the earlier `POST /login` adapter bug.
+- **Fix.** For `POST`, the predicate now buffers when `isWebPath` recognizes the
+  path. The web router owns the dashboard route set, so project create/edit and
+  any later dashboard form are covered without a second list. `GET`, `HEAD`, and
+  `DELETE` remain unbuffered; the 64 KiB cap, declared-length pre-check, and
+  streaming overflow behavior are unchanged, and non-web routes keep the existing
+  allowlist.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (secret scan, history
+  scan, typecheck, 405 tests: 404 pass, 1 skipped live-D1, 0 fail); `npm run build`
+  exit 0. The new test starts the real `startServer` and signs in over HTTP, then
+  asserts create `303` plus dashboard visibility, edit `303` plus the updated
+  timeline, missing/wrong CSRF `400`, chunked and declared oversized bodies `413`
+  `REQUEST_TOO_LARGE`, and unauthenticated create/edit `303` to
+  `/login?return_to=...`. Reverting the predicate in a throwaway worktree made
+  the create assertion fail with `400 !== 303`; the fixed tree passes. A manual
+  check (`node dist/src/platforms/node/main.js` on a real socket, not a committed
+  test) returned create `303`, edit `303`, dashboard visibility, and the no-CSRF
+  `400` form-expired page.
+- **Coverage gap closed.** Handler-level tests are not adapter coverage. Form
+  routes need at least one test that enters through `startServer` and sends the
+  body over a real socket.
+- **Limitations.** `isWebPath` also names GET-only dashboard pages; a POST to one
+  of those is still rejected by the web router's method check, but its body is now
+  buffered up to the cap instead of left unread. No dashboard form posts to those
+  paths.
 
 ## Implemented and verified at this tree
 

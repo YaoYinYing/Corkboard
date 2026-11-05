@@ -694,3 +694,25 @@ prevented regression; when to remove the advice.
 - **Prevents:** Replays inflating latency/queue metrics and misleading capacity work.
 - **Remove when:** Timing is emitted from a durable finalization record that already
   distinguishes the original commit from later reads.
+
+## 2026-11-05 — A new web form route is also a Node adapter body route
+
+- **Failure:** The dashboard project create/edit slice added `POST /projects` and
+  `POST /projects/:projectId`, but the Node adapter's body predicate still listed
+  only `/login`, OAuth, `/api/v1/session`, and message send. Over the shipped server
+  the forms arrived body-less and the handlers returned `400` "The form expired.";
+  in-process `createApp` tests stayed green. This repeats the `POST /login` failure
+  recorded above, because the adapter allowlist and the router are separate lists.
+- **Reproducer:** Start `startServer()`, sign in over HTTP, then submit the
+  `POST /projects` form with a valid session CSRF. The committed HTTP-level test
+  asserts `303` after the fix; the pre-fix `400` is the handler's empty-form path,
+  because the body-less `Request` never reaches the adapter cap. The committed test
+  covers the post-fix chunked/declared `413`; it does not run the pre-fix case.
+- **Fix:** The body predicate asks `isWebPath` for POSTs, so every dashboard form
+  route the web router knows is buffered. GET/HEAD/DELETE stay unbuffered, the
+  64 KiB streaming cap is unchanged, and HTTP-level tests cover create, edit, CSRF
+  failure, oversized bodies, and unauthenticated redirects.
+- **Prevents:** Dashboard forms that pass handler tests but are unusable through
+  the only shipped adapter.
+- **Remove when:** Routing and body buffering share one route manifest, the same
+  condition recorded for the earlier adapter lessons.

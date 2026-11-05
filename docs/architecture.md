@@ -348,6 +348,17 @@ with the existing service functions.
   string templates. `src/app/html.ts` owns the single `escapeHtml` boundary and
   the strict dashboard CSP. There is no client script or inline style, and the
   stylesheet is a constant same-origin body.
+- **Body buffering.** For `POST` only, the Node adapter buffers any non-root path
+  that `isWebPath` assigns to this router before building the Web `Request`,
+  under the same 64 KiB cap and streaming limit as the API. That is the form
+  routes `/login`, `/projects`, and `/projects/:projectId`, plus POSTs to the
+  GET-only paths `isWebPath` also names (`/projects/new`,
+  `/projects/:projectId/edit`, `/projects/:projectId/messages/:messageId/body`,
+  and `/static/app.css`). Those GET-only POSTs still receive the router's `405`,
+  but their body is buffered up to the cap first. The root `/` is excluded by
+  the `segments.length` guard. `GET`, `HEAD`, and `DELETE` requests are never
+  buffered. The route set lives in the web router, so a dashboard form added
+  there is covered without a second adapter list.
 - **Session to viewer.** `resolveSessionViewer` selects active, non-removed
   memberships in the target project whose speaker is owned by the session account,
   where project, speaker, and account are active, and whose capability set includes

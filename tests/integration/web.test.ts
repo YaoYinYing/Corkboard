@@ -1502,6 +1502,188 @@ test("the Node adapter buffers the login form body and serves the full page flow
   assert.ok((await chinese.text()).includes("项目"));
 });
 
+test("the Node adapter buffers dashboard project form bodies for create and edit", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "corkboard-web-forms-http-"));
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const email = "forms@example.test";
+  const password = "forms password";
+  const now = "2026-11-03T12:00:00.000Z";
+
+  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  await db.run(
+    `INSERT INTO accounts (id, email, password_hash, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["acct_forms", email, await hashPassword(password), now],
+  );
+  await db.run(
+    `INSERT INTO speakers (id, owner_account_id, display_name, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["spk_forms", "acct_forms", "Forms Speaker", now],
+  );
+  await db.run(
+    `INSERT INTO projects (id, owner_account_id, title, summary, status, next_seq, created_at)
+     VALUES (?, ?, ?, ?, 'active', 0, ?)`,
+    ["proj_forms", "acct_forms", "Existing Project", "Before edit", now],
+  );
+  await db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    ["proj_forms", "spk_forms", JSON.stringify(SCOPES), now],
+  );
+  db.close();
+
+  const running = await startServer({
+    env: {
+      CORKBOARD_DATA_DIR: dataDir,
+      CORKBOARD_ROOT_KEY: Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64"),
+      CORKBOARD_CREDENTIAL_PEPPER: Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64"),
+      PORT: "0",
+    },
+  });
+  t.after(async () => {
+    await running.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  const address = running.server.address();
+  assert.ok(address !== null && typeof address === "object");
+  const base = `http://127.0.0.1:${address.port}`;
+  const formType = "application/x-www-form-urlencoded";
+
+  // Sign in over HTTP so the request goes through the adapter, not createApp.
+  const loginPage = await fetch(`${base}/login`, { headers: { connection: "close" } });
+  assert.equal(loginPage.status, 200);
+  const loginCsrf = cookieValue(loginPage.headers.getSetCookie(), WEB_LOGIN_CSRF_COOKIE);
+  assert.ok(loginCsrf);
+  const login = await fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": formType,
+      cookie: `${WEB_LOGIN_CSRF_COOKIE}=${loginCsrf}`,
+      connection: "close",
+    },
+    body: new URLSearchParams({
+      return_to: "/",
+      login_csrf: loginCsrf,
+      email,
+      password,
+    }).toString(),
+  });
+  assert.equal(login.status, 303);
+  const session = cookieValue(login.headers.getSetCookie(), SESSION_COOKIE_NAME);
+  const csrf = cookieValue(login.headers.getSetCookie(), CSRF_COOKIE_NAME);
+  assert.ok(session);
+  assert.ok(csrf);
+  const cookie = `${SESSION_COOKIE_NAME}=${session}; ${CSRF_COOKIE_NAME}=${csrf}`;
+
+  const postForm = (
+    path: string,
+    fields: Record<string, string>,
+  ): Promise<Response> =>
+    fetch(`${base}${path}`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": formType, cookie, connection: "close" },
+      body: new URLSearchParams(fields).toString(),
+    });
+  const getPage = async (path: string): Promise<{ status: number; html: string }> => {
+    const response = await fetch(`${base}${path}`, {
+      headers: { cookie, connection: "close" },
+    });
+    return { status: response.status, html: await response.text() };
+  };
+
+  // Create: the adapter must carry the form body to the handler.
+  const created = await postForm("/projects", {
+    csrf_token: csrf,
+    title: "HTTP Created",
+    summary: "Created through the adapter",
+  });
+  assert.equal(created.status, 303, "the adapter must buffer the POST /projects body");
+  const location = created.headers.get("location");
+  assert.ok(location);
+  assert.match(location, /^\/projects\/proj_[A-Za-z0-9_-]+$/);
+  assert.equal((await getPage(location)).status, 200);
+  assert.ok((await getPage("/")).html.includes("HTTP Created"));
+
+  // Edit: the same predicate covers POST /projects/:projectId.
+  const updated = await postForm("/projects/proj_forms", {
+    csrf_token: csrf,
+    title: "HTTP Edited",
+    summary: "Edited through the adapter",
+  });
+  assert.equal(updated.status, 303, "the adapter must buffer the POST /projects/:id body");
+  assert.equal(updated.headers.get("location"), "/projects/proj_forms");
+  assert.ok((await getPage("/projects/proj_forms")).html.includes("HTTP Edited"));
+
+  // Missing or wrong CSRF stays the handler's safe 400 form-expired page.
+  for (const fields of [
+    { title: "Missing CSRF" },
+    { csrf_token: "A".repeat(43), title: "Wrong CSRF" },
+  ]) {
+    const rejected = await postForm("/projects", fields);
+    assert.equal(rejected.status, 400);
+    assert.ok((await rejected.text()).includes("The form expired."));
+  }
+
+  // Chunked bodies have no Content-Length, so only a buffering adapter can
+  // enforce the cap. Before the fix the body was dropped and the handler saw
+  // an empty form instead of an oversized request.
+  const encoder = new TextEncoder();
+  const chunked = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("csrf_token=" + csrf + "&title="));
+      controller.enqueue(encoder.encode("x".repeat(70 * 1024)));
+      controller.close();
+    },
+  });
+  const oversizedChunked = await fetch(`${base}/projects`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": formType, cookie, connection: "close" },
+    body: chunked,
+    duplex: "half",
+  });
+  assert.equal(oversizedChunked.status, 413);
+  assert.equal(
+    ((await oversizedChunked.json()) as { error: { code: string } }).error.code,
+    "REQUEST_TOO_LARGE",
+  );
+
+  const oversizedDeclared = await fetch(`${base}/projects`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": formType, cookie, connection: "close" },
+    body: new Uint8Array(70 * 1024),
+  });
+  assert.equal(oversizedDeclared.status, 413);
+  assert.equal(
+    ((await oversizedDeclared.json()) as { error: { code: string } }).error.code,
+    "REQUEST_TOO_LARGE",
+  );
+
+  // Unauthenticated body-bearing POSTs keep the handler's login redirect.
+  for (const path of ["/projects", "/projects/proj_forms"]) {
+    const anonymousForm = new URLSearchParams({ title: "Anonymous" }).toString();
+    const anonymous = await fetch(`${base}${path}`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": formType, connection: "close" },
+      body: anonymousForm,
+    });
+    assert.equal(anonymous.status, 303);
+    assert.equal(
+      anonymous.headers.get("location"),
+      `/login?return_to=${encodeURIComponent(path)}`,
+    );
+  }
+});
+
 test("an authenticated account creates a project and the owner can edit it", async (t) => {
   const { fx, app } = await withApp(t);
   await addPasswordAccount(fx, "acct_c", "c@example.test", "create secret");
