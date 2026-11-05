@@ -55,6 +55,14 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 // A backup blob entry must be a plain basename: no separators, NUL, or
 // traversal. Dots are allowed because a crash can leave a `.tmp-*` blob.
 const SAFE_ENTRY_NAME = /^[A-Za-z0-9._-]{1,255}$/;
+// LocalBlobStore.put writes a regular `.tmp-<32 lowercase hex>` file and
+// renames it into place. Such a name is never a committed blob key (blob keys
+// contain no dot), so it is a writer artifact, not backup content.
+const IN_PROGRESS_BLOB_NAME = /^\.tmp-[0-9a-f]{32}$/;
+
+function isInProgressBlobName(name: string): boolean {
+  return IN_PROGRESS_BLOB_NAME.test(name);
+}
 
 export class BackupError extends Error {
   readonly code: string;
@@ -754,6 +762,20 @@ async function copyBlobs(
   const copied: BackupBlobEntry[] = [];
   let totalBytes = 0;
   for (const dirent of [...entries].sort(byName)) {
+    if (isInProgressBlobName(dirent.name)) {
+      // The writer may rename the temp away between readdir and lstat, so a
+      // missing entry here is expected and is skipped rather than failing the
+      // snapshot. A non-regular entry using this name is not a writer artifact
+      // and is still refused.
+      const tempStats = await lstatOrUndefined(join(sourceDir, dirent.name));
+      if (tempStats !== undefined && !tempStats.isFile()) {
+        throw new BackupError(
+          "BACKUP_BLOB_ENTRY_INVALID",
+          `blob entry is not a regular file: ${dirent.name}`,
+        );
+      }
+      continue;
+    }
     if (!dirent.isFile()) {
       // Directories, symlinks, sockets and devices are never followed or
       // silently dropped: a faithful backup cannot represent them.

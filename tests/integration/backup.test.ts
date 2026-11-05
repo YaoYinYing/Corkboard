@@ -301,6 +301,32 @@ test("a backup of an empty database and blob set round-trips", async (t) => {
   assert.equal(migrations.length, 4);
 });
 
+test("documented in-progress temp blobs are excluded from the snapshot", async (t) => {
+  const root = tempDir(t);
+  const installation = await seed(join(root, "data"));
+  installation.close();
+  // LocalBlobStore commits with a regular `.tmp-<32 lowercase hex>` file then
+  // an atomic rename; this is that file caught mid-write.
+  const inProgressName = `.tmp-${"0123456789abcdef".repeat(2)}`;
+  const inProgressPath = join(installation.dataDir, BACKUP_BLOB_DIR, inProgressName);
+  writeFileSync(inProgressPath, new Uint8Array([7, 7]));
+
+  const backupDir = join(root, "backup");
+  const summary = await createBackup({ dataDir: installation.dataDir, outDir: backupDir });
+
+  // The writer artifact is neither copied nor recorded as a complete blob.
+  assert.equal(summary.blobs, 4); // two bodies + orphan + zero-byte
+  const manifest = JSON.parse(readFileSync(join(backupDir, BACKUP_MANIFEST_FILE), "utf8")) as {
+    blobs: Array<{ name: string }>;
+  };
+  assert.equal(manifest.blobs.some((blob) => blob.name === inProgressName), false);
+  assert.equal(existsSync(join(backupDir, BACKUP_BLOB_DIR, inProgressName)), false);
+  const report = await verifyBackup({ backupDir });
+  assert.equal(report.ok, true, JSON.stringify(report.issues));
+  // The source is read-only, so the writer can still complete its rename.
+  assert.equal(readFileSync(inProgressPath).length, 2);
+});
+
 test("a consistent snapshot under a concurrent writer passes integrity and sequence invariants", async (t) => {
   const root = tempDir(t);
   const installation = await seed(join(root, "data"));

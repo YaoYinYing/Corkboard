@@ -548,10 +548,28 @@ verification externally; nothing runs on a timer.
   symlinked, or otherwise non-regular sidecar is refused. The source database and blobs
   are never deleted.
 - Blobs are copied **after** the snapshot, byte-for-byte, from every regular file in
-  `<data-dir>/blobs`. Orphan blobs are preserved so the restored directory is a
-  faithful copy; opaque file names are unchanged. Directories, symlinks, devices, and
-  other non-file entries are rejected and the partial backup is removed. Symlinks are
-  never followed.
+  `<data-dir>/blobs` except the documented in-progress temp entries below. Orphan blobs
+  are preserved so the restored directory is a faithful copy; opaque file names are
+  unchanged. Directories, symlinks, devices, and other non-file entries are rejected and
+  the partial backup is removed. Symlinks are never followed.
+- Blob writes are atomic: `LocalBlobStore` writes a regular
+  `.tmp-<32 lowercase hex>` file and renames it into place. That name shape is never a
+  valid committed blob key (blob keys contain no `.`), so enumeration excludes entries
+  matching `^\.tmp-[0-9a-f]{32}$`: a temp is never copied into the manifest. A temp
+  renamed away between listing and `lstat` is handled by the same one-line skip. That
+  disappearance branch is exercised by the out-of-tree concurrency reproducer (0
+  failures in 400 backups after the change, 8/8 failures before) but has no committed
+  deterministic test, because making the `readdir`-then-`lstat` window deterministic
+  would need a test-only production hook; the committed tests cover a temp present
+  during the scan. The exemption is exactly that regular-file shape. A symlink,
+  directory, device, or other non-regular entry with a temp name is still rejected,
+  every other entry must still be a regular file, and any other entry that vanishes
+  during the copy still fails closed. A stale temp left by a crash is also excluded
+  because it is not a committed blob.
+- Excluded temp entries still count toward the `MAX_BLOB_ENTRIES` (100,000)
+  enumeration cap, because they are filtered after listing. Unbounded crash-left temp
+  debris can therefore still trip `BACKUP_BLOB_LIMIT_EXCEEDED`; that is a bounded
+  cleanup consideration, not a snapshot-correctness issue.
 - A committed message references a blob written before it committed, so a blob
   referenced by the snapshot normally exists when the copy runs. One race remains: an
   expiry that deletes a blob after the snapshot but before the copy can leave a

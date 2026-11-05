@@ -3,6 +3,24 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-04 — Snapshot enumeration must skip only provable writer artifacts
+
+- **Failure:** `createBackup` listed a `LocalBlobStore` `.tmp-<32 hex>` file and then
+  failed with `BACKUP_BLOB_ENTRY_INVALID` when the writer's rename removed it before
+  `lstat`/copy (GitHub Issue #7). Copying it while still present would also record a
+  partial/temporary blob in the manifest as if it were complete.
+- **Reproducer:** churn documented `.tmp-<32 hex>` files in `blobs` while calling
+  `createBackup` in a loop; before the fix 8/8 attempts failed, after 0/400.
+- **Fix:** exclude exactly `^\.tmp-[0-9a-f]{32}$` regular entries from snapshot
+  enumeration (blob keys never contain `.`, so these cannot be committed blobs), while
+  still rejecting a symlink/directory/device with that name and failing closed on every
+  other entry. `verify` stays strict: a temp entry in a backup directory is still
+  unexpected.
+- **Prevents:** Flaky backups under a concurrent writer and manifests that claim an
+  uncommitted temp file belongs to the consistent pair.
+- **Remove when:** blob commits no longer stage a visible temp file inside `blobs`
+  (for example, a staged directory plus an atomic rename).
+
 Entry shape: date; surprising failure and root cause; minimal reproducer or test; fix;
 prevented regression; when to remove the advice.
 

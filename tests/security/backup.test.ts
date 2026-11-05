@@ -260,6 +260,27 @@ test("backup rejects symlink and non-file blob entries and removes the partial o
   assert.equal(existsSync(outDir), false);
 });
 
+test("a temp-named blob entry that is not a regular file is still rejected", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const blobsDir = join(dataDir, BACKUP_BLOB_DIR);
+  mkdirSync(blobsDir, { recursive: true, mode: 0o700 });
+  const db = await openSqliteDatabase(join(dataDir, BACKUP_DATABASE_FILE));
+  db.close();
+  writeFileSync(join(blobsDir, "regularBlobKey_12345"), "data");
+  // The in-progress exemption is only for the writer's regular temp file; a
+  // symlink using the same shape must still fail closed.
+  const tempName = `.tmp-${"abcdef0123456789".repeat(2)}`;
+  symlinkSync(join(root, "missing-target"), join(blobsDir, tempName));
+  const outDir = join(root, "out");
+  await assert.rejects(
+    createBackup({ dataDir, outDir }),
+    (error: unknown) =>
+      error instanceof BackupError && error.code === "BACKUP_BLOB_ENTRY_INVALID",
+  );
+  assert.equal(existsSync(outDir), false);
+});
+
 test("restore refuses a symlinked target, including a dangling one", async (t) => {
   const fixture = await makeBackup(t);
   const realTarget = join(fixture.root, "real-target");
