@@ -8,9 +8,9 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) at pre-squash feature `21a5fdf` and state tail `24cebb3` (tree `46f1e62`), squashed to one commit on `slice-speakers`, not pushed |
-| Last pushed checkpoint | `0f81877` (slice W atomic project creation, tree `b7a1653`) on `origin/main`; earlier pushed checkpoints include `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
-| Branch | `main` at `0f81877` (`origin/main`); slice-X speaker directory/credential issuance squashed to one commit on `slice-speakers`, not pushed |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) on `slice-members` at `5ca3067` plus this fix round, not pushed |
+| Last pushed checkpoint | `15cdf62` (slice X speaker directory and project-scoped credential issuance, tree `3260e71`) on `origin/main`; earlier pushed checkpoints include `0f81877` (slice W atomic project creation, tree `b7a1653`), `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `main` at `15cdf62` (`origin/main`); slice-Y membership editor on `slice-members`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, credential rotation/revocation and grant editing, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
@@ -50,7 +50,7 @@ as the work it describes.
 | pre-squash `21a5fdf` + state tail `24cebb3` | `46f1e62` | Slice X pre-squash evidence: dashboard speaker directory (`GET /speakers`), explicit project-scoped credential issuance (`GET/POST /speakers/:speakerId/key`), owner-only uniform 404, session CSRF, in-transaction membership re-check, one-time `no-store` display | Base `0f81877`; independent review PASS on `24cebb3`; `npm ci` exit 0; `npm run check` exit 0 (417 tests: 416 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; superseded by the squashed checkpoint row below |
 | this checkpoint | commit-trailer `Tree-SHA` | Slice X final squashed capability: the same directory and issuance plus the in-transaction membership **and scope** re-check, 100-project cap, bounded `credential.issue` audit (`project_count` + up to 32 IDs), response-body logging correction, and README/architecture corrections | Base `0f81877`; one commit on `slice-speakers`, not pushed; `npm ci` exit 0; `npm run check` exit 0 (423 tests: 422 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; no rotation/revocation/grant-editor/expiry UI (CLI-only); D1/R2 parity and a real-browser pass remain unverified |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
-| this checkpoint | commit-trailer `Tree-SHA` | Slice Y: dashboard per-project membership editor — `GET`/`POST /projects/:projectId/members`, `POST /projects/:projectId/members/:speakerId/remove`; `project.edit` with uniform `404`, explicit seven-scope capability set, account-owned active speaker rule, duplicate conflict, last-owner removal refusal, grant deletion with membership removal, in-transaction re-validation, en/zh | Base `15cdf62717626a07ccbe52c243f895a60064e298`; one commit on `slice-members`, not pushed; state/lessons follow in a second commit; `npm ci` exit 0; `npm run check` exit 0 (435 tests: 434 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; D1/R2 parity, cross-account membership provisioning, credential rotation/revocation and grant editing remain CLI-only |
+| this checkpoint | commit-trailer `Tree-SHA` | Slice Y: dashboard per-project membership editor — `GET`/`POST /projects/:projectId/members`, `POST /projects/:projectId/members/:speakerId/remove`; **project-owner-only** (not `project.edit`) with uniform `404`, explicit seven-scope capability set (owner may grant any), account-owned active speaker rule, duplicate conflict, manageable-owner removal refusal, grant deletion with membership removal, in-transaction ownership re-validation, adapter-level POST tests, en/zh | Base `15cdf62717626a07ccbe52c243f895a60064e298`; on `slice-members`, not pushed; security-audit P1 (owner gate) and P2/docs corrections in the fix commit; `npm ci` exit 0; `npm run check` exit 0 (438 tests: 437 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; D1/R2 parity remains unverified; cross-account provisioning, invitation/acceptance, bulk editing, credential rotation/revocation, and grant editing are not implemented or CLI-only |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
 
@@ -1206,8 +1206,9 @@ pushed.
   invalid fields with escaped preservation, XSS-safe rendering, oversized bodies,
   and HTML that exposes no session token or credential content while request logs
   carry no content or CSRF value.
-- **Limitations.** There is no speaker creation, credential management, grant editor,
-  membership editor, project deletion, or status change in this UI. Create used two
+- **Limitations.** At this slice there is no speaker creation, credential management,
+  grant editor, membership editor, project deletion, or status change in this UI; the
+  per-project membership editor was added later by slice Y. Create used two
   sequential inserts at this slice; Issue #8 makes it atomic (see the Issue #8 section
   below). The owner role is the `project.edit` membership capability, not a separate
   role column. An account with no active owned speaker cannot create a project here.
@@ -1357,10 +1358,10 @@ pushed.
 
 ## Vertical slice Y — project membership editor (base `15cdf62`)
 
-- **Checkpoint.** One capability commit on `slice-members`, based on
-  `15cdf62717626a07ccbe52c243f895a60064e298`; not pushed. This state/lessons update is
-  a second, docs-only commit. The commit carries the exact `Base-SHA`, `Candidate-SHA`,
-  and `Tree-SHA`; review is not claimed here.
+- **Checkpoint.** Slice-Y feature/state commits on `slice-members`, based on
+  `15cdf62717626a07ccbe52c243f895a60064e298`; not pushed. The security-audit fix
+  round (P1 owner gate plus P2 corrections) is recorded in the commit trailer and
+  this section. Review is not claimed here.
 - **Scope.** Adds `GET /projects/:projectId/members`,
   `POST /projects/:projectId/members`, and
   `POST /projects/:projectId/members/:speakerId/remove` to the server-rendered
@@ -1368,53 +1369,72 @@ pushed.
   name (or ID), capability codes in canonical order, joined date, a remove form, and
   an add form. English and Simplified Chinese render; `?lang=zh` is preserved by form
   actions and the `303` redirects. No client script or inline style is added.
-- **Authorization and CSRF.** Every route requires `project.edit` through the same
-  `resolveSessionViewer` decision as project edit. Unknown, foreign, inactive,
-  non-member, and capability-insufficient projects are the uniform `404`; the viewer
-  is resolved before any POST body is parsed. Both POSTs require the session
-  double-submit (`corkboard_csrf` + exactly one hidden `csrf_token`), the
-  `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. The Node adapter buffers
-  these bodies through the shared `isWebPath` predicate.
+- **Authorization (audit P1 fix).** Membership administration is
+  **project-owner-only**, not `project.edit`. The signed-in account must equal
+  `projects.owner_account_id`, and the project and account must be active; a
+  non-owner member holding `project.edit` is denied. That member could otherwise add
+  a speaker with `message.send` and mint a bearer credential for it. Unknown, foreign,
+  non-owner, and inactive projects are the uniform `404`, checked before any POST body
+  is parsed. The write functions re-read ownership inside the transaction. Both POSTs
+  require the session double-submit (`corkboard_csrf` + exactly one hidden
+  `csrf_token`), the `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. The
+  Node adapter buffers these bodies through the shared `isWebPath` predicate, and
+  adapter-level `startServer` tests cover add, remove, oversize, and unauthenticated
+  redirects.
 - **Add.** The service requires one `speaker_id` and an explicit, non-empty subset of
   the seven capability identifiers; unknown values reject the request and duplicate
-  values collapse in canonical order. Only an active speaker owned by the signed-in
-  account (with an active account) may be added; a foreign, unknown, inactive, or
-  other-account speaker is the same HTML `400` form error and writes nothing, so the
-  form is not an account/speaker oracle. An active duplicate is a `CONFLICT` rendered
-  as `400` without changing capabilities. A previously removed membership is
-  reactivated with the submitted capabilities and a new `joined_at`; no grant is
-  restored. Adding never creates a credential or credential grant.
+  values collapse in canonical order. The project owner may grant any of the seven,
+  including capabilities the owner's own membership does not carry. Only an active
+  speaker owned by the signed-in owner account (with an active account) may be added;
+  a foreign, unknown, inactive, or other-account speaker is the same HTML `400` form
+  error and writes nothing, so the form is not an account/speaker oracle. An active
+  duplicate is a `CONFLICT` rendered as `400` without changing capabilities. A
+  previously removed membership is reactivated with the submitted capabilities and a
+  fresh `joined_at`; no grant is restored. Adding never creates a credential or
+  credential grant (asserted in tests).
 - **Remove.** The service soft-deletes the membership and deletes every
   `credential_project_grants` row for that speaker and project, mirroring the CLI
-  `remove-member`. Re-adding therefore cannot revive an old credential. It refuses to
-  remove the last non-removed membership whose speaker is owned by
-  `projects.owner_account_id` (speaker status does not affect the count), so the
-  owning account always retains a manageable membership. `membership.remove` is always
-  audited; `credential.project.revoke` is audited only when a grant was actually
-  deleted.
-- **Transactions.** Both writes use one `SqlDatabase.transaction` and re-read the
-  caller's `project.edit` membership under active project/speaker/account checks
-  inside it. Remove also re-reads the target membership and owner count inside the
-  transaction. An injected failure after the transaction body rolls back both the
-  membership mutation and the grant deletion.
-- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (secret scan, history scan,
-  typecheck, 435 tests: 434 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0.
-  New `tests/integration/members-web.test.ts` has 12 tests: owner list/add happy path
-  with canonical capability storage and audit; non-owner/unknown/foreign uniform `404`
-  including a `project.read`-only member (removing the `project.edit` check makes it
-  `200`); foreign/unknown/inactive speaker responses identical after normalizing the
-  echoed input; duplicate conflict without capability change; unknown/empty/mixed
-  scope, duplicate field, and blank speaker rejection; last-owner refusal and
-  two-owner removal; grant deletion plus re-add denial through `FORBIDDEN`
-  (credential cannot revive); CSRF missing/wrong/no-cookie/cross-origin/unbound-pair
-  failures; oversized body `413`; injected post-transaction rollback for both add and
-  remove; display-name escaping; en/zh rendering; and method `405` behavior.
-- **Limitations.** The dashboard adds only speakers owned by the signed-in account;
-  cross-account membership provisioning, invitations/acceptance, bulk editing,
-  credential rotation/revocation, and per-credential grant editing remain CLI-only.
-  The owner-membership count ignores speaker/account status by design. The add form
-  submits one speaker at a time. D1/R2 parity and a real-browser visual pass are
-  unexecuted.
+  `remove-member`. Re-adding therefore cannot revive an old credential. The exact
+  last-owner rule (audit P2 fix): a **manageable** owner membership is a non-removed
+  membership whose speaker is owned by `projects.owner_account_id`, where the speaker
+  and owning account are active and the capabilities include `project.edit`.
+  Removing the last manageable owner membership is refused; inactive owner speakers
+  and owner memberships lacking `project.edit` neither count nor are protected.
+  Removal may target any membership, including another account's speaker.
+  `membership.remove` is always audited; `credential.project.revoke` is audited only
+  when a grant was actually deleted.
+- **Transactions.** Both writes use one `SqlDatabase.transaction` and re-read project
+  ownership and the active account inside it. Remove also re-reads the target
+  membership and manageable-owner count inside the transaction. An injected failure
+  after the transaction body rolls back both the membership mutation and the grant
+  deletion. Two concurrent removals of the last two manageable owner memberships
+  serialize to one `303` and one `400`, leaving exactly one.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (see the checkpoint row for
+  the exact counts); `npm run build` exit 0. New
+  `tests/integration/members-web.test.ts` covers: owner list/add happy path with
+  canonical capability storage, no credential/grant rows, and audit; a non-owner
+  member with **project.edit** (mutation proof for the owner gate) plus a read-only
+  member getting uniform `404` on list/add/remove; foreign/unknown/inactive speaker
+  responses identical after normalizing the echoed input; duplicate conflict without
+  capability change; unknown/empty/mixed scope, duplicate field, and blank speaker
+  rejection; last-owner refusal including inactive/limited owner memberships that do
+  not count, and two-manageable-owner removal; active-only ordering; concurrent
+  last-owner removal; grant deletion plus reactivation with fresh `joined_at` and
+  submitted capabilities, then re-add denial through `FORBIDDEN` (credential cannot
+  revive); CSRF missing/wrong/no-cookie/cross-origin/unbound-pair failures;
+  oversized `413`; injected post-transaction rollback for add and remove;
+  display-name escaping; en/zh actions and redirect; method `405`; and the
+  `startServer` adapter flow.
+- **Limitations.** The dashboard owner may add only their own active speakers;
+  cross-account **addition/provisioning** of another account's speakers remains
+  CLI-only, while removal may target any membership. Invitation/acceptance, bulk
+  editing, and capability presets are not implemented (no CLI command). Credential
+  rotation/revocation and per-credential grant editing remain CLI-only. The add form
+  submits one speaker at a time. The pre-existing CLI `grant-key-project`
+  membership-check/insert race is recorded as residual risk in
+  `docs/security-operations.md`; it grants no access while the membership is removed
+  but can leave a stale grant that revives on reactivation. D1/R2 parity and a
+  real-browser visual pass are unexecuted.
 
 ## Implemented and verified at this tree
 
@@ -1607,7 +1627,8 @@ Do not infer any of these from local MCP behavior or from another plan.
   (grants first, then credential) on any grant or audit failure; a process crash
   before compensation leaves a grantless credential (denied by default, revocable). Migration 002 does not
   backfill grants, so pre-release credentials lose project access until explicitly
-  granted. Grants and membership management are CLI-only; no endpoint manages them.
+  granted. Grant editing is CLI-only; the dashboard now has a project-owner-only
+  membership editor, and the CLI membership commands remain.
   Key rotation remains unimplemented.
 - Test-fixture note: `tests/helpers/service-fixture.ts` auto-grants existing
   memberships/credentials by default so legacy service and HTTP tests keep exercising
@@ -1685,9 +1706,9 @@ Do not infer any of these from local MCP behavior or from another plan.
 - Slice-L audit debt (non-blocking): the dashboard is read-only, Node/SQLite-only, and
   has no pager beyond a 100-project cap, filters/search/replay/attachments, or
   automated axe/WCAG audit; browser evidence is local headless Chrome, not an
-  independent cross-browser run. `listSessionProjects` fetches all of an account's
-  memberships and paginates in JavaScript (bounded today because membership writes are
-  operator-only); restore a SQL bound before adding membership management. The login
+  independent cross-browser run. `listSessionProjects` still fetches all of an account's
+  memberships and paginates in JavaScript; it remains unbounded and needs a SQL bound.
+  The login
   double-submit cookie is path-scoped rather than `__Host-`, so the CSRF guarantee
   assumes a single registrable domain; `Origin: null` and the scheme are treated as
   "no assertion" and rely on `Sec-Fetch-Site` plus the double-submit value; the host

@@ -200,9 +200,9 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | `/projects/:projectId` | `GET` | Timeline in ascending server `seq`; `limit` 1–100, `after_seq`, `before_seq`, `type`, `sender`, `unread`, and `q` use the same identifiers, bounds, and filter semantics as the REST message list below. A blank or whitespace-only value is treated as absent (blank text and number inputs reach the parser as empty values); only non-blank values are validated and can return the HTML `400` page. |
 | `/projects/:projectId` | `POST` | Form-encoded title/summary update; requires `project.edit` plus the same CSRF check. Unknown, foreign, and non-owner projects are a uniform `404`. `303` to the timeline. |
 | `/projects/:projectId/edit` | `GET` | Edit form; requires `project.edit` and is otherwise the same uniform `404`. |
-| `/projects/:projectId/members` | `GET` | Active membership list and add form; requires `project.edit` and is otherwise the same uniform `404`. |
-| `/projects/:projectId/members` | `POST` | Form-encoded add of an active speaker owned by the session account with an explicit capability set; requires `project.edit` plus the session CSRF check. `303` to the list. |
-| `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; soft-deletes the membership and its credential grants. Requires `project.edit` plus the session CSRF check. `303` to the list. |
+| `/projects/:projectId/members` | `GET` | Active membership list and add form; requires the signed-in account to own the project (not merely `project.edit`) and is otherwise the same uniform `404`. |
+| `/projects/:projectId/members` | `POST` | Form-encoded add of an active speaker owned by the session account with an explicit capability set; requires project ownership plus the session CSRF check. `303` to the list. |
+| `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; soft-deletes the membership and its credential grants. Requires project ownership plus the session CSRF check. `303` to the list. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
 | `/speakers` | `GET` | Speakers owned by the session account only, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active owned speaker. |
@@ -248,18 +248,25 @@ project IDs plus the true `project_count` and scopes, without the token. The raw
 not in a redirect, URL, cookie, database column, or log. There is no rotation,
 revocation, grant-editing, or expiry UI; those remain CLI-only. The membership
 editor is `GET`/`POST /projects/:projectId/members` plus
-`POST /projects/:projectId/members/:speakerId/remove`. It requires `project.edit`
-(the same uniform `404` for unknown, foreign, non-member, and capability-insufficient
-projects, resolved before the body is parsed). The add form accepts one active speaker
-owned by the session account and an explicit non-empty subset of the seven
-capabilities; foreign, unknown, inactive, and other-account speakers are one `400`
-with no write, and an active duplicate is a `400` conflict without changing
+`POST /projects/:projectId/members/:speakerId/remove`. It is **project-owner-only**:
+the signed-in account must equal `projects.owner_account_id`, and the project and
+account must be active. A non-owner member holding `project.edit` is denied with the
+same uniform `404` (resolved before the body is parsed) because that member could
+otherwise add a speaker with `message.send` and mint a bearer credential for it. The
+add form accepts one active speaker owned by the session account and an explicit
+non-empty subset of the seven capabilities; the owner may grant any of the seven,
+with no caller-rights cap. Foreign, unknown, inactive, and other-account speakers are
+one `400` with no write, and an active duplicate is a `400` conflict without changing
 capabilities. A removed membership is reactivated with the submitted capabilities.
 Removal soft-deletes the row, deletes that speaker's credential grants for the
 project (so re-adding cannot revive an old credential), and refuses the last
-non-removed membership owned by the project owner account. Both writes are one
-transaction with an in-transaction `project.edit` re-check. No message send, expiry,
-credential rotation/revocation, or admin action exists.
+**manageable** owner membership: a non-removed membership whose speaker is owned by
+the project owner account, is active, and includes `project.edit` (an inactive owner
+speaker or one lacking `project.edit` neither counts nor is protected). Both writes
+are one transaction with an in-transaction ownership re-check. Cross-account
+addition/provisioning of other accounts' speakers remains CLI-only; removal may
+target any membership. No message send, expiry, credential rotation/revocation, or
+admin action exists.
 
 ## Endpoints
 

@@ -20,12 +20,13 @@ speaker credentials and project grants, encrypted bodies, ordered replay, receip
 expiry, HTTP API, bootstrap CLI), a **bearer-authenticated MCP Streamable HTTP**
 endpoint at `/mcp`, **human account sessions** (password sign-in, session read,
 sign-out), a **human web dashboard** (project list, project create/edit, speaker
-directory, one-time project-scoped credential issuance, ascending timeline, explicit
+directory, one-time project-scoped credential issuance, per-project membership
+editor, ascending timeline, explicit
 body reveal, English and Simplified Chinese), and an **OAuth 2.1
 authorization-server core** (dynamic public clients, PKCE, consent, rotating refresh
 tokens, revocation) are implemented and tested locally. Cloudflare Workers/D1/R2, the
 ChatGPT Web plugin installation/linking experience, and the remaining dashboard
-administration (message send/expiry, membership editing, credential
+administration (message send/expiry, credential
 rotation/revocation) remain planned. Only capabilities marked *implemented* in
 [`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; the OAuth core does not
 verify ChatGPT Web integration.
@@ -56,9 +57,10 @@ After bootstrapping an account and giving an owned speaker an active project
 membership, start the server and open `http://127.0.0.1:8787/login` (use a TLS
 reverse proxy outside loopback development). The dashboard supports project create
 and edit, a speaker directory, one-time issuance of a project-scoped speaker
-credential, the message timeline, and explicit body reveal, in English or Simplified
-Chinese (`?lang=zh`). Messages and read state remain read-only; there is no send,
-membership editor, credential rotation/revocation, or admin action. See
+credential, a project-owner membership editor, the message timeline, and explicit
+body reveal, in English or Simplified Chinese (`?lang=zh`). Messages and read state
+remain read-only; there is no send, credential rotation/revocation, or admin action.
+See
 [`docs/web-ui.md`](docs/web-ui.md) for the authorization model, CSP, accessibility,
 and limitations.
 

@@ -24,6 +24,7 @@ import {
 } from "../service/messages.ts";
 import {
   addProjectMember,
+  authorizeProjectOwner,
   createProject,
   getProjectForEdit,
   listProjectMembers,
@@ -1132,7 +1133,7 @@ ${scopeBoxes}</fieldset>
 
 async function membersPageResponse(
   deps: ServiceDeps,
-  viewer: Principal,
+  principal: Principal,
   locale: Locale,
   url: URL,
   request: Request,
@@ -1140,7 +1141,7 @@ async function membersPageResponse(
   status: number,
   state: MembersPageState = {},
 ): Promise<Response> {
-  const members = await listProjectMembers(deps, viewer, projectId);
+  const members = await listProjectMembers(deps, principal, projectId);
   return renderMembersPage(
     locale,
     url,
@@ -1163,8 +1164,8 @@ async function handleMembers(
     deps,
     sessionTokenFromCookie(request.headers.get("cookie")),
   );
-  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
-  return membersPageResponse(deps, viewer, locale, url, request, projectId, 200);
+  const principal = sessionAccountPrincipal(session);
+  return membersPageResponse(deps, principal, locale, url, request, projectId, 200);
 }
 
 async function handleMemberAdd(
@@ -1178,9 +1179,10 @@ async function handleMemberAdd(
     deps,
     sessionTokenFromCookie(request.headers.get("cookie")),
   );
-  // Authorize and resolve the viewer before parsing the body, so a foreign or
-  // unreadable project is the uniform 404 regardless of payload shape.
-  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  const principal = sessionAccountPrincipal(session);
+  // Membership administration is project-owner-only. Enforce it before parsing
+  // the body, so a non-owner gets the uniform 404 regardless of payload shape.
+  await authorizeProjectOwner(deps, principal, projectId);
   const form = await readForm(request);
   const speakerIds = form.getAll("speaker_id");
   const scopes = form.getAll("scope");
@@ -1189,19 +1191,19 @@ async function handleMemberAdd(
     selectedScopes: new Set(scopes),
   };
   if (!(await verifyFormCsrf(deps, session, request, form))) {
-    return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+    return membersPageResponse(deps, principal, locale, url, request, projectId, 400, {
       ...state,
       errorKey: "formExpired",
     });
   }
   if (speakerIds.length !== 1) {
-    return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+    return membersPageResponse(deps, principal, locale, url, request, projectId, 400, {
       ...state,
       errorKey: "addMemberError",
     });
   }
   try {
-    await addProjectMember(deps, viewer, projectId, {
+    await addProjectMember(deps, principal, projectId, {
       speakerId: speakerIds[0] ?? "",
       capabilities: scopes,
     });
@@ -1211,13 +1213,13 @@ async function handleMemberAdd(
     );
   } catch (error) {
     if (error instanceof AppError && error.code === "CONFLICT") {
-      return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+      return membersPageResponse(deps, principal, locale, url, request, projectId, 400, {
         ...state,
         errorKey: "memberDuplicate",
       });
     }
     if (error instanceof AppError && error.code === "VALIDATION_ERROR") {
-      return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+      return membersPageResponse(deps, principal, locale, url, request, projectId, 400, {
         ...state,
         errorKey: "addMemberError",
       });
@@ -1238,22 +1240,24 @@ async function handleMemberRemove(
     deps,
     sessionTokenFromCookie(request.headers.get("cookie")),
   );
-  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  const principal = sessionAccountPrincipal(session);
+  // Owner-only, enforced before the body is parsed.
+  await authorizeProjectOwner(deps, principal, projectId);
   const form = await readForm(request);
   if (!(await verifyFormCsrf(deps, session, request, form))) {
-    return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+    return membersPageResponse(deps, principal, locale, url, request, projectId, 400, {
       errorKey: "formExpired",
     });
   }
   try {
-    await removeProjectMember(deps, viewer, projectId, speakerId);
+    await removeProjectMember(deps, principal, projectId, speakerId);
     return redirect(
       303,
       `/projects/${encodeURIComponent(projectId)}/members${localeQuery(locale)}`,
     );
   } catch (error) {
     if (error instanceof AppError && error.code === "CONFLICT") {
-      return membersPageResponse(deps, viewer, locale, url, request, projectId, 400, {
+      return membersPageResponse(deps, principal, locale, url, request, projectId, 400, {
         errorKey: "memberLastOwner",
       });
     }

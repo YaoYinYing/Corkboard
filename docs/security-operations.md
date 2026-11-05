@@ -178,13 +178,29 @@ written) is not prevented; no stronger guarantee is claimed. See
   deleted; `membership.remove` is always audited.
 - The dashboard membership editor applies the same grant-deletion rule, but an
   **active** duplicate is rejected (`400`, `CONFLICT` internally) instead of a no-op.
-  It requires an explicit, non-empty subset of the seven capabilities and may add only
-  an active speaker owned by the signed-in account; a foreign, unknown, inactive, or
-  other-account speaker is the same `400` form error and writes nothing. It refuses to
-  remove the last non-removed membership whose speaker is owned by the project's
-  `owner_account_id` (speaker status does not affect the count), so the owning account
-  always retains a membership it can manage the project through. Membership
-  management for other accounts' speakers remains CLI-only.
+  It is **project-owner-only**: the session account must equal
+  `projects.owner_account_id` (project and account active), so a non-owner member
+  holding `project.edit` is denied with the uniform `404`. This prevents that member
+  from adding a speaker with `message.send` and minting a bearer credential for it.
+  It requires an explicit, non-empty subset of the seven capabilities (the owner may
+  grant any of them, with no caller-rights cap) and may add only an active speaker
+  owned by the signed-in owner account; a foreign, unknown, inactive, or other-account
+  speaker is the same `400` form error and writes nothing. It refuses to remove the
+  last **manageable** owner membership: a non-removed membership whose speaker is
+  owned by the project's `owner_account_id`, where the speaker and owning account are
+  active and the capabilities include `project.edit`. Inactive owner speakers and
+  owner memberships lacking `project.edit` neither count nor are protected.
+  Cross-account **addition/provisioning** of other accounts' speakers remains
+  CLI-only; removal may target any membership.
+- **Residual CLI race (documented, not fixed).** `grant-key-project` checks the active
+  membership and then inserts the grant as two independent statements, outside a
+  transaction. A concurrent `remove-member` can mark the membership removed and delete
+  its grants between the check and the insert, leaving a grant row for a removed
+  membership. It grants no access while the membership is removed (authorization still
+  requires an active membership), but it would make that credential usable again if
+  the membership is later reactivated, because removal's grant deletion already ran.
+  The command is operator-only. A future fix should use the `SqlDatabase.transaction`
+  port (writes in the transaction, audit after commit).
 
 ## Human account sessions
 
@@ -217,10 +233,12 @@ written) is not prevented; no stronger guarantee is claimed. See
   active project without its owner membership. It cannot
   call the `/api/v1` data routes, including send, mark read, and expiry, or call MCP,
   and it is not accepted as a bearer token. Speaker write operations still require a
-  separately issued scoped credential. A session whose viewer holds `project.edit`
-  may also use the dashboard membership editor to add an active speaker owned by the
-  same account and to remove memberships, subject to the last-owner rule and the same
-  CSRF/body limits as the other HTML forms.
+  separately issued scoped credential. The dashboard membership editor is
+  **project-owner-only**: the session account must own the project and both the
+  project and account must be active. Holding `project.edit` as a non-owner is not
+  sufficient. The owner may add an active speaker owned by the same account and
+  remove memberships, subject to the manageable-owner rule and the same CSRF/body
+  limits as the other HTML forms.
 - **Lifetime and revocation.** A session expires after **12 hours absolute** and after
   **30 minutes idle** (refreshed lazily by accepted session-using requests:
   `GET /api/v1/session` and authenticated dashboard requests, including page GETs and
@@ -296,10 +314,11 @@ or as authority to act as a speaker.
   `POST /speakers/:speakerId/key` inserts one credential plus one grant per
   explicitly selected project after the session-account owner check and the same
   in-transaction membership/scope re-check; `POST /projects/:projectId/members`
-  inserts or reactivates one membership after `project.edit` and the same
-  in-transaction re-check, and `POST /projects/:projectId/members/:speakerId/remove`
+  inserts or reactivates one membership after a project-ownership check and the same
+  in-transaction ownership re-check, and `POST
+  /projects/:projectId/members/:speakerId/remove`
   soft-deletes the membership and deletes that speaker's grants for the project in
-  one transaction. The two form families require the
+  one transaction. The HTML form routes require the
   session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
   `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message send/expiry,
   receipts, credential rotation/revocation and grant editing, registration,
@@ -845,6 +864,10 @@ operator snapshot or to any unauthenticated aggregate.
   pruned past grace. There is no automatic scheduling.
 - Hard deletion of metadata/backups is not implemented; expiry is a tombstone, not
   comprehensive erasure.
+- Residual CLI race: `grant-key-project` checks membership and inserts the grant
+  without a transaction, so a concurrent `remove-member` can leave a stale grant for a
+  removed membership. It grants nothing while removed but could revive the credential
+  on reactivation. Operator-only; see **Membership and grant CLI semantics**.
 - Rate limiting is per-process and per-credential; there is no distributed/global
   limiter and no application-level per-IP limiting (delegated to the reverse proxy).
 - Metrics are per-process in-memory counters with no persistence or aggregation. The

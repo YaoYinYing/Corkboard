@@ -363,7 +363,9 @@ with the existing service functions.
 
 - **Routes and rendering.** `handlers.ts` sends `/`, `/login`, `/projects`
   (`POST`), `/projects/new`, `/projects/:projectId` (`GET` and `POST`),
-  `/projects/:projectId/edit`, `/projects/:projectId/messages/:messageId/body`,
+  `/projects/:projectId/edit`, `/projects/:projectId/members` (`GET` and `POST`),
+  `/projects/:projectId/members/:speakerId/remove` (`POST`),
+  `/projects/:projectId/messages/:messageId/body`,
   `/speakers`, `/speakers/:speakerId/key` (`GET` and `POST`), and
   `/static/app.css` to `handleWebRoute`. Pages are rendered on the server from
   string templates. `src/app/html.ts` owns the single `escapeHtml` boundary and
@@ -372,8 +374,9 @@ with the existing service functions.
 - **Body buffering.** For `POST` only, the Node adapter buffers any non-root path
   that `isWebPath` assigns to this router before building the Web `Request`,
   under the same 64 KiB cap and streaming limit as the API. That is the form
-  routes `/login`, `/projects`, `/projects/:projectId`, and
-  `/speakers/:speakerId/key`, plus POSTs to the GET-only paths `isWebPath` also
+  routes `/login`, `/projects`, `/projects/:projectId`,
+  `/projects/:projectId/members`, `/projects/:projectId/members/:speakerId/remove`,
+  and `/speakers/:speakerId/key`, plus POSTs to the GET-only paths `isWebPath` also
   names (`/projects/new`, `/projects/:projectId/edit`,
   `/projects/:projectId/messages/:messageId/body`, `/speakers`, and
   `/static/app.css`). Those GET-only POSTs still receive the router's `405`,
@@ -398,6 +401,14 @@ with the existing service functions.
   or consult a credential or grant. The `sessionViewer` flag is set only by
   the resolver and is never derived from request input; bearer authentication never
   sets it. Bearer authorization is unchanged.
+- **Membership administration.** The membership editor uses
+  `sessionAccountPrincipal` plus a direct `projects.owner_account_id = session
+  account` check (project and account active), re-read inside the write transaction.
+  A non-owner member holding `project.edit` is denied; possession of that capability
+  is not sufficient to add members or mint their bearer credentials. Removal soft
+  deletes the membership and deletes that speaker's project grants in one
+  transaction, and refuses the last manageable owner membership (active
+  owner-account speaker whose capabilities include `project.edit`).
 - **Service reuse.** `listProjects` branches to a session listing that spans all
   owned speakers and reports the deterministic member display name; `listMessages`,
   `getMessageBody`, and `listReadReceipts` are called unchanged. Timeline filters

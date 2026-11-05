@@ -784,3 +784,28 @@ prevented regression; when to remove the advice.
 - **Remove when:** A database-level constraint/trigger can enforce "no grant without
   an active membership" and grant deletion is expressed in the same statement, or
   every adapter ships a verified transaction implementation.
+
+## 2026-11-05 — `project.edit` is not project administration
+
+- **Failure:** Gating the membership editor on `project.edit` lets a non-owner
+  member who holds that capability add its own speaker with `message.send`, then use
+  the speaker-credential issuance UI to mint a bearer key. That converts a delegated
+  project-metadata capability into durable bearer access the owner never granted.
+  `TODO.md` requires project-owner authorization for membership admission.
+- **Reproducer:** Give account B's speaker an active membership on account A's
+  project with all seven capabilities including `project.edit`. Log in as B, POST
+  `/projects/:id/members` adding B's second speaker with `message.send`, then POST
+  `/speakers/:id/key`. Before the fix the add returns `303` and the key carries
+  `message.send`; after it, all membership routes return the uniform `404` and no
+  membership, credential, or grant is written.
+- **Fix:** Membership list/add/remove require
+  `projects.owner_account_id = session account` (active project and account), checked
+  before the body is parsed and re-read in the write transaction. `project.edit`
+  remains sufficient only for project metadata edit, not for membership or credential
+  administration. The dashboard owner may grant any of the seven scopes because the
+  authority is ownership, not the caller's own capability set.
+- **Prevents:** Privilege escalation from a scoped project capability to bearer
+  credentials, and cross-account speaker provisioning through the dashboard.
+- **Remove when:** Membership administration has an explicit delegated role with a
+  reviewed owner-equivalent policy and tests proving the delegation cannot mint
+  broader credentials.

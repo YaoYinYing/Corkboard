@@ -28,7 +28,7 @@ unimplemented. See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/projects/:projectId` | `GET` | Message timeline in ascending server `seq`, with filters, summary search, and cursor replay. |
 | `/projects/:projectId` | `POST` | Form-encoded project edit; redirects after POST. |
 | `/projects/:projectId/edit` | `GET` | Edit form for an owner. |
-| `/projects/:projectId/members` | `GET` | Active membership list and add form; requires `project.edit`. |
+| `/projects/:projectId/members` | `GET` | Active membership list and add form; requires the signed-in account to own the project. |
 | `/projects/:projectId/members` | `POST` | Form-encoded add of an active owned speaker with an explicit capability set; `303` to the list. |
 | `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; deletes that speaker's grants for the project; `303` to the list. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
@@ -288,22 +288,28 @@ grant, or audit write.
 memberships, ordered by `joined_at`, then speaker ID. Each entry shows the speaker ID,
 display name (or the ID when the name is empty), the membership's capability codes in
 canonical order, the joined date, and a remove form. The page also carries the add form.
-Access requires `project.edit` through the same `resolveSessionViewer` decision as
-project edit: an unknown, foreign, inactive, non-member, or capability-insufficient
-project is the uniform `404` page, and the route resolves the viewer **before** parsing
-a POST body so a malformed payload cannot probe project existence.
+Access is **project-owner-only**, not merely `project.edit`. The signed-in account
+must equal `projects.owner_account_id`, and the project and that account must be
+active. A non-owner member who holds `project.edit` is still denied with the uniform
+`404`; that matters because such a member could otherwise add a speaker carrying
+`message.send` and mint a bearer credential for it. An unknown, foreign, non-owner,
+inactive, or non-member project is the same `404` page, and the route checks ownership
+**before** parsing a POST body so a malformed payload cannot probe project existence.
+The editor is a human-session surface only; a bearer principal is rejected.
 
 **Add.** `POST /projects/:projectId/members` requires one `speaker_id` field and an
 explicit, non-empty `scope` set. Only an **active speaker owned by the signed-in
-account** (with an active owning account) may be added. A foreign, unknown, inactive,
-or other-account speaker is the same HTML `400` form error and writes nothing, so the
-form is not a cross-account speaker oracle. Every submitted capability must be one of
-the seven identifiers (`project.read`, `message.read`, `message.send`,
+(owner) account** (with an active owning account) may be added. A foreign, unknown,
+inactive, or other-account speaker is the same HTML `400` form error and writes
+nothing, so the form is not a cross-account speaker oracle. Every submitted capability
+must be one of the seven identifiers (`project.read`, `message.read`, `message.send`,
 `receipt.write`, `project.edit`, `member.read`, `member.manage`); duplicate values
-collapse and an unknown value rejects the whole request. An active duplicate is
-rejected as an already-active member without changing its capabilities. A previously
-removed membership is **reactivated** with the submitted capability set and a fresh
-`joined_at`; its old credential grants are not restored. Adding writes only the
+collapse and an unknown value rejects the whole request. Because the caller is the
+project owner, the owner may grant **any** of the seven, including capabilities the
+owner's own membership does not carry; there is no caller-rights cap. An active
+duplicate is rejected as an already-active member without changing its capabilities. A
+previously removed membership is **reactivated** with the submitted capability set and
+a fresh `joined_at`; its old credential grants are not restored. Adding writes only the
 membership: no credential, credential grant, or implicit capability is created, and a
 membership still grants no credential. The one `membership.grant` audit event records
 the actor account, target speaker, project, capabilities, and whether the row was
@@ -313,27 +319,34 @@ reactivated.
 membership (`removed_at`) and, mirroring the CLI `remove-member`, deletes every
 `credential_project_grants` row that any credential of that speaker held for the
 project. A removed credential therefore cannot revive if the speaker is added again;
-it needs a new explicit grant. The exact last-owner rule: an **owner membership** is a
-non-removed membership whose speaker is owned by `projects.owner_account_id`; removing
-the last remaining owner membership is refused with the HTML `400` "last owner
-membership" error so the owning account always keeps a membership it can manage the
-project through. Speaker status does not affect that count. The `membership.remove`
+it needs a new explicit grant. Removal may target any active membership, including one
+whose speaker belongs to another account. The exact last-owner rule: a **manageable
+owner membership** is a non-removed membership whose speaker is owned by
+`projects.owner_account_id`, where the speaker and its owning account are **active**
+and the capability set includes `project.edit`. Removing the last remaining manageable
+owner membership is refused with the HTML `400` "last owner membership" error, so the
+owning account always keeps a membership that can actually administer the project.
+Inactive owner memberships and owner memberships lacking `project.edit` neither count
+toward nor are protected by that rule. The `membership.remove`
 audit row is always written; `credential.project.revoke` is written only when at least
 one grant row was actually deleted.
 
 **Transactions and CSRF.** Both writes use one `SqlDatabase.transaction` and re-read
-the caller's `project.edit` membership under active project/speaker/account checks
-inside it, so a membership removed or downgraded after the request check aborts the
-write. Remove re-reads the target membership and the owner count inside the same
+the project's owner and the active account inside it, so ownership transferred away
+(or a deactivated project/account) after the request check aborts the write. Remove
+re-reads the target membership and the manageable-owner count inside the same
 transaction; both the membership update and grant deletion roll back together on
 failure. Both routes use the session double-submit (`corkboard_csrf` cookie plus exactly
 one hidden `csrf_token`), the `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap.
-Forms preserve `?lang=zh`; the page renders English or Simplified Chinese.
+Forms preserve `?lang=zh`, including their actions and the `303` redirect; the page
+renders English or Simplified Chinese.
 
-Membership management for **other accounts' speakers**, invitation/acceptance, bulk
-editing, capability presets, and cross-account provisioning remain CLI-only
-(`add-member`, `remove-member`). Credential issuance is available here; credential
-rotation, revocation, and per-credential grant editing remain CLI-only.
+Cross-account **addition/provisioning** of speakers owned by another account remains
+CLI-only (`add-member`); the dashboard owner may add only their own active speakers.
+Invitation/acceptance, bulk editing, and capability presets are **not implemented**
+(no CLI command exists for them). Removal may target any membership. Credential
+issuance is available here; credential rotation, revocation, and per-credential grant
+editing remain CLI-only.
 
 ## Authorization model
 
@@ -398,12 +411,16 @@ The message read surface performs no project, message, credential, or read-recei
 write, and no page marks a message read. The writes are the session row inserted
 by `POST /login`, the `sessions.last_seen_at` refresh on authenticated page
 requests, `POST /projects` (project plus owner-membership insert),
-`POST /projects/:projectId` (project title/summary update), and
+`POST /projects/:projectId` (project title/summary update),
 `POST /speakers/:speakerId/key` (one credential row plus one grant per explicitly
-selected project). Read receipt identities are displayed only through
+selected project), `POST /projects/:projectId/members` (one membership insert or
+reactivation), and `POST /projects/:projectId/members/:speakerId/remove` (the
+membership soft delete plus that speaker's grant deletions). Read receipt identities
+are displayed only through
 `listReadReceipts`, which authorizes `message.read` and re-applies the project filter.
 The speaker directory is an account-level read; it is not a project-scoped route and
-does not use `authorizeProject`.
+does not use `authorizeProject`. Membership administration does not use
+`authorizeProject` either: it requires project ownership, as described above.
 
 ## Rendering and security
 
@@ -517,9 +534,10 @@ bounded form before checking CSRF.
 
 ## Limits
 
-- Dashboard writes are project create/edit and one credential issuance for a
-  selected subset of an owned speaker's active projects. There is no message send,
-  expiry, membership editor, credential rotation/revocation, grant editor, expiry
+- Dashboard writes are project create/edit, one credential issuance for a
+  selected subset of an owned speaker's active projects, and project-owner
+  membership add/remove. There is no message send,
+  expiry, credential rotation/revocation, grant editor, expiry
   selection, speaker creation, registration, or admin action. Creating a project does
   not create a speaker or credential; an account without an active owned speaker
   cannot create one from this UI. A speaker's credential can be revoked or have its
@@ -536,7 +554,7 @@ bounded form before checking CSRF.
 - Replay offers bounded previous/next pages plus "jump to latest"; there is no
   time scrubber, date filter, infinite scroll, or client-side history.
 - No attachments, file previews, or image rendering; no credential listing,
-  rotation, or revocation UI, no membership editor, no project deletion/status change,
+  rotation, or revocation UI, no project deletion/status change,
   no speaker creation, no registration, email verification, password reset, or
   account settings. The directory shows active project grants only, not existing
   credentials or their prefixes.

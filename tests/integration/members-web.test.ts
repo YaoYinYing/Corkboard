@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { createApp } from "../../src/app/handlers.ts";
 import { WEB_LOGIN_CSRF_COOKIE } from "../../src/app/cookies.ts";
@@ -8,7 +11,9 @@ import { SCOPES } from "../../src/domain/authz.ts";
 import { AppError } from "../../src/domain/errors.ts";
 import { authorizeProject } from "../../src/service/auth.ts";
 import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "../../src/service/sessions.ts";
+import { openSqliteDatabase } from "../../src/storage/db.ts";
 import type { SqlDatabase, SqlValue } from "../../src/storage/db.ts";
+import { startServer } from "../../src/platforms/node/main.ts";
 import { createServiceFixture, ALL_SCOPES, type ServiceFixture } from "../helpers/service-fixture.ts";
 
 type App = (request: Request) => Promise<Response>;
@@ -160,9 +165,13 @@ async function memberSetup(fx: ServiceFixture): Promise<void> {
   await addPasswordAccount(fx, "acct_a", "a@example.test", "account a secret");
   await addPasswordAccount(fx, "acct_b", "b@example.test", "account b secret");
   await addPasswordAccount(fx, "acct_d", "d@example.test", "account d secret");
+  // acct_e is a non-owner member holding project.edit: membership
+  // administration must still be owner-only.
+  await addPasswordAccount(fx, "acct_e", "e@example.test", "account e secret");
   await fx.addSpeaker("spk_a", "acct_a");
   await fx.addSpeaker("spk_b", "acct_b");
   await fx.addSpeaker("spk_d", "acct_d");
+  await fx.addSpeaker("spk_e", "acct_e");
   await fx.addProject("proj_a", "acct_a");
   await fx.addProject("proj_d", "acct_d");
   await fx.db.run("UPDATE projects SET title = ? WHERE id = ?", ["Alpha project", "proj_a"]);
@@ -171,6 +180,9 @@ async function memberSetup(fx: ServiceFixture): Promise<void> {
   // A non-owner account with read access only: it can list the project but
   // must not reach the membership editor.
   await fx.addMembership("proj_a", "spk_b", ["project.read", "message.read"]);
+  // A non-owner account with project.edit: without the ownership gate this
+  // would pass the old capability check and reach the editor.
+  await fx.addMembership("proj_a", "spk_e", ALL_SCOPES);
   await fx.addMembership("proj_d", "spk_d", ALL_SCOPES);
 }
 
@@ -178,9 +190,11 @@ async function membershipRow(
   fx: ServiceFixture,
   projectId: string,
   speakerId: string,
-): Promise<{ capabilities: string; removed_at: string | null } | undefined> {
+): Promise<
+  { capabilities: string; joined_at: string | null; removed_at: string | null } | undefined
+> {
   return fx.db.first(
-    "SELECT capabilities, removed_at FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
+    "SELECT capabilities, joined_at, removed_at FROM project_memberships WHERE project_id = ? AND speaker_id = ?",
     [projectId, speakerId],
   );
 }
@@ -189,6 +203,7 @@ test("owner lists members and adds an owned active speaker with explicit capabil
   const { fx, app } = await withApp(t);
   await memberSetup(fx);
   await fx.addSpeaker("spk_c", "acct_a");
+  await fx.addSpeaker("spk_c2", "acct_a");
   const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
 
   const page = await getPage(app, "/projects/proj_a/members", cookie);
@@ -223,6 +238,16 @@ test("owner lists members and adds an owned active speaker with explicit capabil
   assert.equal(row.removed_at, null);
   // Duplicates collapse and capabilities are stored in canonical order.
   assert.equal(row.capabilities, JSON.stringify(["project.read", "message.read"]));
+  // Adding a membership creates no credential, grant, or implicit access.
+  assert.equal(
+    (await fx.db.all<{ id: string }>("SELECT id FROM credentials")).length,
+    0,
+  );
+  assert.equal(
+    (await fx.db.all<{ credential_id: string }>("SELECT credential_id FROM credential_project_grants"))
+      .length,
+    0,
+  );
 
   const after = await getPage(app, "/projects/proj_a/members", cookie);
   assert.ok(after.html.includes("<code>spk_c</code>"));
@@ -241,41 +266,70 @@ test("owner lists members and adds an owned active speaker with explicit capabil
   assert.match(chinese.html, /<html lang="zh-Hans" dir="ltr">/);
   assert.ok(chinese.html.includes("成员"));
   assert.ok(chinese.html.includes("添加成员"));
-  assert.ok(chinese.html.includes("已经") === false);
+  // Locale is preserved by both form actions and the post-success redirect.
+  assert.ok(chinese.html.includes('action="/projects/proj_a/members?lang=zh"'));
+  assert.ok(
+    chinese.html.includes('action="/projects/proj_a/members/spk_a/remove?lang=zh"'),
+  );
+  const chineseAdd = await postFormMulti(app, "/projects/proj_a/members?lang=zh", cookie, [
+    ["csrf_token", csrf],
+    ["speaker_id", "spk_c2"],
+    ["scope", "project.read"],
+  ]);
+  assert.equal(chineseAdd.status, 303);
+  assert.equal(chineseAdd.headers.get("location"), "/projects/proj_a/members?lang=zh");
 });
 
 test("non-owners, unknown projects, and foreign projects are the uniform 404 before body parsing", async (t) => {
   const { fx, app } = await withApp(t);
   await memberSetup(fx);
   const owner = await loginAsWithCsrf(app, "a@example.test", "account a secret");
-  const other = await loginAsWithCsrf(app, "b@example.test", "account b secret");
+  const readOnly = await loginAsWithCsrf(app, "b@example.test", "account b secret");
+  const editor = await loginAsWithCsrf(app, "e@example.test", "account e secret");
 
-  // Mutation proof: acct_b's speaker is an active member with project.read
-  // only. If the project.edit capability check (or the owned-speaker viewer)
-  // were dropped, these requests would return 200 instead of 404.
-  for (const [method, path, body] of [
-    ["GET", "/projects/proj_a/members", undefined],
-    ["POST", "/projects/proj_a/members", "not=form"],
-    ["POST", "/projects/proj_a/members/spk_a/remove", "not=form"],
-  ] as const) {
-    const response = await call(app, path, {
-      method,
-      headers: { cookie: other.cookie },
-      ...(body === undefined
-        ? {}
-        : {
-            headers: { cookie: other.cookie, "content-type": "application/json" },
-            body,
-          }),
-    });
-    assert.equal(response.status, 404, `${method} ${path}`);
-    const html = await response.text();
-    assert.ok(html.includes("The requested page is not available."), `${method} ${path}`);
-    assert.equal(html.includes("Alpha project"), false, `${method} ${path}`);
-    // The locale switch echoes the request path, so path identifiers may
-    // appear; no member name or project title is rendered.
-    assert.equal(html.includes(">spk_a<") || html.includes("member-0-name"), false);
+  // Mutation proof: acct_e's speaker is a non-owner member holding
+  // project.edit (and every other scope). If the owner predicate were replaced
+  // by the old project.edit check, these requests would return 200 instead of
+  // 404. acct_b is a read-only non-owner; both must be uniformly hidden.
+  for (const other of [readOnly, editor]) {
+    for (const [method, path, body] of [
+      ["GET", "/projects/proj_a/members", undefined],
+      ["POST", "/projects/proj_a/members", "not=form"],
+      ["POST", "/projects/proj_a/members/spk_a/remove", "not=form"],
+    ] as const) {
+      const response = await call(app, path, {
+        method,
+        headers: { cookie: other.cookie },
+        ...(body === undefined
+          ? {}
+          : {
+              headers: { cookie: other.cookie, "content-type": "application/json" },
+              body,
+            }),
+      });
+      assert.equal(response.status, 404, `${method} ${path}`);
+      const html = await response.text();
+      assert.ok(html.includes("The requested page is not available."), `${method} ${path}`);
+      assert.equal(html.includes("Alpha project"), false, `${method} ${path}`);
+      // The locale switch echoes the request path, so path identifiers may
+      // appear; no member name or project title is rendered.
+      assert.equal(html.includes(">spk_a<") || html.includes("member-0-name"), false);
+    }
   }
+
+  // A valid project.edit member still cannot add a member or mint anything.
+  await fx.addSpeaker("spk_e2", "acct_e");
+  const editorAdd = await postFormMulti(app, "/projects/proj_a/members", editor.cookie, [
+    ["csrf_token", editor.csrf],
+    ["speaker_id", "spk_e2"],
+    ["scope", "message.send"],
+  ]);
+  assert.equal(editorAdd.status, 404);
+  assert.equal(await membershipRow(fx, "proj_a", "spk_e2"), undefined);
+  assert.equal(
+    (await fx.db.all<{ id: string }>("SELECT id FROM credentials")).length,
+    0,
+  );
 
   for (const path of ["/projects/proj_d/members", "/projects/proj_missing/members"]) {
     const response = await getPage(app, path, owner.cookie);
@@ -381,6 +435,20 @@ test("the last owner membership cannot be removed, but another owner membership 
   const { fx, app } = await withApp(t);
   await memberSetup(fx);
   await fx.addSpeaker("spk_c", "acct_a");
+  // Neither of these owner-account memberships satisfies the guarantee: one
+  // lacks project.edit and the other's speaker is inactive.
+  await fx.addSpeaker("spk_limited", "acct_a");
+  await fx.addSpeaker("spk_inactive", "acct_a", "inactive");
+  for (const [speakerId, capabilities] of [
+    ["spk_limited", ["project.read"]],
+    ["spk_inactive", ALL_SCOPES],
+  ] as const) {
+    await fx.db.run(
+      `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+       VALUES (?, ?, ?, ?)`,
+      ["proj_a", speakerId, JSON.stringify(capabilities), "2026-11-03T12:00:00.000Z"],
+    );
+  }
   const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
 
   const refused = await postFormMulti(app, "/projects/proj_a/members/spk_a/remove", cookie, [
@@ -416,6 +484,80 @@ test("the last owner membership cannot be removed, but another owner membership 
   ]);
   assert.equal(nonOwner.status, 303);
   assert.ok((await membershipRow(fx, "proj_a", "spk_b"))?.removed_at);
+});
+
+test("the list shows only active memberships in joined order", async (t) => {
+  const { fx, app } = await withApp(t);
+  await memberSetup(fx);
+  await fx.addSpeaker("spk_removed", "acct_a");
+  await fx.db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at, removed_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      "proj_a",
+      "spk_removed",
+      JSON.stringify(["project.read"]),
+      "2026-11-03T11:59:00.000Z",
+      "2026-11-03T11:59:30.000Z",
+    ],
+  );
+  for (const [speakerId, joinedAt] of [
+    ["spk_a", "2026-11-03T12:03:00.000Z"],
+    ["spk_b", "2026-11-03T12:01:00.000Z"],
+    ["spk_e", "2026-11-03T12:02:00.000Z"],
+  ] as const) {
+    await fx.db.run(
+      "UPDATE project_memberships SET joined_at = ? WHERE project_id = ? AND speaker_id = ?",
+      [joinedAt, "proj_a", speakerId],
+    );
+  }
+  const { cookie } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const page = await getPage(app, "/projects/proj_a/members", cookie);
+  assert.equal(page.status, 200);
+  assert.equal(page.html.includes("spk_removed"), false, "removed rows are not listed");
+  const order = ["spk_b", "spk_e", "spk_a"].map((id) =>
+    page.html.indexOf(`<code>${id}</code>`),
+  );
+  assert.ok(order.every((index) => index >= 0));
+  assert.ok(order[0]! < order[1]! && order[1]! < order[2]!, "ordered by joined_at");
+});
+
+test("concurrent removal of the last two manageable owner memberships keeps one", async (t) => {
+  const { fx, app } = await withApp(t);
+  await memberSetup(fx);
+  await fx.addSpeaker("spk_c", "acct_a");
+  await fx.db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    ["proj_a", "spk_c", JSON.stringify(ALL_SCOPES), "2026-11-03T12:00:00.000Z"],
+  );
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+
+  const [first, second] = await Promise.all([
+    postFormMulti(app, "/projects/proj_a/members/spk_a/remove", cookie, [
+      ["csrf_token", csrf],
+    ]),
+    postFormMulti(app, "/projects/proj_a/members/spk_c/remove", cookie, [
+      ["csrf_token", csrf],
+    ]),
+  ]);
+  assert.deepEqual([first.status, second.status].sort(), [303, 400]);
+  const conflict = first.status === 400 ? first : second;
+  assert.ok((await conflict.text()).includes("The last owner membership cannot be removed."));
+
+  const owners = await fx.db.all<{ speaker_id: string; capabilities: string; removed_at: string | null }>(
+    `SELECT m.speaker_id, m.capabilities, m.removed_at
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+      WHERE m.project_id = ? AND s.owner_account_id = ? AND s.status = 'active'`,
+    ["proj_a", "acct_a"],
+  );
+  const manageable = owners.filter(
+    (owner) =>
+      owner.removed_at === null &&
+      (JSON.parse(owner.capabilities) as string[]).includes("project.edit"),
+  );
+  assert.equal(manageable.length, 1, "exactly one manageable owner membership remains");
 });
 
 test("removing a membership deletes its project grants so a reactivated credential cannot revive", async (t) => {
@@ -461,13 +603,19 @@ test("removing a membership deletes its project grants so a reactivated credenti
 
   // Re-adding restores access only through a new explicit grant; the old
   // credential does not regain the project because its grant stayed deleted.
+  // It also creates a fresh joined_at and stores the newly submitted set.
+  fx.setNow(new Date("2026-11-03T12:10:00.000Z"));
   const readded = await postFormMulti(app, "/projects/proj_a/members", cookie, [
     ["csrf_token", csrf],
     ["speaker_id", "spk_c"],
+    ["scope", "receipt.write"],
     ["scope", "project.read"],
   ]);
   assert.equal(readded.status, 303);
-  assert.equal((await membershipRow(fx, "proj_a", "spk_c"))?.removed_at, null);
+  const reactivated = await membershipRow(fx, "proj_a", "spk_c");
+  assert.equal(reactivated?.removed_at, null);
+  assert.equal(reactivated?.joined_at, "2026-11-03T12:10:00.000Z");
+  assert.equal(reactivated?.capabilities, JSON.stringify(["project.read", "receipt.write"]));
   const grantsAfter = await fx.db.all<{ credential_id: string }>(
     "SELECT credential_id FROM credential_project_grants WHERE project_id = ? AND credential_id = ?",
     ["proj_a", credentialId],
@@ -654,4 +802,134 @@ test("removal forms only accept POST and the editor keeps other routes intact", 
     headers: { cookie },
   });
   assert.equal(removal.status, 405);
+});
+
+test("the Node adapter buffers membership form POSTs and enforces the owner gate over HTTP", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "corkboard-members-http-"));
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const email = "members-http@example.test";
+  const password = "members http secret";
+  const now = "2026-11-03T12:00:00.000Z";
+
+  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  await db.run(
+    `INSERT INTO accounts (id, email, password_hash, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["acct_http", email, await hashPassword(password), now],
+  );
+  await db.run(
+    `INSERT INTO speakers (id, owner_account_id, display_name, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["spk_http", "acct_http", "HTTP owner", now],
+  );
+  await db.run(
+    `INSERT INTO speakers (id, owner_account_id, display_name, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["spk_http2", "acct_http", "HTTP added", now],
+  );
+  await db.run(
+    `INSERT INTO projects (id, owner_account_id, title, summary, status, next_seq, created_at)
+     VALUES (?, ?, ?, ?, 'active', 0, ?)`,
+    ["proj_http", "acct_http", "HTTP project", "Members over HTTP", now],
+  );
+  await db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    ["proj_http", "spk_http", JSON.stringify(SCOPES), now],
+  );
+  db.close();
+
+  const running = await startServer({
+    env: {
+      CORKBOARD_DATA_DIR: dataDir,
+      CORKBOARD_ROOT_KEY: Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64"),
+      CORKBOARD_CREDENTIAL_PEPPER: Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64"),
+      PORT: "0",
+    },
+  });
+  t.after(async () => {
+    await running.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  const address = running.server.address();
+  assert.ok(address !== null && typeof address === "object");
+  const base = `http://127.0.0.1:${address.port}`;
+  const formType = "application/x-www-form-urlencoded";
+
+  // Sign in through the adapter, not createApp.
+  const loginPage = await fetch(`${base}/login`, { headers: { connection: "close" } });
+  assert.equal(loginPage.status, 200);
+  const loginCsrf = cookieValue(loginPage.headers.getSetCookie(), WEB_LOGIN_CSRF_COOKIE);
+  assert.ok(loginCsrf);
+  const login = await fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "content-type": formType,
+      cookie: `${WEB_LOGIN_CSRF_COOKIE}=${loginCsrf}`,
+      connection: "close",
+    },
+    body: new URLSearchParams({
+      return_to: "/",
+      login_csrf: loginCsrf,
+      email,
+      password,
+    }).toString(),
+  });
+  assert.equal(login.status, 303);
+  const session = cookieValue(login.headers.getSetCookie(), SESSION_COOKIE_NAME);
+  const csrf = cookieValue(login.headers.getSetCookie(), CSRF_COOKIE_NAME);
+  assert.ok(session);
+  assert.ok(csrf);
+  const cookie = `${SESSION_COOKIE_NAME}=${session}; ${CSRF_COOKIE_NAME}=${csrf}`;
+  const postForm = (path: string, fields: ReadonlyArray<readonly [string, string]>): Promise<Response> => {
+    const body = new URLSearchParams();
+    for (const [name, value] of fields) body.append(name, value);
+    return fetch(`${base}${path}`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": formType, cookie, connection: "close" },
+      body: body.toString(),
+    });
+  };
+
+  const added = await postForm("/projects/proj_http/members", [
+    ["csrf_token", csrf],
+    ["speaker_id", "spk_http2"],
+    ["scope", "project.read"],
+    ["scope", "message.read"],
+  ]);
+  assert.equal(added.status, 303, "the adapter must buffer the members add body");
+  assert.equal(added.headers.get("location"), "/projects/proj_http/members");
+
+  const removed = await postForm("/projects/proj_http/members/spk_http2/remove", [
+    ["csrf_token", csrf],
+  ]);
+  assert.equal(removed.status, 303, "the adapter must buffer the members remove body");
+  assert.equal(removed.headers.get("location"), "/projects/proj_http/members");
+
+  const oversized = await fetch(`${base}/projects/proj_http/members`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": formType, cookie, connection: "close" },
+    body: `csrf_token=${encodeURIComponent(csrf)}&speaker_id=spk_http2&scope=${"a".repeat(70_000)}`,
+  });
+  assert.equal(oversized.status, 413);
+
+  const anonymous = await fetch(`${base}/projects/proj_http/members`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": formType, connection: "close" },
+    body: "speaker_id=spk_http2&scope=project.read",
+  });
+  assert.equal(anonymous.status, 303);
+  assert.equal(
+    anonymous.headers.get("location"),
+    `/login?return_to=${encodeURIComponent("/projects/proj_http/members")}`,
+  );
 });

@@ -383,11 +383,14 @@ export async function listProjects(
   };
 }
 
-// Dashboard membership editor. Every function first requires `project.edit`
-// through the same `authorizeProject` decision as project edit, so a foreign,
-// unknown, or capability-insufficient project is the uniform NOT_FOUND. The
-// write functions re-read that authorization inside their transaction, so a
-// membership removed or downgraded after the request check aborts the write.
+// Dashboard membership editor. Membership administration is project-owner-only,
+// not merely `project.edit`: a non-owner member holding project.edit could
+// otherwise add a speaker with message.send and mint a bearer credential for it.
+// The signed-in account must own the project (`projects.owner_account_id`), and
+// both the project and that account must be active. A foreign, unknown,
+// non-owner, or inactive project is the uniform NOT_FOUND, so the editor cannot
+// distinguish a project the caller can see from one that does not exist.
+// The write functions re-read this ownership inside their transaction.
 const MAX_MEMBER_SPEAKER_ID_CHARS = 128;
 
 export interface ProjectMember {
@@ -411,6 +414,7 @@ function normalizeMemberSpeakerId(value: string): string {
 
 // An explicit, non-empty subset of the seven identifiers. Duplicates collapse
 // to one entry in canonical order; an unknown value rejects the whole request.
+// The project owner may grant any of the seven; there is no caller-rights cap.
 function normalizeMemberCapabilities(values: readonly string[]): Scope[] {
   const requested = new Set<Scope>();
   for (const value of values) {
@@ -423,26 +427,39 @@ function normalizeMemberCapabilities(values: readonly string[]): Scope[] {
   return SCOPES.filter((scope) => requested.has(scope));
 }
 
-async function requireEditorMembershipInTransaction(
-  tx: SqlTransaction,
+async function assertProjectOwner(
+  db: SqlTransaction,
   principal: Principal,
   projectId: string,
 ): Promise<void> {
-  const membership = await tx.first<{ capabilities: string }>(
-    `SELECT m.capabilities
-       FROM project_memberships m
-       JOIN projects p ON p.id = m.project_id
-       JOIN speakers s ON s.id = m.speaker_id
-       JOIN accounts a ON a.id = s.owner_account_id
-      WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
-        AND p.status = 'active' AND s.status = 'active'
-        AND s.owner_account_id = ? AND a.status = 'active'`,
-    [projectId, principal.speakerId, principal.accountId],
+  if (principal.sessionViewer !== true) throw new AppError("NOT_FOUND");
+  const project = await db.first<{
+    status: string;
+    owner_account_id: string;
+    account_status: string;
+  }>(
+    `SELECT p.status, p.owner_account_id, a.status AS account_status
+       FROM projects p
+       JOIN accounts a ON a.id = p.owner_account_id
+      WHERE p.id = ?`,
+    [projectId],
   );
-  if (membership === undefined) throw new AppError("NOT_FOUND");
-  if (!parseScopeJson(membership.capabilities).has("project.edit")) {
+  if (
+    project === undefined ||
+    project.status !== "active" ||
+    project.account_status !== "active" ||
+    project.owner_account_id !== principal.accountId
+  ) {
     throw new AppError("NOT_FOUND");
   }
+}
+
+export function authorizeProjectOwner(
+  deps: ServiceDeps,
+  principal: Principal,
+  projectId: string,
+): Promise<void> {
+  return assertProjectOwner(deps.db, principal, projectId);
 }
 
 export async function listProjectMembers(
@@ -450,7 +467,7 @@ export async function listProjectMembers(
   principal: Principal,
   projectId: string,
 ): Promise<ProjectMember[]> {
-  await authorizeProject(deps, principal, projectId, "project.edit");
+  await authorizeProjectOwner(deps, principal, projectId);
   const rows = await deps.db.all<{
     speaker_id: string;
     display_name: string | null;
@@ -472,8 +489,8 @@ export async function listProjectMembers(
   }));
 }
 
-// Only an active speaker owned by the signed-in account may be added. A
-// foreign, unknown, inactive, or other-account speaker is the same
+// Only an active speaker owned by the signed-in (owner) account may be added.
+// A foreign, unknown, inactive, or other-account speaker is the same
 // VALIDATION_ERROR, so the add form cannot enumerate accounts or speakers.
 // Adding writes only the membership: no credential, scope grant, or implicit
 // capability is created. An active duplicate is CONFLICT; a previously
@@ -485,7 +502,7 @@ export async function addProjectMember(
   projectId: string,
   input: AddProjectMemberInput,
 ): Promise<void> {
-  await authorizeProject(deps, principal, projectId, "project.edit");
+  await authorizeProjectOwner(deps, principal, projectId);
   const speakerId = normalizeMemberSpeakerId(input.speakerId);
   const capabilities = normalizeMemberCapabilities(input.capabilities);
 
@@ -502,7 +519,7 @@ export async function addProjectMember(
   const now = deps.now().toISOString();
   let reactivated = false;
   await deps.db.transaction(async (tx) => {
-    await requireEditorMembershipInTransaction(tx, principal, projectId);
+    await assertProjectOwner(tx, principal, projectId);
 
     const rechecked = await tx.first<{ id: string }>(
       `SELECT s.id
@@ -553,24 +570,26 @@ export interface RemoveProjectMemberResult {
 }
 
 // Soft-deletes the membership and, mirroring `remove-member` in the CLI,
-// deletes every credential grant that speaker held for this project. The
-// exact last-owner rule: an owner membership is a non-removed membership whose
-// speaker is owned by `projects.owner_account_id`; removing the last remaining
-// one is refused so the owning account always keeps a membership it can
-// manage the project through. Speaker status does not affect the count.
+// deletes every credential grant that speaker held for this project. The exact
+// last-owner rule: a manageable owner membership is a non-removed membership
+// whose speaker is owned by `projects.owner_account_id`, where the speaker and
+// owning account are active and the capability set includes `project.edit`.
+// Removing the last manageable owner membership is refused so the owning
+// account keeps a membership that actually administers the project. Inactive or
+// `project.edit`-less owner memberships neither count nor are protected.
 export async function removeProjectMember(
   deps: ServiceDeps,
   principal: Principal,
   projectId: string,
   speakerId: string,
 ): Promise<RemoveProjectMemberResult> {
-  await authorizeProject(deps, principal, projectId, "project.edit");
+  await authorizeProjectOwner(deps, principal, projectId);
   const targetSpeakerId = normalizeMemberSpeakerId(speakerId);
 
   const now = deps.now().toISOString();
   let grantsDeleted = 0;
   await deps.db.transaction(async (tx) => {
-    await requireEditorMembershipInTransaction(tx, principal, projectId);
+    await assertProjectOwner(tx, principal, projectId);
 
     const project = await tx.first<{ owner_account_id: string }>(
       "SELECT owner_account_id FROM projects WHERE id = ? AND status = 'active'",
@@ -578,25 +597,45 @@ export async function removeProjectMember(
     );
     if (project === undefined) throw new AppError("NOT_FOUND");
 
-    const membership = await tx.first<{ speaker_owner_account_id: string | null }>(
-      `SELECT s.owner_account_id AS speaker_owner_account_id
+    const membership = await tx.first<{
+      speaker_owner_account_id: string | null;
+      speaker_status: string;
+      speaker_account_status: string | null;
+      capabilities: string;
+    }>(
+      `SELECT s.owner_account_id AS speaker_owner_account_id,
+              s.status AS speaker_status,
+              a.status AS speaker_account_status,
+              m.capabilities
          FROM project_memberships m
          JOIN speakers s ON s.id = m.speaker_id
+         LEFT JOIN accounts a ON a.id = s.owner_account_id
         WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL`,
       [projectId, targetSpeakerId],
     );
     if (membership === undefined) throw new AppError("NOT_FOUND");
 
-    if (membership.speaker_owner_account_id === project.owner_account_id) {
-      const owners = await tx.first<{ count: number | null }>(
-        `SELECT COUNT(*) AS count
+    const manageableOwner =
+      membership.speaker_owner_account_id === project.owner_account_id &&
+      membership.speaker_status === "active" &&
+      membership.speaker_account_status === "active" &&
+      parseScopeJson(membership.capabilities).has("project.edit");
+    if (manageableOwner) {
+      // Filter in JS: the SQLite/D1 contract avoids JSON functions.
+      const owners = await tx.all<{ capabilities: string }>(
+        `SELECT m.capabilities
            FROM project_memberships m
            JOIN speakers s ON s.id = m.speaker_id
+           JOIN accounts a ON a.id = s.owner_account_id
           WHERE m.project_id = ? AND m.removed_at IS NULL
-            AND s.owner_account_id = ?`,
+            AND s.owner_account_id = ?
+            AND s.status = 'active' AND a.status = 'active'`,
         [projectId, project.owner_account_id],
       );
-      if (Number(owners?.count ?? 0) <= 1) {
+      const manageable = owners.filter((owner) =>
+        parseScopeJson(owner.capabilities).has("project.edit"),
+      );
+      if (manageable.length <= 1) {
         throw new AppError("CONFLICT", "cannot remove the last owner membership");
       }
     }
