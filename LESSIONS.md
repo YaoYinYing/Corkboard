@@ -19,8 +19,9 @@ actionable and prune stale ones.
   read per ≤49-project chunk (up to four queries at the 100-project cap), merged and
   deduplicated by event `id` then re-sorted. Audit selects only `id` (the internal
   dedup key, never rendered), `created_at`, `operation`, `outcome`, and `project_id`,
-  and hides a project ID outside the authorized set. Chunking keeps every query under
-  D1's 100-bound-parameter limit; the literal `LIMIT 20` also avoids a bound parameter
+  and hides a project ID outside the authorized set. Chunking keeps the audit queries
+  at ≤49 parameters, and no query exceeds D1's 100-parameter limit; the literal
+  `LIMIT 20` also avoids a bound parameter
   there. Credential states reuse `credentialState` from the
   inventory instead of re-deriving revoked/expired/unknown. Where no per-tenant
   source exists (traffic, errors), say so; never substitute a global metric.

@@ -201,11 +201,13 @@ bounds every `detail` string/array and drops a `detail` document that still exce
 
 The write is fail-open by design: an insert error is swallowed and never logged, so the
 audit sink cannot alter an external response or an authorization outcome. Audit rows are
-metadata, never authority — no authorization path consults them. The only read is the
-authorized session-only `GET /overview`, which displays at most 20 sanitized
+metadata, never authority — no authorization path consults them. The only user-facing
+read is the authorized session-only `GET /overview`, which displays at most 20 sanitized
 `audit_events` rows for the account's own actions and readable projects; there is no
-audit read API. Body-integrity failures and message expiry keep their existing separate
-writers; expiry retains its deterministic id with `INSERT OR IGNORE` for reconciliation.
+audit read API. The expiry worker's bounded reconciliation `LEFT JOIN` checks only
+whether a deterministic row exists. Body-integrity failures and message expiry keep
+their existing separate writers; expiry retains its deterministic id with `INSERT OR
+IGNORE` for reconciliation.
 There is no audit retention, rotation, or deletion job; `prune` never deletes these rows.
 
 ## Retention and pruning

@@ -906,7 +906,7 @@ shows no traffic or error summary, because there is no per-tenant source. See
   measures message finalization delay; per-project counts require an authorized
   `project.read` view and are not in the operator snapshot.
 - The authorized `GET /overview` row caps (100 projects, 20 audit rows, 1,001
-  credential rows scanned) bound **result size**, not table work. This read-only
+  credential rows returned and 1,000 counted) bound **result size**, not table work. This read-only
   slice adds no migration, and `body_objects(project_id)`,
   `audit_events(actor_account_id, created_at)`, `audit_events(project_id, created_at)`,
   `credentials(speaker_id)`, and `speakers(owner_account_id)` are unindexed. Add
