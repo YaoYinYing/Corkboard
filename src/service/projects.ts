@@ -274,16 +274,21 @@ export async function createProject(
 
   const id = `proj_${randomBase64url(16)}`;
   const now = deps.now().toISOString();
-  await deps.db.run(
-    `INSERT INTO projects (id, owner_account_id, title, summary, status, next_seq, created_at)
-     VALUES (?, ?, ?, ?, 'active', 0, ?)`,
-    [id, principal.accountId, title, summary, now],
-  );
-  await deps.db.run(
-    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
-     VALUES (?, ?, ?, ?)`,
-    [id, speaker.id, JSON.stringify(SCOPES), now],
-  );
+  // One transaction: a failure from either insert (or a crash before commit)
+  // leaves neither row, so this create path never leaves an active project
+  // without the owner membership that makes it reachable and editable.
+  await deps.db.transaction(async (tx) => {
+    await tx.run(
+      `INSERT INTO projects (id, owner_account_id, title, summary, status, next_seq, created_at)
+       VALUES (?, ?, ?, ?, 'active', 0, ?)`,
+      [id, principal.accountId, title, summary, now],
+    );
+    await tx.run(
+      `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+       VALUES (?, ?, ?, ?)`,
+      [id, speaker.id, JSON.stringify(SCOPES), now],
+    );
+  });
 
   return { id, title, summary, status: "active", created_at: now };
 }

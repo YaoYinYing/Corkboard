@@ -214,9 +214,14 @@ form fields are malformed. Project title and summary reuse the 140-grapheme /
 1024-byte summary bounds; a blank summary is `NULL`. Project create provisions an
 owner membership for the account's deterministic first active owned speaker; it
 does not create a speaker, credential, or credential-to-project grant. The project
-and membership rows are two sequential inserts (the shared database port has no
-interactive transaction), so a failure between them leaves an invisible project
-with no membership; this is fail-closed and recorded as cleanup debt. Every page is `no-store` with a strict
+and owner membership are written in one database transaction (`BEGIN IMMEDIATE` on
+SQLite; commit only after both inserts), so a failure or crash before commit leaves
+neither row. That guarantee is scoped to this dashboard `POST /projects` path, not to
+all project rows: the operator CLI `create-project` inserts a project with no
+membership (invisible and denied until a member is added), and `remove-member` can
+remove the last membership. A future
+D1 adapter must implement the same port with `batch` semantics and pass the shared
+storage contract; D1 is not exercised in this environment. Every page is `no-store` with a strict
 CSP and no inline script or style. `?lang=zh` selects Simplified Chinese; unknown
 locales fall back to English and `lang` is preserved across filters, pager links,
 and project forms. Filter, search, replay, project form, CSRF, and authorization

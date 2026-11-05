@@ -569,6 +569,7 @@ function withAuditFailure(
       }
       return db.run(sql, params);
     },
+    transaction: (fn) => db.transaction(fn),
   };
 }
 
@@ -588,6 +589,7 @@ function withAuditFailureCount(
       }
       return db.run(sql, params);
     },
+    transaction: (fn) => db.transaction(fn),
   };
 }
 
@@ -607,6 +609,7 @@ function withBodyObjectRace(
       return db.first<T>(sql, params);
     },
     run: (sql: string, params?: readonly SqlValue[]) => db.run(sql, params),
+    transaction: (fn) => db.transaction(fn),
   };
 }
 
@@ -983,6 +986,7 @@ function revokeGrantAfterMessageRead(fx: ServiceFixture, principal: Principal): 
     all: <T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> => base.all<T>(sql, params),
     run: (sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }> =>
       base.run(sql, params),
+    transaction: (fn) => base.transaction(fn),
     async first<T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined> {
       const row = await base.first<T>(sql, params);
       if (!revoked && sql.includes("SELECT seq, body_state FROM messages")) {

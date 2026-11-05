@@ -189,10 +189,14 @@ title/summary edit (`POST /projects/:projectId`).
   credential, or credential-to-project grant. Edit and update require
   `project.edit`; an unknown, foreign, or non-owner-member project is the same
   uniform `404` as an unreadable project. Title/summary validation lives in the
-  service. The project and membership inserts are sequential because the shared
-  database port has no interactive transaction, so a failure between them can
-  leave an invisible project with no membership. That is fail-closed, exposes no
-  data, and is recorded as cleanup debt.
+  service. The project and its owner membership are inserted in one database
+  transaction (`BEGIN IMMEDIATE`, commit only after both writes); a failure or
+  crash before commit leaves neither row. The guarantee is scoped to this dashboard
+  create path, not to all project rows: the CLI `create-project` inserts a project
+  without a membership (invisible and denied until one is added), and `remove-member`
+  can remove the last membership. A future D1 adapter must implement the
+  same port with `batch` semantics and pass the shared contract; D1 is not
+  exercised here.
 - **Enumeration and cross-account reads.** The viewer is derived only from active,
   non-removed memberships of speakers owned by the session account. A project
   without a qualifying membership is a uniform `404`, whether it is missing,

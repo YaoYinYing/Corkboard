@@ -179,12 +179,15 @@ a credential, or a credential-to-project grant, and there is no member editor in
 this slice. An account with no active owned speaker gets the safe invalid-request
 form error and no project is written.
 
-The project and membership rows are two sequential inserts, because the shared
-SQLite/D1 database port has no interactive transaction. A crash or failure
-between them leaves an invisible project row with no membership. That state is
-fail-closed: no account gains read or edit authority over it and no data is
-exposed, but the orphan is not cleaned up automatically and is recorded as
-cleanup debt.
+The project and owner membership are written in one database transaction. The
+SQLite adapter runs `BEGIN IMMEDIATE` and commits only after both inserts
+succeed; any error, or a crash before commit, rolls both rows back. A created
+project therefore always has the owner membership that makes it reachable and
+editable, and an interrupted create leaves no invisible orphan project. A D1
+adapter would have to implement the same `transaction` port (D1 has no
+interactive transactions, so it must submit the buffered writes as one
+`batch`) and pass the shared storage contract; no D1 adapter ships or has been
+exercised in this environment.
 
 Edit and update require the owner role as the service layer defines it for
 project administration: `project.edit` in the active membership, the same

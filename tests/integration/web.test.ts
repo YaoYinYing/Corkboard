@@ -20,7 +20,9 @@ import {
 } from "../../src/service/messages.ts";
 import { expireMessageBody } from "../../src/service/expiry.ts";
 import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "../../src/service/sessions.ts";
+import { createProject } from "../../src/service/projects.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
+import type { SqlDatabase, SqlTransaction, SqlValue } from "../../src/storage/db.ts";
 import { startServer } from "../../src/platforms/node/main.ts";
 import {
   createServiceFixture,
@@ -1794,6 +1796,57 @@ test("project create requires an active owned speaker and writes nothing otherwi
   assert.equal(response.status, 400);
   assert.ok((await response.text()).includes('role="alert"'));
   assert.equal((await fx.db.all<{ id: string }>("SELECT id FROM projects")).length, 0);
+});
+
+// Failure injection for the second insert of project creation. The wrapper
+// applies inside a transaction as well, so the test is meaningful on both the
+// sequential and transactional implementations.
+function withFailingMembershipInsert(db: SqlDatabase): SqlDatabase {
+  const wrap = (target: SqlTransaction): SqlTransaction => ({
+    all: <T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> =>
+      target.all<T>(sql, params),
+    first: <T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined> =>
+      target.first<T>(sql, params),
+    run: (sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }> =>
+      sql.includes("INSERT INTO project_memberships")
+        ? Promise.reject(new Error("injected owner-membership insert failure"))
+        : target.run(sql, params),
+  });
+  return {
+    exec: (sql: string): Promise<void> => db.exec(sql),
+    all: <T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> =>
+      db.all<T>(sql, params),
+    first: <T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined> =>
+      db.first<T>(sql, params),
+    run: (sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }> =>
+      wrap(db).run(sql, params),
+    transaction: <T>(fn: (tx: SqlTransaction) => Promise<T>): Promise<T> =>
+      db.transaction((tx) => fn(wrap(tx))),
+  };
+}
+
+test("a failed owner-membership insert rolls the project back", async (t) => {
+  const { fx } = await withApp(t);
+  await addPasswordAccount(fx, "acct_atomic", "atomic@example.test", "atomic secret");
+  await fx.addSpeaker("spk_atomic", "acct_atomic");
+  const deps = { ...fx.deps, db: withFailingMembershipInsert(fx.deps.db) };
+  const principal = {
+    credentialId: "cred_atomic",
+    speakerId: "spk_atomic",
+    accountId: "acct_atomic",
+    scopes: new Set(SCOPES),
+    sessionViewer: true as const,
+  };
+
+  await assert.rejects(
+    createProject(deps, principal, { title: "Atomic create", summary: null }),
+    /injected owner-membership insert failure/,
+  );
+
+  // No active project may exist without the owner membership: a rolled-back
+  // create leaves neither row, not an invisible orphan project.
+  assert.deepEqual(await fx.db.all("SELECT id FROM projects"), []);
+  assert.deepEqual(await fx.db.all("SELECT project_id FROM project_memberships"), []);
 });
 
 test("create assigns the owner membership to the deterministic first owned speaker", async (t) => {

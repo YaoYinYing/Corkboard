@@ -8,9 +8,9 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) on `slice-adapter-final`, not pushed |
-| Last pushed checkpoint | `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`) on `origin/main`; earlier pushed checkpoints include `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
-| Branch | `main` at `01538a0` (`origin/main` is `01538a0`); slice-V adapter fix on `slice-adapter-final`, not pushed |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) on `slice-atomic-final`, not pushed |
+| Last pushed checkpoint | `4b1ba53` (slice V dashboard form adapter body buffering, tree `41d9bfb`) on `origin/main`; earlier pushed checkpoints include `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
+| Branch | `main` at `4b1ba53` (`origin/main`); slice-W atomic project creation on `slice-atomic-final`, not pushed |
 | Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix tree `116cbb6` security PASS + contract PASS; final tree `e45dcdf` security PASS + contract PASS (delta audits), with low-severity redaction/JSON docs P2s recorded as debt and docs corrected here. Slice M CI: runs for `47c5af8` and `57df294` both success |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), remaining dashboard write/admin actions (messages, membership, credentials, keys, expiry), D1/R2 parity, attachments (blocked on Issue #5), real-browser verification of the UI token slice |
 
@@ -45,7 +45,8 @@ as the work it describes.
 | `704d115` | `7a13790` | Slice S: dashboard filter blank-value fix; blank/whitespace-only values are absent for `type`, `sender`, `limit`, `unread`, and both cursors instead of `400`; `q=` was already tolerated; non-blank validation is unchanged | pushed on `origin/main` (tree `7a13790e6585a608fddbad71ec6fa24ec7446689`); evidence: GitHub Issue #6, real browser at `58e548f`; regression test `blank timeline filter values are absent, not invalid`; `npm ci` exit 0; `npm run check` exit 0 (392 tests: 391 pass, 1 skipped live-D1); `npm run build` exit 0 |
 | this checkpoint | commit trailer | Slice T: dashboard project create/edit (`GET /projects/new`, `POST /projects`, `GET /projects/:projectId/edit`, `POST /projects/:projectId`), session double-submit CSRF, owner-only `project.edit`, en/zh forms, 303 redirects | independent review PENDING; `npm ci` exit 0; `npm run check` exit 0 (402 tests: 401 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; on `slice-admin`, not pushed |
 | this checkpoint | commit trailer | Issue #7: backup snapshot excludes documented in-progress `.tmp-<32 lowercase hex>` blob entries instead of copying them or failing when a concurrent writer renames them away; a non-regular entry with a temp name and every other entry still fail closed; verify remains strict about temp entries in a backup directory; docs state the exact rule, including that excluded temps still count toward the 100,000-entry enumeration cap | on `slice-backup-flake`, not pushed; independent review PASS (security zero findings; contract PASS with doc/test P2s addressed); reproduction before fix: 8/8 `createBackup` attempts failed with `BACKUP_BLOB_ENTRY_INVALID` on `.tmp-*` entries, after fix: 0/400; deterministic integration test (`documented in-progress temp blobs are excluded from the snapshot`, fails on base with `blobs` 5 vs 4) and security test (temp-named symlink rejected); renamed-away race branch covered by the out-of-tree concurrency reproducer, not a committed deterministic test; `npm ci` exit 0; `npm run check` exit 0 twice (404 tests: 403 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0 |
-| this checkpoint | commit trailer | Slice V: Node adapter buffers dashboard project form POST bodies (`POST /projects`, `POST /projects/:projectId`) via `isWebPath`; HTTP-level create/edit/CSRF/oversize/auth tests through `startServer` | independent review PENDING; Base-SHA `01538a0c78d553bdc36ab20a8769dfa5b9894e48`; `npm ci` exit 0; `npm run check` exit 0 (405 tests: 404 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; on `slice-adapter-final`, not pushed; evidence: GitHub Issue #6 comment 6653112857 |
+| this checkpoint | commit trailer | Slice V: Node adapter buffers dashboard project form POST bodies (`POST /projects`, `POST /projects/:projectId`) via `isWebPath`; HTTP-level create/edit/CSRF/oversize/auth tests through `startServer` | independent review PENDING; Base-SHA `01538a0c78d553bdc36ab20a8769dfa5b9894e48`; `npm ci` exit 0; `npm run check` exit 0 (405 tests: 404 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; merged at `4b1ba53`; evidence: GitHub Issue #6 comment 6653112857 |
+| this checkpoint | commit trailer | Slice W, Issue #8: project creation writes the project and its owner membership in one SQLite `BEGIN IMMEDIATE` transaction, so a failed second insert or a pre-commit crash leaves neither row | Base `4b1ba53`; failure-injection test `a failed owner-membership insert rolls the project back` fails on base `01538a0` (orphan active project) and passes here; contract covers commit, rollback on the failing second insert, and concurrent serialization; `npm ci` exit 0; `npm run check` exit 0 (407 tests: 406 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; branch `slice-atomic-final`, not pushed: independent review PENDING; D1 batch semantics documented but not implemented or verified |
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | superseded by final L commit |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | superseded by final M commit |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | superseded by final M commit |
@@ -1203,14 +1204,12 @@ pushed.
   and HTML that exposes no session token or credential content while request logs
   carry no content or CSRF value.
 - **Limitations.** There is no speaker creation, credential management, grant editor,
-  membership editor, project deletion, or status change in this UI. Create is two
-  sequential inserts (the `SqlDatabase` port has no interactive transaction), so a
-  failure between them could leave an invisible project with no membership; it is
-  fail-closed and does not expose data. The owner role is the `project.edit`
-  membership capability, not a separate role column. An account with no active owned
-  speaker cannot create a project here. Cloudflare/D1 parity and a real-browser
-  visual pass for the new forms remain unexecuted; visual evidence is a separate
-  step.
+  membership editor, project deletion, or status change in this UI. Create used two
+  sequential inserts at this slice; Issue #8 makes it atomic (see the Issue #8 section
+  below). The owner role is the `project.edit` membership capability, not a separate
+  role column. An account with no active owned speaker cannot create a project here.
+  Cloudflare/D1 parity and a real-browser visual pass for the new forms remain
+  unexecuted; visual evidence is a separate step.
 
 ## Vertical slice V — Node adapter dashboard form bodies (base `01538a0`)
 
@@ -1247,6 +1246,46 @@ pushed.
   of those is still rejected by the web router's method check, but its body is now
   buffered up to the cap instead of left unread. No dashboard form posts to those
   paths.
+
+## Issue #8 — atomic project creation (slice W, base `4b1ba53`)
+
+- **Checkpoint.** One squashed commit on `slice-atomic-final`, replaying candidate
+  `60b33d3` (tree `a3bb8a5`) onto `4b1ba53`. Not pushed; independent review pending.
+  The commit trailer records `Base-SHA`, `Candidate-SHA`, and the final `Tree-SHA`.
+- **Design.** The `SqlDatabase` port gains `transaction<T>(fn)`. The callback receives a
+  statement-only `SqlTransaction` handle (`all`/`first`/`run`) with no `exec` and no
+  nested `transaction`. The SQLite adapter issues `BEGIN IMMEDIATE`, commits only when
+  the callback resolves, and rolls back on any throw; the callback cannot issue
+  transaction control. Statements are queued on the connection, so a statement from
+  another `transaction()` caller waits instead of joining an open transaction; the
+  CLI-only manual `exec` transaction in retention is the exception noted in Limits. A
+  crash before commit is rolled
+  back by SQLite WAL recovery. `createProject` performs the project and owner-membership
+  inserts inside one transaction. No speaker, credential, or credential-project grant is
+  created implicitly.
+- **Failure injection.** `a failed owner-membership insert rolls the project back`
+  wraps the second insert to throw and asserts no project and no membership remain. It
+  fails on base `01538a0` with one orphan active project (evidence captured; the
+  replayed code is identical) and passes on this tree. The shared contract adds commit,
+  rollback-on-second-insert, and concurrent-transaction serialization scenarios for
+  SQLite; the D1 contract test stays skipped because no adapter exists.
+- **Docs.** `web-ui.md`, `api.md`, `architecture.md`, `threat-model.md`, and
+  `security-operations.md` drop the non-atomic caveat and describe the transaction
+  guarantee, the statement-only handle, and the single-connection serialization.
+- **Tests run.** `npm ci` exit 0; `npm run check` exit 0 (secret scan, history scan,
+  typecheck, 407 tests: 406 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0.
+- **Limits.** D1 has no interactive transaction and no adapter ships here; a future D1
+  adapter must buffer the write-only callback and submit it as one `batch()` and pass
+  the shared contract. That path is documented but unverified. The in-process queue is
+  per connection; cross-process writers rely on SQLite's own locking, and `BEGIN
+  IMMEDIATE` can still surface `SQLITE_BUSY` under sustained writer contention after the
+  5-second busy timeout (no retry is added for create). The queue guarantee is scoped
+  to `transaction()` callers: the CLI-only retention path opens a manual `BEGIN
+  IMMEDIATE` through `exec`, so a concurrent `transaction()` on the same connection
+  while it is open fails with `cannot start a transaction within a transaction`
+  (not reachable in the shipped server). A transaction callback that
+  issues statements through the root handle instead of the supplied `tx` would wait
+  behind its own transaction; the handle is the only documented and tested usage.
 
 ## Implemented and verified at this tree
 
@@ -1434,10 +1473,10 @@ Do not infer any of these from local MCP behavior or from another plan.
   double-counted. Remaining slice-B debt: worker orphan/audit passes scan the growing
   expired population; a body fetch that passes its state check immediately before
   expiry may still return the already-decrypted content.
-- Slice-C limitations: the `SqlDatabase` port has no interactive transaction for
-  credential issuance, so `issue-key` compensates in application code (grants first,
-  then credential) on any grant or audit failure; a process crash before compensation
-  leaves a grantless credential (denied by default, revocable). Migration 002 does not
+- Slice-C limitations: credential issuance does not use the
+  `SqlDatabase.transaction()` helper, so `issue-key` compensates in application code
+  (grants first, then credential) on any grant or audit failure; a process crash
+  before compensation leaves a grantless credential (denied by default, revocable). Migration 002 does not
   backfill grants, so pre-release credentials lose project access until explicitly
   granted. Grants and membership management are CLI-only; no endpoint manages them.
   Key rotation remains unimplemented.

@@ -163,8 +163,10 @@ written) is not prevented; no stronger guarantee is claimed. See
   out (`DELETE`), and open the HTML dashboard. Dashboard reads resolve an owned
   speaker's active membership for `project.read`/`message.read`; the project
   edit/update routes resolve it for `project.edit`; and `POST /projects` creates a
-  project plus an owner membership for the deterministic first active owned speaker,
-  which requires an active owned speaker but no project membership yet. It cannot
+  project plus an owner membership for the deterministic first active owned speaker in
+  one database transaction, which requires an active owned speaker but no project
+  membership yet. A failure before commit leaves neither row, so it cannot leave an
+  active project without its owner membership. It cannot
   call the `/api/v1` data routes, including send, mark read, and expiry, or call MCP,
   and it is not accepted as a bearer token. Speaker write operations still require a
   separately issued scoped credential.
@@ -337,6 +339,21 @@ or as authority to act as a speaker.
 
 - SQLite: WAL, `foreign_keys=ON`, `busy_timeout` set. Database file and blob directory
   are readable only by the service user (`0700` directories, `0600` files).
+- **Atomic multi-row writes.** `SqlDatabase.transaction` issues `BEGIN IMMEDIATE`,
+  commits only when the callback resolves, and rolls back on any error. The callback
+  gets a statement-only handle with no transaction control or nesting. The SQLite
+  adapter queues statements on its single connection, so a statement issued while a
+  `transaction()` is open waits instead of joining it. That queue guarantee is scoped
+  to `transaction()` callers. The operator-only `prune` retention path
+  (`src/service/retention.ts`) opens a manual `BEGIN IMMEDIATE` through `exec`, one
+  queued statement at a time; a concurrent `transaction()` on the same connection
+  while that manual transaction is open fails with `cannot start a transaction within
+  a transaction` rather than joining or waiting. This is CLI-only and not reachable in
+  the shipped server. A crash before commit is rolled back by the WAL. Project creation
+  is the only current `transaction()` caller. D1 has no
+  interactive transaction: a future adapter must buffer the write-only callback and
+  submit it as one `batch()`, and must pass the shared storage contract. No D1
+  adapter ships or is verified here.
 - **Production mode verifies these modes instead of assuming them.** Production is
   selected by `NODE_ENV=production` or by the explicit `CORKBOARD_REQUIRE_PRIVATE_FS=1`.
   Paths are normalized (`resolve`, so trailing separators, `.` and `..` cannot disguise

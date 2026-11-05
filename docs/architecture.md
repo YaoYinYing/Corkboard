@@ -64,11 +64,15 @@ functions.
 Ports are deliberately small and Web-API based so the core runs on Node and Workers.
 
 ```ts
-interface SqlDatabase {
-  exec(sql: string): Promise<void>;
+interface SqlTransaction {
   all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]>;
   first<T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined>;
   run(sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }>;
+}
+
+interface SqlDatabase extends SqlTransaction {
+  exec(sql: string): Promise<void>;
+  transaction<T>(fn: (tx: SqlTransaction) => Promise<T>): Promise<T>;
 }
 
 interface BlobStore {
@@ -86,6 +90,22 @@ interface Clock {
   now(): Date;
 }
 ```
+
+`transaction` commits when the callback resolves and rolls back on any throw. The
+callback receives a statement-only handle: it cannot issue transaction control or start
+a nested transaction. The SQLite adapter issues `BEGIN IMMEDIATE` for `transaction()`
+callers, and queues every statement on its single connection, so a statement issued
+through the port while a `transaction()` is open waits instead of silently joining it.
+That queue guarantee covers `transaction()` callers only: the operator-only retention
+path (`src/service/retention.ts`, CLI-only) opens a manual `BEGIN IMMEDIATE` through
+`exec`, and each `exec` is one queued statement. A concurrent `transaction()` on the
+same connection while that manual transaction is open therefore fails with `cannot
+start a transaction within a transaction`; it neither joins nor waits. The shipped
+server never invokes retention. A crash before commit is rolled back by SQLite's WAL. D1 exposes
+no interactive transaction; a future adapter must buffer the callback's writes and
+submit them as one `batch()` (sufficient for the only current caller, which issues two
+unconditional inserts) and must pass the shared storage contract. No D1 adapter exists
+or is exercised here.
 
 Sequence allocation happens at **finalization**, not at acceptance. Provisional rows
 carry `seq = NULL` and are invisible. One UPDATE assigns the next sequence and publishes
@@ -105,7 +125,7 @@ RETURNING seq;
 Concurrent finalizations can collide on `(project_id, seq)`; the loser retries and takes
 the next sequence. Duplicates and reuse are forbidden. The trigger is part of the
 atomicity contract and must be ported to D1 unchanged; no interactive transaction is
-required.
+required for finalization.
 
 ## Data model
 
@@ -387,11 +407,13 @@ with the existing service functions.
   and returns an internal `hasMore` boolean; REST and MCP serialize only their
   existing fields, so their list semantics are unchanged. `POST /projects` inserts
   the project and an owner membership for the account's deterministic first active
-  owned speaker; `POST /projects/:projectId` updates title and summary after
-  re-authorizing `project.edit`. The two create inserts are sequential because the
-  database port has no interactive transaction, so a failure between them leaves an
-  invisible project with no membership; that is fail-closed and is recorded as
-  cleanup debt. No dashboard route writes a message, credential, grant, or receipt.
+  owned speaker in one `transaction`; a failure or crash before commit leaves neither
+  row. This guarantee is scoped to the dashboard `POST /projects` transaction: the CLI
+  `create-project` inserts a project without a membership (invisible and denied until
+  one is added), and `remove-member` can remove the last membership, so an active
+  project without memberships can exist outside this path. `POST /projects/:projectId`
+  updates title and summary after re-authorizing `project.edit`. No dashboard route
+  writes a message, credential, grant, or receipt.
   `POST /login` inserts the session row and authenticated page requests refresh
   `sessions.last_seen_at`.
 - **Uniform denial.** The resolver and the session authorization branch return

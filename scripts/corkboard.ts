@@ -561,8 +561,8 @@ async function issueKeyCommand(values: Values): Promise<void> {
         }),
       });
     } catch (error) {
-      // The SqlDatabase port has no interactive transaction (D1-compatible SQL
-      // only), so compensate explicitly: grants first, then the credential.
+      // Credential issuance does not use the SqlDatabase transaction() helper;
+      // it compensates explicitly: grants first, then the credential.
       // Cleanup failures must not replace the original error. A crash before
       // cleanup leaves a grantless credential, which is denied by default and
       // can be revoked; no token is printed until every write succeeds.

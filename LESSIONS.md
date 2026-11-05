@@ -716,3 +716,26 @@ prevented regression; when to remove the advice.
   the only shipped adapter.
 - **Remove when:** Routing and body buffering share one route manifest, the same
   condition recorded for the earlier adapter lessons.
+
+## 2026-11-05 — A two-write create needs one transaction, not a caveat
+
+- **Failure:** `createProject` inserted the project and then its owner membership as
+  two independent `run` calls. When the second failed, the request errored but the
+  active project row persisted with no membership: invisible in the dashboard,
+  uneditable, and with no ID the user could recover. Documenting the state as
+  fail-closed debt did not make it recoverable (GitHub Issue #8).
+- **Reproducer:** Wrap the database so the `INSERT INTO project_memberships` throws,
+  call `createProject`, then assert `SELECT id FROM projects` is empty. On the base
+  tree it returns the orphan; on the fixed tree it is empty.
+- **Fix:** Add a narrow `SqlDatabase.transaction(fn)` port. The SQLite adapter uses
+  `BEGIN IMMEDIATE`, commits on resolve, rolls back on throw, and hands the callback a
+  statement-only handle so it cannot issue transaction control or nest. Both inserts
+  run in that transaction. Statements are queued on the connection so a concurrent
+  `transaction()` caller cannot join an open transaction; the CLI-only retention path
+  opens a manual `BEGIN IMMEDIATE` through `exec` and is the documented exception
+  (a concurrent `transaction()` there fails rather than joining).
+- **Prevents:** Active projects without an owner membership, and any future multi-row
+  invariant that "mostly works" but leaves partial state on the second write.
+- **Remove when:** The storage layer can enforce the invariant in one declarative
+  statement (for example a database-level trigger) or every adapter ships a verified
+  transaction implementation.

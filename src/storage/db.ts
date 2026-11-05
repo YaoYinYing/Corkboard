@@ -27,11 +27,25 @@ export class SchemaTooNewError extends Error {
   }
 }
 
-export interface SqlDatabase {
-  exec(sql: string): Promise<void>;
+// Statement surface available to a transaction callback. It deliberately has no
+// `exec` or nested `transaction`, so a callback cannot issue transaction control
+// or start a nested transaction by accident.
+export interface SqlTransaction {
   all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]>;
   first<T>(sql: string, params?: readonly SqlValue[]): Promise<T | undefined>;
   run(sql: string, params?: readonly SqlValue[]): Promise<{ changes: number }>;
+}
+
+export interface SqlDatabase extends SqlTransaction {
+  exec(sql: string): Promise<void>;
+  /**
+   * Runs `fn` inside one transaction and commits only when it resolves; any
+   * throw rolls back. The callback must use only the supplied handle. D1 has
+   * no interactive transactions, so a future adapter must buffer the handle's
+   * writes and submit them with `batch()` (the only current caller is
+   * write-only) and pass the shared storage contract.
+   */
+  transaction<T>(fn: (tx: SqlTransaction) => Promise<T>): Promise<T>;
 }
 
 const MIGRATION_FILE = /^(\d+)_.*\.sql$/;
@@ -313,30 +327,92 @@ export async function openSqliteDatabase(
     throw error;
   }
 
-  return {
-    async exec(sql: string): Promise<void> {
+  // One connection serializes its work through a queue. Root statements and a
+  // transaction therefore never overlap: a statement issued by another request
+  // while a transaction is open waits for it to commit or roll back instead of
+  // silently joining it. Operations inside the callback use `tx` directly.
+  const raw = {
+    exec(sql: string): void {
       db.exec(sql);
     },
-    async all<T>(
-      sql: string,
-      params?: readonly SqlValue[],
-    ): Promise<T[]> {
-      const rows = db.prepare(sql).all(...(params ?? []));
-      return rows.map((row) => ({ ...row })) as unknown as T[];
+    all<T>(sql: string, params?: readonly SqlValue[]): T[] {
+      return db.prepare(sql).all(...(params ?? [])).map((row) => ({
+        ...row,
+      })) as unknown as T[];
+    },
+    first<T>(sql: string, params?: readonly SqlValue[]): T | undefined {
+      const row = db.prepare(sql).get(...(params ?? []));
+      return row === undefined ? undefined : ({ ...row } as unknown as T);
+    },
+    run(sql: string, params?: readonly SqlValue[]): { changes: number } {
+      const result = db.prepare(sql).run(...(params ?? []));
+      return { changes: Number(result.changes) };
+    },
+  };
+
+  const tx: SqlTransaction = {
+    async all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> {
+      return raw.all<T>(sql, params);
     },
     async first<T>(
       sql: string,
       params?: readonly SqlValue[],
     ): Promise<T | undefined> {
-      const row = db.prepare(sql).get(...(params ?? []));
-      return row === undefined ? undefined : ({ ...row } as unknown as T);
+      return raw.first<T>(sql, params);
     },
     async run(
       sql: string,
       params?: readonly SqlValue[],
     ): Promise<{ changes: number }> {
-      const result = db.prepare(sql).run(...(params ?? []));
-      return { changes: Number(result.changes) };
+      return raw.run(sql, params);
+    },
+  };
+
+  let tail: Promise<void> = Promise.resolve();
+  function enqueue<T>(operation: () => T | Promise<T>): Promise<T> {
+    const result = tail.then(operation);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  return {
+    exec(sql: string): Promise<void> {
+      return enqueue(() => raw.exec(sql));
+    },
+    all<T>(sql: string, params?: readonly SqlValue[]): Promise<T[]> {
+      return enqueue(() => raw.all<T>(sql, params));
+    },
+    first<T>(
+      sql: string,
+      params?: readonly SqlValue[],
+    ): Promise<T | undefined> {
+      return enqueue(() => raw.first<T>(sql, params));
+    },
+    run(
+      sql: string,
+      params?: readonly SqlValue[],
+    ): Promise<{ changes: number }> {
+      return enqueue(() => raw.run(sql, params));
+    },
+    transaction<T>(fn: (tx: SqlTransaction) => Promise<T>): Promise<T> {
+      return enqueue(async () => {
+        raw.exec("BEGIN IMMEDIATE");
+        try {
+          const result = await fn(tx);
+          raw.exec("COMMIT");
+          return result;
+        } catch (error) {
+          try {
+            raw.exec("ROLLBACK");
+          } catch {
+            // A failed statement may already have ended the transaction.
+          }
+          throw error;
+        }
+      });
     },
     close(): void {
       db.close();

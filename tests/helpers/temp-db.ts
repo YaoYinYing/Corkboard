@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
-import type { SqlDatabase, SqlValue } from "../../src/storage/db.ts";
+import type { SqlDatabase, SqlTransaction, SqlValue } from "../../src/storage/db.ts";
 import {
   ConflictError,
   NotFoundError,
@@ -181,6 +181,9 @@ export function withTransientUniqueFailures(
     ): Promise<{ changes: number }> {
       return db.run(sql, params);
     },
+    transaction<T>(fn: (tx: SqlTransaction) => Promise<T>): Promise<T> {
+      return db.transaction(fn);
+    },
   };
 }
 
@@ -271,6 +274,72 @@ export function runStorageContract(
         ["msg_1", "proj_missing", "spk_1", now()],
       ),
       /FOREIGN KEY constraint failed/,
+    );
+  });
+
+  test(scenario("transaction commits, rolls back, and serializes"), async (t) => {
+    const storage = await openStorage();
+    t.after(() => storage.dispose());
+    await insertAccount(storage.db, "acct_1", "one@example.com");
+    await insertSpeaker(storage.db, "spk_1", "acct_1");
+    const timestamp = now();
+
+    const insertPair = async (
+      tx: SqlTransaction,
+      projectId: string,
+      speakerId: string,
+    ): Promise<void> => {
+      await tx.run(
+        "INSERT INTO projects (id, owner_account_id, title, status, created_at) VALUES (?1, ?2, ?3, 'active', ?4)",
+        [projectId, "acct_1", projectId, timestamp],
+      );
+      await tx.run(
+        "INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at) VALUES (?1, ?2, ?3, ?4)",
+        [projectId, speakerId, "[]", timestamp],
+      );
+    };
+
+    await storage.db.transaction((tx) => insertPair(tx, "proj_commit", "spk_1"));
+    assert.ok(
+      await storage.db.first("SELECT id FROM projects WHERE id = ?1", ["proj_commit"]),
+    );
+    assert.ok(
+      await storage.db.first(
+        "SELECT project_id FROM project_memberships WHERE project_id = ?1",
+        ["proj_commit"],
+      ),
+    );
+
+    // The second insert fails (missing FK); the first must roll back with it.
+    await assert.rejects(
+      storage.db.transaction(async (tx) => {
+        await tx.run(
+          "INSERT INTO projects (id, owner_account_id, title, status, created_at) VALUES (?1, ?2, ?3, 'active', ?4)",
+          ["proj_rollback", "acct_1", "proj_rollback", timestamp],
+        );
+        await tx.run(
+          "INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at) VALUES (?1, ?2, ?3, ?4)",
+          ["proj_rollback", "spk_missing", "[]", timestamp],
+        );
+      }),
+      /FOREIGN KEY constraint failed/,
+    );
+    assert.equal(
+      await storage.db.first("SELECT id FROM projects WHERE id = ?1", ["proj_rollback"]),
+      undefined,
+    );
+
+    // Concurrent transactions queue rather than forming BEGIN-within-BEGIN.
+    await Promise.all([
+      storage.db.transaction((tx) => insertPair(tx, "proj_a", "spk_1")),
+      storage.db.transaction((tx) => insertPair(tx, "proj_b", "spk_1")),
+    ]);
+    const projects = await storage.db.all<{ id: string }>(
+      "SELECT id FROM projects ORDER BY id",
+    );
+    assert.deepEqual(
+      projects.map((row) => row.id),
+      ["proj_a", "proj_b", "proj_commit"],
     );
   });
 
