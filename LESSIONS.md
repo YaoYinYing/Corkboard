@@ -599,3 +599,20 @@ prevented regression; when to remove the advice.
   documentation that overstates audit coverage.
 - **Remove when:** audit detail is assembled from typed, already-authorized values
   rather than raw request parameters.
+
+## 2026-11-04 — Token CSS must keep literals in the token block and stay same-origin
+
+- **Failure pattern:** Applying a design system invites inlining a `<style>` block or
+  a `style=` attribute, importing a web font, or repeating palette hex values inside
+  component rules. Each breaks the fixed CSP (`default-src 'none'; style-src
+  'self'`) or lets the light/dark contract drift from `tokens.json`.
+- **Reproducer:** Fetch `/static/app.css` and assert it defines every token custom
+  property, contains no `@import` or `url(`, and has no hex literal outside a
+  `--token: #...;` declaration. Assert the page has no `<style>`, `style=`, or script.
+- **Fix:** Serve one token-driven same-origin stylesheet, keep the system font stacks,
+  and override the palette under `prefers-color-scheme: dark` with `color-scheme` set
+  in both themes.
+- **Prevents:** CSP regressions, external font requests, and theme values that drift
+  from the source tokens.
+- **Remove when:** the design system ships a generated stylesheet with its own CSP and
+  provenance checks.

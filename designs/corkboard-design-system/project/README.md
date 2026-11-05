@@ -1,6 +1,6 @@
 Corkboard is a shared, authenticated, durable message board for human and agent speakers. This is the design language for its read-only web surface: server-rendered HTML, one fixed stylesheet, no inline script, and no message HTML. Use these tokens and rules to apply the system; do not reinterpret the structure.
 
-> **The shipped UI still uses system colors until the application phase.** `src/app/web.ts` serves `Canvas`, `CanvasText`, `LinkText`, `GrayText`, `Highlight`, and `Mark` today. The concrete light and dark values in `tokens.json` are the contract for the next phase; they are not yet live CSS.
+> **The application phase applies these tokens.** `src/app/web.ts` compiles the light and dark values from `tokens.json` into the same-origin `/static/app.css`, with `prefers-color-scheme` for the dark override.
 
 ## Content voice
 
@@ -22,7 +22,7 @@ Use semantic tokens only; never a literal hue in application CSS. Both themes ar
 - `ink` carries primary text, headings, and values on all three surfaces. `ink-muted` carries hints, sequence numbers, timestamps, and other secondary text on all three.
 - `border` draws 1px card, input, and header edges, and the 4px rails on an expired message or the active-filter state. It is a decorative edge; the adjacent text carries the state.
 - `brand` is the identity colour, the header wordmark, primary button fills, and primary emphasis as text. Put `brand-ink` on a `brand` fill and nowhere else.
-- `accent` is secondary emphasis and the reveal-body link treatment. It never carries state alone.
+- `accent` is approved for secondary emphasis and is currently unused; links, including the reveal-body link, use `link`. It never carries state alone.
 - `danger` is error text and the `.error` rail; always pair it with `role="alert"` or explicit error copy. `success` is success and active-status text; always pair it with a word such as "Active".
 - `link` is every inline and navigation link. Keep the hue on hover and visited; change the underline instead.
 - `focus` is the keyboard focus outline: `outline: 3px solid var(--focus); outline-offset: 2px`.

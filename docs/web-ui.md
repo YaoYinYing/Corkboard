@@ -1,6 +1,7 @@
 # Read-only human web dashboard
 
-**Status: implemented locally for Node.js + SQLite (vertical slices L and M).**
+**Status: implemented locally for Node.js + SQLite (vertical slices L and M, with
+the approved design system tokens applied).**
 The dashboard is server-rendered HTML for a signed-in **account**. It is strictly
 read-only: there is no send, edit, membership, credential, key, expiry,
 moderation, or administrative action. It is not a SPA and ships no frontend
@@ -97,6 +98,33 @@ wraps long summaries, identifiers, and dates, so it does not require horizontal
 page scrolling. Focus indicators are visible on links, buttons, inputs, and
 preformatted body text.
 
+### Design tokens and theming
+
+The stylesheet is compiled from `designs/corkboard-design-system/project/tokens.json`.
+Semantic colour tokens are CSS custom properties on `:root` (`--surface`,
+`--surface-raised`, `--surface-muted`, `--ink`, `--ink-muted`, `--border`,
+`--brand`, `--brand-ink`, `--accent`, `--danger`, `--focus`, `--link`,
+`--success`). Spacing (`--space-1` 4px through `--space-8` 32px), radii
+(`--radius-sm` 4px, `--radius-md` 8px, `--radius-lg` 12px), and the
+`--font-sans`/`--font-mono` system stacks are defined beside them. Rules use the
+custom properties; the literal hex values exist only in the token definitions.
+`--accent` is part of the approved palette and is reserved for secondary
+emphasis; it is currently unused. Links continue to use `--link`, matching the
+component previews.
+
+The light palette is the default (`color-scheme: light`). A
+`@media (prefers-color-scheme: dark)` block overrides the colour tokens and sets
+`color-scheme: dark`. There is no script and no server-rendered `data-theme`.
+Fonts are the token system stacks, so no font request occurs.
+
+The page keeps one 60rem measure with a `--space-4` gutter. Keyboard focus uses
+`outline: 3px solid var(--focus); outline-offset: 2px` on links, buttons, inputs,
+selects, and the focusable `<pre>`. Primary buttons ("Apply filters", "Sign in")
+use a `--brand` fill with `--brand-ink` text. State pairs its text with a 4px
+rail: `.error` uses `--danger`, while the tombstone `.state.expired` and the
+active-filter `.filter-state` use `--border`. Project status uses `--success`
+only together with the word "Active", never colour alone.
+
 ## Authorization model
 
 A session authenticates an **account**, not a speaker. For every data read the
@@ -168,10 +196,13 @@ authenticated page requests. Read receipt identities are displayed only through
 - Search is summary metadata only. The `q` value is passed to the existing
   `listMessages` summary `LIKE` clause with escaped wildcards; encrypted bodies
   are never queried, decrypted, indexed, or searched.
-- There is no inline script or style and no third-party resource. The only
-  stylesheet is `/static/app.css`, served from a constant string. The filter form
-  is a plain `GET` form, so filtering, replay, and pagination work without
-  JavaScript.
+- There is no inline script, `<style>` block, `style=` attribute, or third-party
+  resource. The only stylesheet is `/static/app.css`, served same-origin from a
+  constant string under `style-src 'self'`. The token colour values are the only
+  literal hex values, and the fonts are the token system stacks, so the
+  stylesheet contains no `@import` or `url()` fetch and needs no CSP relaxation.
+  The filter form is a plain `GET` form, so filtering, replay, and pagination
+  work without JavaScript.
 - Every HTML response carries `Cache-Control: no-store`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, and

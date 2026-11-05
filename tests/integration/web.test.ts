@@ -717,7 +717,15 @@ test("cursor paging is bounded forward and backward with no duplicate or skipped
 test("filters preserve the locale and the page stays CSS-only and responsive", async (t) => {
   const { fx, app } = await withApp(t);
   const credential = await basicProject(fx);
-  await sendTyped(fx, credential.token, "proj_a", "l1", "locale one", "body", "note");
+  const first = await sendTyped(
+    fx,
+    credential.token,
+    "proj_a",
+    "l1",
+    "locale one",
+    "body",
+    "note",
+  );
   await sendTyped(fx, credential.token, "proj_a", "l2", "locale two", "body", "note");
   const { cookie } = await loginAs(app, "a@example.test", "correct horse");
 
@@ -737,15 +745,37 @@ test("filters preserve the locale and the page stays CSS-only and responsive", a
   assert.match(fallback.html, /<html lang="en" dir="ltr">/);
   assert.ok(fallback.html.includes("Filters"));
 
-  for (const html of [zh.html, fallback.html]) {
+  const projects = await getPage(app, "/", cookie);
+  assert.equal(projects.status, 200);
+  const body = await getPage(
+    app,
+    `/projects/proj_a/messages/${first.messageId}/body`,
+    cookie,
+  );
+  assert.equal(body.status, 200);
+  const error = await getPage(app, "/projects/proj_a?limit=0", cookie);
+  assert.equal(error.status, 400);
+  const login = await call(app, "/login");
+  assert.equal(login.status, 200);
+
+  const pages = [
+    { name: "login", html: await login.text() },
+    { name: "project list", html: projects.html },
+    { name: "timeline", html: zh.html },
+    { name: "timeline fallback", html: fallback.html },
+    { name: "message body", html: body.html },
+    { name: "error", html: error.html },
+  ];
+  for (const { name, html } of pages) {
     assert.ok(
       html.includes('<meta name="viewport" content="width=device-width, initial-scale=1">'),
+      name,
     );
-    assert.ok(html.includes('<link rel="stylesheet" href="/static/app.css">'));
-    assert.equal(html.includes("<script"), false);
-    assert.equal(html.includes("<style"), false);
-    assert.equal(/ style=/.test(html), false);
-    assert.equal(/ on[a-z]+=/.test(html), false);
+    assert.ok(html.includes('<link rel="stylesheet" href="/static/app.css">'), name);
+    assert.equal(html.includes("<script"), false, name);
+    assert.equal(html.includes("<style"), false, name);
+    assert.equal(/ style=/.test(html), false, name);
+    assert.equal(/ on[a-z]+=/.test(html), false, name);
   }
   for (const label of [
     "filter-type",
@@ -763,9 +793,93 @@ test("filters preserve the locale and the page stays CSS-only and responsive", a
   const css = await cssResponse.text();
   assert.ok(css.includes("@media (max-width: 40rem)"));
   assert.ok(css.includes("@media (min-width: 48rem)"));
-  assert.match(css, /h1 \{ overflow-wrap: anywhere; \}/);
+  assert.match(css, /h1[^{]*\{[^}]*overflow-wrap: anywhere;/);
   assert.equal(css.includes("@import"), false);
   assert.equal(css.includes("url("), false);
+});
+
+test("served stylesheet defines the design tokens and no external CSS", async (t) => {
+  const { app } = await withApp(t);
+  const response = await call(app, "/static/app.css");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/css; charset=utf-8");
+  assert.equal(response.headers.get("content-security-policy"), WEB_CSP);
+  const css = await response.text();
+
+  const tokens: Record<string, string> = {
+    surface: "#fbfaf7",
+    "surface-raised": "#ffffff",
+    "surface-muted": "#f2eee8",
+    ink: "#1c1917",
+    "ink-muted": "#5b544c",
+    border: "#8a837a",
+    brand: "#1f4e46",
+    "brand-ink": "#ffffff",
+    accent: "#8a4b1f",
+    danger: "#a11d3c",
+    focus: "#0b5cad",
+    link: "#0b5cad",
+    success: "#2f6b3a",
+    "space-1": "4px",
+    "space-2": "8px",
+    "space-3": "12px",
+    "space-4": "16px",
+    "space-6": "24px",
+    "space-8": "32px",
+    "radius-sm": "4px",
+    "radius-md": "8px",
+    "radius-lg": "12px",
+    "font-sans": 'system-ui, -apple-system, "Segoe UI", sans-serif',
+    "font-mono": "ui-monospace, SFMono-Regular, Menlo, monospace",
+  };
+  for (const [name, value] of Object.entries(tokens)) {
+    assert.ok(css.includes(`--${name}: ${value};`), `--${name}`);
+  }
+
+  const dark = css.slice(css.indexOf("@media (prefers-color-scheme: dark)"));
+  assert.ok(dark.includes("color-scheme: dark;"));
+  for (const [name, value] of Object.entries({
+    surface: "#141210",
+    "surface-raised": "#1d1a17",
+    "surface-muted": "#272320",
+    ink: "#f4efe7",
+    "ink-muted": "#c9c2b7",
+    border: "#7d766c",
+    brand: "#8fd3c3",
+    "brand-ink": "#10201c",
+    accent: "#e6a371",
+    danger: "#f4a6b4",
+    focus: "#9ccbff",
+    link: "#a8d1ff",
+    success: "#a9d9b0",
+  })) {
+    assert.ok(dark.includes(`--${name}: ${value};`), `dark --${name}`);
+  }
+
+  // The CSP allows one same-origin stylesheet only. Token definitions hold the
+  // palette literals; every other colour-bearing declaration must resolve
+  // through a custom property, and no line may use a hex/rgb/hsl literal.
+  const colorProperty =
+    /^(?:color|background|background-color|border[a-z-]*|outline|fill|stroke|box-shadow|text-shadow)$/;
+  const colorKeyword = /^(?:none|transparent|currentcolor|inherit)$/i;
+  for (const line of css.split("\n")) {
+    if (/^\s*--[a-z0-9-]+:/.test(line)) continue;
+    assert.equal(/#[0-9a-fA-F]{3,8}/.test(line), false, line);
+    assert.equal(/\brgba?\s*\(/i.test(line), false, line);
+    assert.equal(/\bhsla?\s*\(/i.test(line), false, line);
+    for (const declaration of line.matchAll(/([a-z-]+)\s*:\s*([^;{}]+)/gi)) {
+      const property = (declaration[1] ?? "").toLowerCase();
+      if (!colorProperty.test(property)) continue;
+      const value = (declaration[2] ?? "").trim();
+      assert.ok(
+        value.includes("var(") || colorKeyword.test(value),
+        `${property}: ${value} must use a token variable`,
+      );
+    }
+  }
+  assert.equal(css.includes("@import"), false);
+  assert.equal(css.includes("url("), false);
+  assert.equal(css.includes("<style"), false);
 });
 
 test("body reveal returns escaped plaintext in a pre element and safe failures", async (t) => {

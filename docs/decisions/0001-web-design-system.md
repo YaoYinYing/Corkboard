@@ -1,6 +1,6 @@
 # 0001 — Web design system
 
-- Status: Accepted
+- Status: Accepted (applied in `src/app/web.ts` on 2026-11-04)
 - Date: 2026-11-05
 - Base: `55bd96e28f013dc79f934eae760eb7ff5415b167`
 - Design source tree: `7870c94`, imported patch-identically into this checkpoint
@@ -26,10 +26,15 @@ Every token maps one-to-one to a CSS custom property `--<name>` when the
 application phase compiles the system (`--surface`, `--ink`, `--brand`,
 `--space-4`, `--radius-md`, `--shadow-card`, `--font-sans`, `--font-mono`).
 Type styles compile to classes (`.body`, `.small`, `.label`, `.h1`, `.h2`,
-`.h3`, `.code`). The first theme is light; `[data-theme="dark"]` overrides it.
+`.h3`, `.code`). The first theme is light. `[data-theme="dark"]` is the
+design-system format's theme-handoff convention; it is not shipped behavior.
+The application uses only `@media (prefers-color-scheme: dark)` and never
+renders a `data-theme` attribute.
 
-The shipped stylesheet is not changed in this phase. `src/app/web.ts` continues
-to serve system colors until the application phase consumes these tokens.
+The application phase consumes the tokens in `src/app/web.ts`: `WEB_CSS`
+defines them as custom properties, the light theme is the default, and
+`@media (prefers-color-scheme: dark)` overrides the palette with
+`color-scheme: dark`.
 
 ## Alternatives considered
 
@@ -59,10 +64,9 @@ to serve system colors until the application phase consumes these tokens.
   script, inline event handler, or external URL. This matches
   `docs/web-ui.md`.
 - Previews are static, use system fonts only, load no external URLs, and run
-  no scripts. They show the **intended token contract** and the shipped DOM
-  structures, not the current shipped rendering: `src/app/web.ts` still serves
-  system colors, and the ProjectList status colour in the preview is
-  aspirational. They are not a second implementation.
+  no scripts. They show the token contract and the shipped DOM structures; the
+  application phase now applies the same contract in `src/app/web.ts`. They are
+  not a second implementation.
 - A token or component change is a change to `tokens.json` and the matching
   README/preview, followed by `artifact.mjs check`; the generated
   `tokens.css` and `manifest.json` are not committed by hand.

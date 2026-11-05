@@ -1054,6 +1054,42 @@ pushed.
   outline with 2px offset; the 60rem measure; and real-browser verification of light
   and dark, focus visibility, 320px layout, and both locales.
 
+## Web design-token application (slice Q) — dashboard consumes the design system (branch `slice-ui-final`)
+
+- **Checkpoint.** Original pre-rebase branch `slice-ui-tokens` commit
+  `0d9c661ad39df1f96e24160f1b7c75904a529d42` (tree
+  `f83c87caa2836b7f9799e034710ad212b33ff432`) applied the tokens. That work was
+  replayed and squashed onto `main`
+  `4e1bf8764af319263e3d2b31f553265eeac16712` as one checkpoint commit;
+  `src/app/web.ts` is byte-identical between the original and the replay; the
+  test file gains the palette and inline-style guard extensions in this replay.
+  The checkpoint commit trailer carries the final Base-SHA and
+  Tree-SHA. The original branch commit is not an ancestor of the checkpoint.
+  Not pushed; `main` is unchanged.
+- **CSS.** `WEB_CSS` in `src/app/web.ts` defines the light palette as CSS custom
+  properties on `:root`, overrides the palette under
+  `@media (prefers-color-scheme: dark)` with `color-scheme: dark`, and defines the
+  4px spacing scale (`--space-1` to `--space-8`), 4/8/12px radii, and the
+  `--font-sans`/`--font-mono` system stacks from `tokens.json`. Rules use the
+  variables; literal hex values are limited to the token definitions.
+- **Rules applied.** 3px `--focus` outline with 2px offset; `--brand` button fill
+  with `--brand-ink` text; `.error` danger rail; tombstone and active-filter
+  `--border` rails; `--success` only with the word "Active"; 60rem measure with a
+  `--space-4` gutter.
+- **Serving and CSP.** No route or header change: `/static/app.css` is the same
+  same-origin constant under `default-src 'none'; style-src 'self'`. No inline
+  `<style>` or `style=`, script, `@import`, `url()`, or external font.
+- **Behavior.** Only presentational markup additions: `class="status"` on the
+  project status value and `class="error"` on the generic safe-error alert. Routes,
+  handlers, authorization, data, and logging are unchanged.
+- **Tests.** A new integration test asserts every light/dark colour token, the
+  spacing and radius tokens, both font stacks, the negative CSP constraints, and that
+  no literal hex appears outside a token definition. Verification: `npm ci` exit 0;
+  `npm run check` exit 0 (381 tests: 380 pass, 1 skipped live-D1); `npm run build`
+  exit 0.
+- **Unverified.** No real-browser render check: light/dark appearance, 320px layout,
+  focus visibility, and both locales are asserted from the stylesheet and DOM only.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
