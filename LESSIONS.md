@@ -896,3 +896,25 @@ prevented regression; when to remove the advice.
   and readers assuming the documented boundary is broader than it is.
 - **Remove when:** The scripts use a cross-platform wrapper (for example one Node
   entry script) and the secret scans invoke `git` by absolute path.
+
+## 2026-11-05 — a write transaction is not a read-snapshot tool
+
+- **Failure:** Wrapping the credential-inventory GET in `SqlDatabase.transaction`
+  looked like a harmless way to make three related reads consistent. That helper is
+  a documented **write** transaction: it issues `BEGIN IMMEDIATE`, and the D1
+  emulation buffers the callback's writes for one `batch()`, which cannot return a
+  read-only callback's results. The GET therefore violated the persistence port and
+  took a write lock on a read path.
+- **Reproducer:** Call `GET /speakers/:speakerId/credentials` with the D1 adapter
+  contract emulated; the buffered transaction has no writes to submit and no way to
+  yield the SELECT results. With SQLite, inspect the connection and see
+  `BEGIN IMMEDIATE` held across three reads.
+- **Fix:** Use three direct parameterized SELECTs, each repeating the
+  owner/active-account predicate, so an ownership transfer can only shrink a later
+  result set. Document that there is no snapshot claim. A real read-snapshot port
+  (`BEGIN DEFERRED` plus a defined D1 strategy) does not exist and was not invented
+  for one page.
+- **Prevents:** A write lock and a portability break smuggled in as a consistency
+  improvement, and false "in one transaction" documentation.
+- **Remove when:** `SqlDatabase` gains a documented read-snapshot primitive with
+  SQLite and D1 implementations and tests.

@@ -335,7 +335,7 @@ or as authority to act as a speaker.
   /speakers/:speakerId/credentials/:credentialId/revoke` soft-revokes one credential
   (sets `revoked_at`; the row and its grants are retained)
   after the session-account owner check and the same in-transaction ownership
-  re-check, retaining its grants. The HTML form routes require the
+  re-check. The HTML form routes require the
   session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
   `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message send/expiry,
   receipts, credential rotation, grant editing, registration,
