@@ -1023,9 +1023,9 @@ pushed.
   revocation; `request_id` is null and unasserted; rate-limited audit paths for OAuth
   sign-in and HTML login are untested; rate-limited register/token failures are
   untested; access-token revoke audit is untested; consent-denied detail is unasserted;
-  unknown/inactive-account login uniformity is untested; unexpected insert failures for
-  register/consent are uncovered; fail-open audit can suppress rows; `audit_events` is
-  unbounded.
+  unknown/inactive-account audit-row uniformity is unasserted (response uniformity is
+  tested); consent audit fail-open is uncovered (register fail-open is covered);
+  fail-open audit can suppress rows; `audit_events` is unbounded.
 
 ## Implemented and verified at this tree
 
@@ -1045,8 +1045,9 @@ pushed.
 
 Commands executed for the slice-O P2 fix tree: `npm ci` exit 0, `npm run check` exit 0
 (secret scan, history scan, typecheck, 380 tests: 379 pass, 1 skipped live-D1), and
-`npm run build` exit 0. The checkpoint commit trailer records the exact candidate SHA
-and review verdicts.
+`npm run build` exit 0. Review verdicts are recorded in this file; commit trailers are
+immutable and carry only the `Base-SHA`/`Candidate-SHA`/`Tree-SHA` values present when
+written (`f06c4ac` still says review PENDING).
 
 ## Phase 0 gate checklist
 

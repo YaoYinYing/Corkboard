@@ -167,9 +167,13 @@ metadata. `loginAccount`, `revokeSession`, `registerClient`, `mintTokens`,
 `rotateRefreshToken`, and `revokeOAuthToken` call `writeAudit`; the public form
 handlers in `src/app/oauth.ts` record rate-limited or rejected registration, consent
 allow/deny, token-endpoint failures raised from grant dispatch (code exchange or
-refresh), and token rate limits. Pre-dispatch validation rejections are not audited:
-an invalid, empty, or oversized `client_id`, a null `grant_type`, a duplicate
-parameter, and a wrong media type all throw before the audited block. The helper
+refresh), and token rate limits. Pre-dispatch rejections are not audited: a wrong
+media type, a missing, empty, over-128-character, or duplicate `client_id`, and a
+missing or duplicate `grant_type` throw before the audited block. A syntactically
+invalid but at-most-128-character `client_id` proceeds to dispatch and its failure is
+audited with the client id omitted. Duplicate grant-specific parameters (`code`,
+`redirect_uri`, `code_verifier`, `resource`, `refresh_token`, `scope`) are rejected
+inside `dispatchTokenGrant` and those failures are audited. The helper
 inserts `(id, actor_account_id, actor_speaker_id, project_id, operation, outcome,
 request_id, detail, created_at)` with parameterized SQL and a random `evt_` id. It
 bounds every `detail` string/array and drops a `detail` document that still exceeds
