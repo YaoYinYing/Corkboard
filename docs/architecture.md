@@ -456,7 +456,11 @@ scheduler, remote replication, key management, or a D1/Workers path.
 - **Snapshot mechanism.** `backup` opens the source database read-only and runs SQLite
   `VACUUM INTO`. This is the portable consistent-snapshot primitive: it respects WAL
   visibility, produces one standalone database file, and needs no `-wal`/`-shm` sidecar
-  copy. The source is never written. Writers are not blocked for the blob copy.
+  copy. No database/blob content is modified. It reuses the diagnostic opener's sidecar
+  policy: `immutable=1` when neither sidecar exists (so no `-wal`/`-shm` is created and
+  a read-only source directory works), both sidecars required for a live WAL read
+  (which may touch existing `-shm` coordination bytes), and a lone, symlinked, or
+  non-regular sidecar refused. Writers are not blocked for the blob copy.
 - **Blob policy.** After the snapshot, every regular file in `blobs` is copied exactly
   (orphans included) with its opaque name and `0600` mode. Symlinks, directories,
   devices, and other non-file entries are rejected rather than followed or dropped, and
@@ -468,19 +472,30 @@ scheduler, remote replication, key management, or a D1/Workers path.
   8 MiB and 100,000 blob entries and records the database size/SHA-256, sorted blob
   names/sizes/SHA-256, counts, UTC creation time, and source schema version. It carries
   no keys, tokens, bodies, emails, or absolute paths. Names are validated as plain
-  basenames, so a manifest cannot address a path outside the backup.
+  basenames, so a manifest cannot address a path outside the backup. Per-blob (16 KiB,
+  derived from the 8 KiB plaintext cap plus CB01 overhead), total-blob (1 GiB), and
+  database (16 GiB) bounds are checked from metadata before hashing or copying, so a
+  sparse or hardlink-multiplied file cannot cause an unbounded scan. `backup` also
+  rejects a schema newer than the build and a referenced blob that is absent, so it
+  never reports success for a pair `verify` would reject.
 - **Verification.** `verify` validates the manifest and every listed size/digest,
   required/extra entries, non-file and symlink rejection, `PRAGMA integrity_check`,
   schema compatibility, and blob reference coverage. It opens only the backup database,
   read-only; a tampered database is rejected by digest before it is parsed. Issues use
   stable `BACKUP_*` codes and exit `1`; a backup directory that cannot be inspected
   exits `2`.
-- **Restore.** `restore` verifies first, then requires an absent or empty non-symlinked
+- **Restore.** `restore` verifies first and uses the same inspection result's manifest
+  for the copy (no second manifest read), then requires an absent or empty non-symlinked
   target outside the backup directory. It stages database and blobs in a `0700`
-  sibling directory, re-hashes every copied file against the manifest, repeats the
-  integrity and schema checks on the staged database, and renames the directory into
-  place atomically. Failure removes the staging directory, so no partial installation
-  is left behind. Existing files are never overwritten and there is no `--force`.
+  sibling directory, re-hashes every copied file against that manifest, repeats the
+  integrity and schema checks on the staged database, re-runs the referenced-blob
+  cross-check against the staged bytes, and renames the directory into place atomically.
+  Failure removes the staging directory, so no partial installation is left behind.
+  Existing files are never overwritten and there is no `--force`.
+- **Node-only boundary.** `src/service/backup.ts` lives under `src/service` for
+  symmetry with `doctor`, but it imports `node:fs`, `node:sqlite`, `node:crypto`, and
+  Node streams. It is a Node/self-hosted operator service, not Workers-portable core;
+  the D1/R2 path needs a platform adapter.
 - **Migration compatibility.** Restore accepts a backup whose highest applied
   `schema_migrations` version is at most the highest migration bundled with the running
   build. A newer schema (`BACKUP_SCHEMA_AHEAD`) and a schema/manifest mismatch are

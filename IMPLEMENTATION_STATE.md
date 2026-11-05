@@ -11,7 +11,7 @@ as the work it describes.
 | Phase | 0 complete; vertical slices A–N implemented (N is an unaudited candidate on `slice-n-backup`) |
 | Last pushed checkpoint | `47c5af8` (dashboard filters/search/replay, audited tree `aaab817`) on `origin/main`; CI pending |
 | Branch | `slice-n-backup` candidate from base `57df294`; not pushed |
-| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: operator backup and verified restore candidate on `slice-n-backup`; independent review PENDING; security PENDING |
+| Reviews | Phase 0: security PASS + contract PASS. Slice A: security PASS + contract PASS on tree `048065f`. Slices B–D: security PASS + contract PASS on trees `2bfaa9b`, `8ffff4a`, `bcc6a73`. Slice E: security PASS + contract PASS on tree `31a542a`; id-type fix PASS on tree `30e9267`. Slice F: security PASS + contract PASS on tree `66bc243`. Slice G: security PASS + contract PASS on tree `52bf6b7`. Slice H: security PASS + contract PASS on tree `f45a3b4`. Slice I: first audits BLOCKED on tree `b62879c` (Node adapter dropped the login body and collapsed `Set-Cookie`); fixed tree `cc8df35` security PASS + contract PASS. Slice J: first tree `bfea35c` PASS with P2s; fix tree `f321891` contract-BLOCKED (code-only tokens could not be revoked); final code tree `a439df4` security PASS + contract PASS, with a docs/state-only tail `4867ed0`. Slice I CI: runs 41889142173 and 41889225438 both success. Slice J CI: runs for `aac6f2e` and `e076129` both success. Slice K: first tree `0a6e649` security-BLOCKED (prune stripped an OAuth ownership association while a live refresh row could still revive the credential); fix tree `9c5991e` security PASS + contract PASS; final tree `1a5d207` security PASS + contract PASS (delta audits) with remaining docs/state P2s corrected here. Slice K CI: runs for `f0e43d3` and `7df76f7` both success. Slice L: first tree `905d2cb` security PASS + contract PASS with P2s (session viewer carried write capabilities; unbounded login redirect; docs/test gaps); fixed tree `5ea2439` security PASS + contract PASS (delta audits), with docs/state P2 wording corrected here. Slice L CI: runs for `45e5637` and `0d3f34b` both success. Slice M: first audit on final tree `ea34f5d` security PASS + contract PASS with four P2s (`unread=false` state, pager-doc empty-page wording, `h1` wrapping, `hasMore` non-serialization tests); fixed tree `aaab817` security PASS + contract PASS (delta audits). Slice N: first audit on tree `782ef11` contract PASS with six P2s, security BLOCKED on one P1 (backup created source WAL sidecars); fix commit is an unaudited candidate on `slice-n-backup`; independent review PENDING; security PENDING |
 | Next milestone | ChatGPT Web acceptance run (separate external criteria, unverified), dashboard write/admin actions, D1/R2 parity, attachments (blocked on Issue #5), per-project observability |
 
 ## Checkpoint history
@@ -40,7 +40,8 @@ as the work it describes.
 | `bf79cd0` | `f7c516a` | Slice L audit fixes: read-only session rights/scopes, bounded login redirect, parsed capability listing, fetch-metadata and duplicate-CSRF handling, negative/no-mutation/a11y tests | independent review PENDING |
 | `a4a6ef3` | `c733ab9` | Vertical slice M: dashboard metadata filters, summary-only search, bounded cursor replay, responsive CSS-only layout | independent review PENDING; security PENDING |
 | `a5bb688` | `dbb72be` | Slice M audit P2 fixes: read-only `unread=false` state, pager empty-page docs/test, `h1` overflow wrapping, `hasMore` non-serialization tests | independent review PENDING; security PENDING |
-| candidate (`slice-n-backup`) | pending | Vertical slice N: operator `backup`, `verify`, and non-destructive `restore` for the SQLite + blob pair | independent review PENDING; security PENDING |
+| candidate (`slice-n-backup`) | pending | Vertical slice N: operator `backup`, `verify`, and non-destructive `restore` for the SQLite + blob pair | first audit `782ef11`: contract PASS (six P2s), security BLOCKED (P1); fix candidate unaudited |
+| candidate (`slice-n-backup` fix) | pending | Slice N audit fixes: sidecar-free snapshot, single-manifest restore, backup preconditions, size bounds, CLI JSON/redaction, missing negative tests | independent review PENDING; security PENDING |
 
 ## GitHub Issue coordination
 
@@ -918,7 +919,10 @@ pushed.
   `-wal`/`-shm` sidecars; writers are not blocked for the blob copy. Every regular file
   in `blobs` is then copied exactly (orphans included, opaque names preserved,
   `0600`); directories, symlinks, devices, and other non-file entries are rejected and
-  the partial output is removed. The source is never modified.
+  the partial output is removed. The source is opened read-only: no database/blob
+  content is modified, and a source with no WAL sidecars is opened `immutable=1` so
+  backup creates no `-wal`/`-shm` (a live read with both sidecars present may touch the
+  existing `-shm`).
 - **Manifest.** `manifest.json` format `corkboard-backup` version `1` records
   `created_at` UTC, database file/size/SHA-256, sorted blob names/sizes/SHA-256,
   counts, and the highest applied schema version. It is bounded (8 MiB, 100,000 blob
@@ -950,15 +954,27 @@ pushed.
   database and blob digest/size tampering, missing/malformed/unsupported manifests,
   path-traversal blob names, missing/extra files, symlinked blob entries (never
   followed), backup rejection of source symlinks with output cleanup, symlinked and
-  dangling restore targets, non-empty target with source untouched, and CLI exit `2`
-  versus `1`.
+  dangling restore targets, non-empty target with database/blob bytes untouched, and CLI
+  exit `2` versus `1`.
+- **Audit fixes (first independent audit on tree `782ef11`: contract PASS with six P2s,
+  security BLOCKED on one P1).** Backup now uses the diagnostics sidecar policy
+  (`immutable=1` with no sidecars, refuse lone/non-regular sidecars), so it creates no
+  `-wal`/`-shm` and works on a read-only source directory. Restore uses the single
+  inspection result's manifest and re-runs the referenced-blob cross-check against the
+  staged DB. Backup rejects a schema newer than bundled and a missing referenced blob.
+  Per-file (16 KiB), total (1 GiB), and database (16 GiB) bounds are enforced from
+  metadata before hashing/copying. CLI `--json` emits one failure object on exit-2 and
+  unexpected paths, stderr paths are redacted, and extra positionals are rejected.
+  Tests cover every previously missing negative code plus staging cleanup, and the
+  concurrent-writer test asserts actual writer progress across the backup window.
+  Documentation states the Node-only operator boundary and the `-shm` caveat.
 - **Limitations.** The post-snapshot blob copy can miss a blob deleted by a concurrent
   expiry in that window; `verify`'s reference cross-check detects it, and a quiesced
   backup gives a byte-exact pair. `VACUUM INTO` can temporarily slow the source while
-  reading, and a live WAL read may touch `-shm` coordination bytes. No scheduling,
-  remote storage, backup-level encryption, key handling, point-in-time recovery,
-  overwrite mode, or D1/Workers equivalent. Independent security and contract review is
-  PENDING.
+  reading, and a live WAL read may touch existing `-shm` coordination bytes (it never
+  creates sidecars). The implementation is Node-only. No scheduling, remote storage,
+  backup-level encryption, key handling, point-in-time recovery, overwrite mode, or
+  D1/Workers equivalent. Independent security and contract review is PENDING.
 
 ## Implemented and verified at this tree
 

@@ -306,8 +306,9 @@ test("a consistent snapshot under a concurrent writer passes integrity and seque
   const installation = await seed(join(root, "data"));
   let sending = true;
   let index = 0;
+  let completed = 0;
   const writer = (async () => {
-    while (sending && index < 40) {
+    while (sending && index < 200) {
       index += 1;
       const text = `concurrent-${index}`;
       try {
@@ -324,19 +325,28 @@ test("a consistent snapshot under a concurrent writer passes integrity and seque
             bodyDigest: digest(text),
           },
         );
+        completed += 1;
       } catch {
         // The writer is best-effort; the snapshot is what is asserted.
       }
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      // Yield to I/O so the backup's async file work interleaves.
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
   })();
 
   const backupDir = join(root, "backup");
+  const completedBefore = completed;
   const summary = await createBackup({ dataDir: installation.dataDir, outDir: backupDir });
   sending = false;
   await writer;
   installation.close();
 
+  // The writer must actually have made progress across the backup window;
+  // otherwise the concurrency claim is untested.
+  assert.ok(
+    completed > completedBefore,
+    `writer made no progress across the backup (${completedBefore} -> ${completed})`,
+  );
   assert.ok(summary.blobs >= 2);
   const report = await verifyBackup({ backupDir });
   assert.equal(report.ok, true, JSON.stringify(report.issues));
@@ -416,9 +426,12 @@ test("CLI backup, verify, and restore emit one JSON line and use stable exit cod
   assert.equal(restoreJson.restored, true);
   assert.equal(existsSync(join(restoredDir, BACKUP_DATABASE_FILE)), true);
 
-  // Usage failures exit 2 before touching the filesystem.
+  // Usage failures exit 2 before touching the filesystem and still emit one
+  // JSON object in --json mode.
   const missingOut = run(["backup", "--data-dir", installation.dataDir, "--json"]);
   assert.equal(missingOut.status, 2);
+  assert.equal(missingOut.stdout.trim().split("\n").length, 1);
+  assert.equal((JSON.parse(missingOut.stdout) as { code: string }).code, "USAGE_ERROR");
   const missingBackup = run(["verify", "--json"]);
   assert.equal(missingBackup.status, 2);
   const missingData = run(["restore", "--backup", backupDir, "--json"]);

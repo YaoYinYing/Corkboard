@@ -490,8 +490,12 @@ verification externally; nothing runs on a timer.
   SQLite `VACUUM INTO`. This is SQLite's consistent online backup: it reads under
   SQLite's own isolation rules (including a live WAL), writes one standalone
   database file, and does not copy `-wal`/`-shm` sidecars. Writers are not blocked for
-  the duration of the blob copy. The source database and blobs are never modified or
-  deleted.
+  the duration of the blob copy. No database or blob **content** is modified. When the
+  source has neither sidecar, backup opens it `immutable=1`, so it creates no
+  `-wal`/`-shm` and works with a read-only source directory. When both sidecars exist it
+  performs a live read, which may touch the existing `-shm` coordination file; a lone,
+  symlinked, or otherwise non-regular sidecar is refused. The source database and blobs
+  are never deleted.
 - Blobs are copied **after** the snapshot, byte-for-byte, from every regular file in
   `<data-dir>/blobs`. Orphan blobs are preserved so the restored directory is a
   faithful copy; opaque file names are unchanged. Directories, symlinks, devices, and
@@ -506,12 +510,11 @@ verification externally; nothing runs on a timer.
   required.
 - The output directory is created `0700` and must not exist beforehand. Files
   (`manifest.json`, the database, every blob) are `0600`. A failed run removes the
-  directory it created and leaves the source untouched.
+  directory it created and leaves the source database/blob content untouched.
 
 ### Manifest
 
 `manifest.json` is bounded (at most 8 MiB and 100,000 blob entries) and contains only:
-
 - format `corkboard-backup`, `format_version` `1`, `created_at` UTC;
 - the database file name (`corkboard.sqlite`), byte size, and SHA-256;
 - the sorted blob list (opaque name, byte size, SHA-256) and counts;
@@ -519,7 +522,11 @@ verification externally; nothing runs on a timer.
 
 It never contains keys, tokens, emails, message summaries or bodies, absolute paths,
 or file contents. Blob names are validated as plain basenames, so a manifest cannot
-traverse out of the backup directory.
+traverse out of the backup directory. Individual blobs are capped at 16 KiB (twice the
+8 KiB plaintext body cap, leaving room for the CB01 frame/header) and the total at
+1 GiB; the database snapshot is capped at 16 GiB. These bounds are checked from
+metadata **before** hashing or copying, so a sparse or hardlink-multiplied giant file
+cannot turn `backup`/`verify`/`restore` into an unbounded scan.
 
 ### Verify
 
@@ -529,7 +536,10 @@ a symlink or non-file. It then opens the database read-only and runs
 `PRAGMA integrity_check`, rejects a schema newer than the bundled migrations, requires
 the manifest's schema version to match, and requires every referenced storage key to
 appear in the blob list. Exit `0` clean, `1` issues (stable codes), `2` cannot inspect
-(missing/unreadable/symlinked backup directory).
+(missing/unreadable/symlinked backup directory). With `--json`, a clean or issue report
+is one object; an exit-2 inspection failure or unexpected command error also prints
+exactly one `{ok:false,code,...}` object on stdout. Human stderr has absolute paths
+redacted.
 
 Run `verify` after every backup, before every restore, and on a schedule (for example
 daily or weekly) against recent backups. A backup that has never been verified is not
@@ -572,9 +582,12 @@ matching key set is not a recovery.
 
 Scheduled/automatic backups, remote or cloud upload, backup encryption beyond the
 existing AES-256-GCM ciphertext, key export, key rotation, automatic overwrite, point-
-in-time recovery, and a D1/Workers equivalent. A backup is a point-in-time copy; it does
-not rewrite or expire previously backed-up plaintext-adjacent metadata, and expiry is a
-tombstone rather than comprehensive erasure.
+in-time recovery, and a D1/Workers equivalent. `src/service/backup.ts` is a **Node-only
+operator service**: it imports `node:fs`, `node:sqlite`, `node:crypto`, and streams, so
+it is not Workers-portable core (the same boundary `doctor` already has). A D1/R2 backup
+path would need a platform adapter. A backup is a point-in-time copy; it does not rewrite
+or expire previously backed-up plaintext-adjacent metadata, and expiry is a tombstone
+rather than comprehensive erasure.
 
 ## Incident response
 

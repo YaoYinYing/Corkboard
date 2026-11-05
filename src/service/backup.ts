@@ -20,9 +20,11 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { MAX_TEXT_BYTES } from "../domain/validation.ts";
 import {
   expectedMigrationVersions,
   openSqliteDatabaseReadOnly,
+  sqliteReadOnlyOpenTarget,
   type ReadOnlySqlDatabase,
 } from "../storage/db.ts";
 
@@ -37,6 +39,16 @@ export const BACKUP_BLOB_DIR = "blobs";
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
 const MAX_BLOB_ENTRIES = 100_000;
 const MAX_VERIFY_ISSUES = 100;
+// Derived from the real stored-body maximum: plaintext is capped at
+// MAX_TEXT_BYTES and the CB01 frame/AES-GCM tag/JSON header add only a few
+// hundred bytes, so 16 KiB leaves ample headroom while bounding a single blob.
+export const MAX_BACKUP_BLOB_BYTES = MAX_TEXT_BYTES * 2;
+// Bounds the total work of a verify/copy. A legitimate installation stores at
+// most a few encoded bodies per message; 1 GiB covers more than 65,000 maximum
+// bodies and rejects sparse or hardlink-multiplied floods before hashing.
+export const MAX_BACKUP_TOTAL_BYTES = 1024 * 1024 * 1024;
+// A corruption or malicious DB should not turn verify into a multi-hour hash.
+export const MAX_BACKUP_DATABASE_BYTES = 16 * 1024 * 1024 * 1024;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 // A backup blob entry must be a plain basename: no separators, NUL, or
@@ -69,6 +81,7 @@ export type BackupIssueCode =
   | "BACKUP_FORMAT_UNSUPPORTED"
   | "BACKUP_DATABASE_MISSING"
   | "BACKUP_DATABASE_SIZE_MISMATCH"
+  | "BACKUP_DATABASE_TOO_LARGE"
   | "BACKUP_DATABASE_DIGEST_MISMATCH"
   | "BACKUP_DATABASE_UNREADABLE"
   | "BACKUP_DATABASE_INTEGRITY_FAILED"
@@ -77,6 +90,8 @@ export type BackupIssueCode =
   | "BACKUP_BLOB_SIZE_MISMATCH"
   | "BACKUP_BLOB_DIGEST_MISMATCH"
   | "BACKUP_BLOB_REFERENCED_MISSING"
+  | "BACKUP_FILE_TOO_LARGE"
+  | "BACKUP_TOTAL_BYTES_EXCEEDED"
   | "BACKUP_FILE_UNEXPECTED"
   | "BACKUP_ENTRY_INVALID"
   | "BACKUP_SCHEMA_UNSUPPORTED"
@@ -122,6 +137,7 @@ export type RestoreErrorCode =
   | "RESTORE_TARGET_NOT_EMPTY"
   | "RESTORE_TARGET_INSIDE_BACKUP"
   | "RESTORE_COPY_MISMATCH"
+  | "RESTORE_BLOB_REFERENCED_MISSING"
   | "RESTORE_INTEGRITY_FAILED"
   | "RESTORE_SCHEMA_UNSUPPORTED"
   | "RESTORE_TARGET_CHANGED";
@@ -200,13 +216,24 @@ async function lstatOrUndefined(
   }
 }
 
+class FileTooLargeError extends Error {
+  constructor() {
+    super("file exceeds the configured size bound");
+    this.name = "FileTooLargeError";
+  }
+}
+
 // Open with O_NOFOLLOW so a symlink swapped in after the lstat check is never
 // followed. The handle's own stat is authoritative for size and file type.
-async function openRegularFile(path: string): Promise<Awaited<ReturnType<typeof open>>> {
+async function openRegularFile(
+  path: string,
+  maxBytes?: number,
+): Promise<Awaited<ReturnType<typeof open>>> {
   const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
     const stats = await handle.stat();
     if (!stats.isFile()) throw new Error("entry is not a regular file");
+    if (maxBytes !== undefined && stats.size > maxBytes) throw new FileTooLargeError();
     return handle;
   } catch (error) {
     await handle.close();
@@ -214,8 +241,8 @@ async function openRegularFile(path: string): Promise<Awaited<ReturnType<typeof 
   }
 }
 
-async function digestFile(path: string): Promise<FileDigest> {
-  const handle = await openRegularFile(path);
+async function digestFile(path: string, maxBytes?: number): Promise<FileDigest> {
+  const handle = await openRegularFile(path, maxBytes);
   try {
     const hash = createHash("sha256");
     let size = 0;
@@ -230,8 +257,12 @@ async function digestFile(path: string): Promise<FileDigest> {
   }
 }
 
-async function copyFileWithDigest(source: string, destination: string): Promise<FileDigest> {
-  const handle = await openRegularFile(source);
+async function copyFileWithDigest(
+  source: string,
+  destination: string,
+  maxBytes?: number,
+): Promise<FileDigest> {
+  const handle = await openRegularFile(source, maxBytes);
   try {
     const hash = createHash("sha256");
     let size = 0;
@@ -239,6 +270,11 @@ async function copyFileWithDigest(source: string, destination: string): Promise<
       transform(chunk: Buffer, _encoding, callback): void {
         hash.update(chunk);
         size += chunk.length;
+        // Defend against a file that grew after the stat check.
+        if (maxBytes !== undefined && size > maxBytes) {
+          callback(new FileTooLargeError());
+          return;
+        }
         callback(null, chunk);
       },
     });
@@ -470,7 +506,17 @@ async function inspectBlobs(
     }
   }
 
+  // Bound total hashing work before opening any blob. Per-entry oversize is
+  // reported even when the total bound also trips.
+  const totalTooLarge = manifest.counts.blob_bytes > MAX_BACKUP_TOTAL_BYTES;
+  if (totalTooLarge) add("BACKUP_TOTAL_BYTES_EXCEEDED", BACKUP_BLOB_DIR);
+
   for (const blob of manifest.blobs) {
+    if (blob.size > MAX_BACKUP_BLOB_BYTES) {
+      add("BACKUP_FILE_TOO_LARGE", blob.name);
+      continue;
+    }
+    if (totalTooLarge) continue;
     if (!listed.has(blob.name)) {
       add("BACKUP_BLOB_MISSING", blob.name);
       continue;
@@ -491,9 +537,9 @@ async function inspectBlobs(
     }
     let digest: FileDigest;
     try {
-      digest = await digestFile(path);
-    } catch {
-      add("BACKUP_ENTRY_INVALID", blob.name);
+      digest = await digestFile(path, MAX_BACKUP_BLOB_BYTES);
+    } catch (error) {
+      add(error instanceof FileTooLargeError ? "BACKUP_FILE_TOO_LARGE" : "BACKUP_ENTRY_INVALID", blob.name);
       continue;
     }
     if (digest.sha256 !== blob.sha256) {
@@ -502,7 +548,12 @@ async function inspectBlobs(
   }
 }
 
-export async function verifyBackup(input: { backupDir: string }): Promise<VerifyReport> {
+interface BackupInspectionResult {
+  report: VerifyReport;
+  manifest: BackupManifest | null;
+}
+
+async function inspectBackup(input: { backupDir: string }): Promise<BackupInspectionResult> {
   const backupDir = resolve(input.backupDir);
   await assertInspectableBackupDir(backupDir);
 
@@ -529,7 +580,7 @@ export async function verifyBackup(input: { backupDir: string }): Promise<Verify
   if (parsed.manifest === null) {
     for (const issue of parsed.issues) issues.push(issue);
     report.issues_truncated = truncated;
-    return report;
+    return { report, manifest: null };
   }
   const manifest = parsed.manifest;
   report.format_version = manifest.format_version;
@@ -567,16 +618,23 @@ export async function verifyBackup(input: { backupDir: string }): Promise<Verify
     add("BACKUP_ENTRY_INVALID", manifest.database.file);
   } else if (databaseEntry.size !== manifest.database.size) {
     add("BACKUP_DATABASE_SIZE_MISMATCH", manifest.database.file);
+  } else if (manifest.database.size > MAX_BACKUP_DATABASE_BYTES) {
+    add("BACKUP_DATABASE_TOO_LARGE", manifest.database.file);
   } else {
     try {
-      const digest = await digestFile(databasePath);
+      const digest = await digestFile(databasePath, MAX_BACKUP_DATABASE_BYTES);
       if (digest.sha256 !== manifest.database.sha256) {
         add("BACKUP_DATABASE_DIGEST_MISMATCH", manifest.database.file);
       } else {
         databaseDigestMatched = true;
       }
-    } catch {
-      add("BACKUP_ENTRY_INVALID", manifest.database.file);
+    } catch (error) {
+      add(
+        error instanceof FileTooLargeError
+          ? "BACKUP_DATABASE_TOO_LARGE"
+          : "BACKUP_ENTRY_INVALID",
+        manifest.database.file,
+      );
     }
   }
 
@@ -613,7 +671,11 @@ export async function verifyBackup(input: { backupDir: string }): Promise<Verify
 
   report.issues_truncated = truncated;
   report.ok = issues.length === 0;
-  return report;
+  return { report, manifest };
+}
+
+export async function verifyBackup(input: { backupDir: string }): Promise<VerifyReport> {
+  return (await inspectBackup(input)).report;
 }
 
 // VACUUM INTO is the portable SQLite snapshot: it reads under SQLite's own
@@ -621,7 +683,10 @@ export async function verifyBackup(input: { backupDir: string }): Promise<Verify
 function snapshotDatabase(sourcePath: string, targetPath: string): void {
   let db: DatabaseSync | undefined;
   try {
-    db = new DatabaseSync(sourcePath, { readOnly: true });
+    // Same sidecar policy as the read-only diagnostics opener: immutable when
+    // neither sidecar exists (so no -wal/-shm is created), both required when
+    // the database is in WAL mode, and a lone/non-regular sidecar is refused.
+    db = new DatabaseSync(sqliteReadOnlyOpenTarget(sourcePath), { readOnly: true });
     db.exec("PRAGMA busy_timeout = 5000");
     db.prepare("VACUUM INTO ?").run(targetPath);
   } finally {
@@ -656,6 +721,7 @@ async function copyBlobs(
     );
   }
   const copied: BackupBlobEntry[] = [];
+  let totalBytes = 0;
   for (const dirent of [...entries].sort(byName)) {
     if (!dirent.isFile()) {
       // Directories, symlinks, sockets and devices are never followed or
@@ -673,9 +739,31 @@ async function copyBlobs(
     }
     const source = join(sourceDir, dirent.name);
     const destination = join(targetDir, dirent.name);
+    // Check the size from lstat before opening: a sparse or hardlinked 1 TiB
+    // file is rejected without streaming it.
+    const sourceStats = await lstatOrUndefined(source);
+    if (sourceStats === undefined || sourceStats.isSymbolicLink() || !sourceStats.isFile()) {
+      throw new BackupError(
+        "BACKUP_BLOB_ENTRY_INVALID",
+        `blob entry is not a regular file: ${dirent.name}`,
+      );
+    }
+    const sourceSize = Number(sourceStats.size);
+    if (sourceSize > MAX_BACKUP_BLOB_BYTES) {
+      throw new BackupError(
+        "BACKUP_BLOB_TOO_LARGE",
+        `blob entry exceeds the ${MAX_BACKUP_BLOB_BYTES}-byte bound: ${dirent.name}`,
+      );
+    }
+    if (totalBytes + sourceSize > MAX_BACKUP_TOTAL_BYTES) {
+      throw new BackupError(
+        "BACKUP_BLOB_TOTAL_EXCEEDED",
+        `blob total exceeds the ${MAX_BACKUP_TOTAL_BYTES}-byte bound`,
+      );
+    }
     let digest: FileDigest;
     try {
-      digest = await copyFileWithDigest(source, destination);
+      digest = await copyFileWithDigest(source, destination, MAX_BACKUP_BLOB_BYTES);
     } catch {
       throw new BackupError(
         "BACKUP_BLOB_ENTRY_INVALID",
@@ -683,6 +771,7 @@ async function copyBlobs(
       );
     }
     copied.push({ name: dirent.name, size: digest.size, sha256: digest.sha256 });
+    totalBytes += digest.size;
   }
   return copied;
 }
@@ -770,6 +859,13 @@ export async function createBackup(input: {
       throw new BackupError("BACKUP_SNAPSHOT_FAILED", "could not create a database snapshot");
     }
     await chmod(snapshotPath, 0o600);
+    const snapshotStats = await lstatOrUndefined(snapshotPath);
+    if (!snapshotStats?.isFile() || snapshotStats.size > MAX_BACKUP_DATABASE_BYTES) {
+      throw new BackupError(
+        "BACKUP_DATABASE_TOO_LARGE",
+        "database snapshot exceeds the backup size bound",
+      );
+    }
 
     const inspection = await inspectDatabaseFile(snapshotPath);
     if (!inspection.readable || !inspection.integrityOk) {
@@ -784,13 +880,31 @@ export async function createBackup(input: {
         "database has no bundled schema migration record",
       );
     }
+    if (inspection.schemaVersion > bundledSchemaVersion()) {
+      // A backup this build cannot verify or restore is not a successful backup.
+      throw new BackupError(
+        "BACKUP_SCHEMA_AHEAD",
+        "database schema is newer than this build; refusing to back it up",
+      );
+    }
 
     const copied = await copyBlobs(source.blobDir, join(outDir, BACKUP_BLOB_DIR));
+    const copiedNames = new Set(copied.map((blob) => blob.name));
+    for (const key of inspection.referencedKeys) {
+      if (!copiedNames.has(key)) {
+        // Mirror verify's referenced-blob cross-check so backup never reports
+        // success for a pair its own verify would reject.
+        throw new BackupError(
+          "BACKUP_BLOB_REFERENCED_MISSING",
+          `database references a blob that is not in the backup: ${key}`,
+        );
+      }
+    }
     const created_at = (input.now?.() ?? new Date()).toISOString();
     if (!ISO_UTC.test(created_at) || Number.isNaN(Date.parse(created_at))) {
       throw new BackupError("BACKUP_CLOCK_INVALID", "system clock is not a valid UTC time");
     }
-    const databaseDigest = await digestFile(snapshotPath);
+    const databaseDigest = await digestFile(snapshotPath, MAX_BACKUP_DATABASE_BYTES);
     const blobs = [...copied].sort(byName);
     const blobBytes = blobs.reduce((total, blob) => total + blob.size, 0);
     const manifest: BackupManifest = {
@@ -824,8 +938,8 @@ export async function createBackup(input: {
       schema_version: manifest.schema_version,
     };
   } catch (error) {
-    // Leave the source untouched and no half-written backup behind. Only the
-    // directory this run created is removed.
+    // Leave source database/blob content untouched and no half-written backup
+    // behind. Only the directory this run created is removed.
     if (created) {
       await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -833,26 +947,25 @@ export async function createBackup(input: {
   }
 }
 
-async function readValidatedManifest(backupDir: string): Promise<BackupManifest> {
-  const parsed = await readManifest(backupDir);
-  if (parsed.manifest === null) {
-    throw new RestoreError(
-      "RESTORE_VERIFY_FAILED",
-      "backup manifest is invalid; refusing to restore",
-      parsed.issues,
-    );
-  }
-  return parsed.manifest;
+export interface RestoreHooks {
+  /** Test seam: runs after verification and target checks, before staging. */
+  afterVerify?: () => Promise<void>;
+  /** Test seam: runs after the staged copy, before the final integrity check. */
+  afterCopy?: (stagingDir: string) => Promise<void>;
 }
 
 export async function restoreBackup(input: {
   backupDir: string;
   dataDir: string;
+  hooks?: RestoreHooks;
 }): Promise<RestoreSummary> {
   const backupDir = resolve(input.backupDir);
-  const report = await verifyBackup({ backupDir });
+  // One inspection result supplies both the report and the manifest used for
+  // the copy, so a manifest swap between verify and copy cannot change policy.
+  const { report, manifest } = await inspectBackup({ backupDir });
   if (
     !report.ok ||
+    manifest === null ||
     report.database === null ||
     report.blobs === null ||
     report.schema_version === null
@@ -914,7 +1027,7 @@ export async function restoreBackup(input: {
     );
   }
 
-  const manifest = await readValidatedManifest(backupDir);
+  await input.hooks?.afterVerify?.();
   const stagingDir = await mkdtemp(join(canonicalParent, `.${basename(dataDir)}.restore-`));
   let installed = false;
   try {
@@ -926,6 +1039,7 @@ export async function restoreBackup(input: {
       databaseDigest = await copyFileWithDigest(
         join(backupDir, manifest.database.file),
         stagingDatabase,
+        MAX_BACKUP_DATABASE_BYTES,
       );
     } catch {
       throw new RestoreError("RESTORE_COPY_MISMATCH", "could not copy the backup database");
@@ -949,6 +1063,7 @@ export async function restoreBackup(input: {
         digest = await copyFileWithDigest(
           join(backupDir, BACKUP_BLOB_DIR, blob.name),
           join(stagingBlobs, blob.name),
+          MAX_BACKUP_BLOB_BYTES,
         );
       } catch {
         throw new RestoreError(
@@ -963,6 +1078,8 @@ export async function restoreBackup(input: {
         );
       }
     }
+
+    await input.hooks?.afterCopy?.(stagingDir);
 
     const inspection = await inspectDatabaseFile(stagingDatabase);
     if (!inspection.readable || !inspection.integrityOk) {
@@ -985,6 +1102,18 @@ export async function restoreBackup(input: {
         "RESTORE_INTEGRITY_FAILED",
         "restored database schema does not match the manifest",
       );
+    }
+    // Re-run the referenced-blob check against the bytes actually staged. This
+    // closes the verify-then-copy window even though the copy is re-hashed
+    // against the verified manifest.
+    const stagedBlobs = new Set(manifest.blobs.map((blob) => blob.name));
+    for (const key of inspection.referencedKeys) {
+      if (!stagedBlobs.has(key)) {
+        throw new RestoreError(
+          "RESTORE_BLOB_REFERENCED_MISSING",
+          `restored database references a blob that is not in the backup: ${key}`,
+        );
+      }
     }
 
     // rename(2) is atomic within the same parent directory and refuses to

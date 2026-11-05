@@ -11,6 +11,9 @@ const PRINTABLE_ASCII = /^[\x21-\x7e]{1,128}$/;
 const RFC3339_UTC_TIMESTAMP =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
 const MAX_BODY_EXPIRY_AHEAD_MS = 366 * 24 * 60 * 60 * 1000;
+// Plaintext body cap. A stored CB01 blob adds only a frame, AES-GCM tag, and
+// small JSON header; backup bounds derive from this value.
+export const MAX_TEXT_BYTES = 8192;
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 254;
 const MAX_LOGIN_PASSWORD_BYTES = 1024;
@@ -98,8 +101,8 @@ export function validateText(value: unknown): string {
   if (graphemes < 1 || graphemes > 2000) {
     throw new AppError("VALIDATION_ERROR", "text must be 1-2000 graphemes");
   }
-  if (utf8ByteLength(text) > 8192) {
-    throw new AppError("VALIDATION_ERROR", "text must be at most 8192 UTF-8 bytes");
+  if (utf8ByteLength(text) > MAX_TEXT_BYTES) {
+    throw new AppError("VALIDATION_ERROR", `text must be at most ${MAX_TEXT_BYTES} UTF-8 bytes`);
   }
   return text;
 }

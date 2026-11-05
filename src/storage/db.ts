@@ -237,36 +237,37 @@ function isWalModeDatabase(path: string): boolean {
   }
 }
 
+// Read-only open target. With no WAL sidecars the main file is a
+// self-contained snapshot, so `immutable=1` avoids creating `-shm`/`-wal`; with
+// both sidecars present a read-only connection reads the live WAL without
+// creating files. A lone or non-regular sidecar is a crash-recovery/redirect
+// state that cannot be inspected without writing.
+export function sqliteReadOnlyOpenTarget(path: string): string {
+  if (!isWalModeDatabase(path)) return path;
+  const wal = regularFileEntry(`${path}-wal`);
+  const shm = regularFileEntry(`${path}-shm`);
+  // Match production startup: a symlinked (or otherwise non-regular) sidecar
+  // is a redirect and is never followed.
+  if ((wal !== undefined && !wal.isFile) || (shm !== undefined && !shm.isFile)) {
+    throw new Error("database sidecar is not a regular file");
+  }
+  const hasWal = wal !== undefined;
+  const hasShm = shm !== undefined;
+  if (!hasWal && !hasShm) {
+    return `${pathToFileURL(path).href}?immutable=1`;
+  }
+  if (!hasWal || !hasShm) {
+    throw new Error("database has inconsistent write-ahead log sidecars");
+  }
+  return path;
+}
+
 // Read-only open for operator diagnostics. It deliberately does not create the
-// directory, change permissions, switch journal mode, or apply migrations. With
-// no WAL sidecars the main file is a self-contained snapshot, so an immutable
-// open avoids creating `-shm`/`-wal`; with both sidecars present a read-only
-// connection reads the live WAL without creating files. A lone sidecar is a
-// crash-recovery state that cannot be inspected without writing.
+// directory, change permissions, switch journal mode, or apply migrations.
 export async function openSqliteDatabaseReadOnly(
   path: string,
 ): Promise<ReadOnlySqlDatabase> {
-  let target = path;
-  if (isWalModeDatabase(path)) {
-    const wal = regularFileEntry(`${path}-wal`);
-    const shm = regularFileEntry(`${path}-shm`);
-    // Match production startup: a symlinked (or otherwise non-regular) sidecar
-    // is a redirect and is never followed.
-    if (
-      (wal !== undefined && !wal.isFile) ||
-      (shm !== undefined && !shm.isFile)
-    ) {
-      throw new Error("database sidecar is not a regular file");
-    }
-    const hasWal = wal !== undefined;
-    const hasShm = shm !== undefined;
-    if (!hasWal && !hasShm) {
-      target = `${pathToFileURL(path).href}?immutable=1`;
-    } else if (!hasWal || !hasShm) {
-      throw new Error("database has inconsistent write-ahead log sidecars");
-    }
-  }
-  const db = new DatabaseSync(target, { readOnly: true });
+  const db = new DatabaseSync(sqliteReadOnlyOpenTarget(path), { readOnly: true });
   try {
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec("PRAGMA query_only = ON");

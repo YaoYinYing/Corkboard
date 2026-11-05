@@ -1,18 +1,26 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -65,6 +73,13 @@ async function makeBackup(t: { after(fn: () => void): void }): Promise<Fixture> 
       "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?, ?, ?, 'ready', ?)",
       ["body_1", "proj_1", REFERENCED_ZERO, NOW],
     );
+    // Enough rows to make page 3 a corruptible b-tree page in the snapshot.
+    for (let index = 0; index < 300; index += 1) {
+      await db.run(
+        "INSERT INTO audit_events (id, operation, outcome, created_at) VALUES (?, 'test', 'success', ?)",
+        [`evt_${index}`, NOW],
+      );
+    }
   } finally {
     db.close();
   }
@@ -87,6 +102,27 @@ function mutateManifest(backupDir: string, mutate: (manifest: Record<string, unk
 
 function issueCodes(report: { issues: Array<{ code: string }> }): string[] {
   return report.issues.map((issue) => issue.code);
+}
+
+function refreshManifestDatabase(backupDir: string): void {
+  const bytes = readFileSync(join(backupDir, BACKUP_DATABASE_FILE));
+  mutateManifest(backupDir, (manifest) => {
+    const database = manifest.database as { size: number; sha256: string };
+    database.size = bytes.length;
+    database.sha256 = createHash("sha256").update(bytes).digest("hex");
+  });
+}
+
+function rewriteManifest(backupDir: string, manifest: Record<string, unknown>): void {
+  writeFileSync(manifestPath(backupDir), JSON.stringify(manifest));
+}
+
+function readManifest(backupDir: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(manifestPath(backupDir), "utf8")) as Record<string, unknown>;
+}
+
+function stagingDirs(parent: string, targetName: string): string[] {
+  return readdirSync(parent).filter((name) => name.startsWith(`.${targetName}.restore-`));
 }
 
 async function assertRestoreRefused(fixture: Fixture, target: string): Promise<void> {
@@ -265,6 +301,18 @@ test("CLI verify exits 2 for an uninspectable backup and 1 for tampering", async
   const fixture = await makeBackup(t);
   const missing = runCli(["verify", "--backup", join(fixture.root, "nope"), "--json"]);
   assert.equal(missing.status, 2);
+  assert.equal(missing.stdout.trim().split("\n").length, 1);
+  const missingJson = JSON.parse(missing.stdout) as { ok: boolean; code: string };
+  assert.equal(missingJson.ok, false);
+  assert.equal(missingJson.code, "BACKUP_INSPECT_FAILED");
+  assert.equal(missing.stderr.includes(fixture.root), false);
+
+  const positional = runCli(["verify", "--backup", fixture.backupDir, "extra", "--json"]);
+  assert.equal(positional.status, 2);
+  assert.equal(positional.stdout.trim().split("\n").length, 1);
+  const positionalJson = JSON.parse(positional.stdout) as { ok: boolean; code: string };
+  assert.equal(positionalJson.ok, false);
+  assert.equal(positionalJson.code, "USAGE_ERROR");
 
   mutateManifest(fixture.backupDir, (manifest) => {
     (manifest.database as { sha256: string }).sha256 = "0".repeat(64);
@@ -303,3 +351,304 @@ function runCli(args: string[]): RunResult {
     return { status: failure.status ?? -1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
   }
 }
+
+test("backup never creates source WAL sidecars and succeeds on a read-only source directory", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const blobsDir = join(dataDir, BACKUP_BLOB_DIR);
+  mkdirSync(blobsDir, { recursive: true, mode: 0o700 });
+  const db = await openSqliteDatabase(join(dataDir, BACKUP_DATABASE_FILE));
+  await db.run(
+    "INSERT INTO accounts (id, email, status, created_at) VALUES (?, ?, 'active', ?)",
+    ["acct_1", "owner@example.test", NOW],
+  );
+  db.close();
+
+  const before = readdirSync(dataDir).sort();
+  assert.equal(before.includes(`${BACKUP_DATABASE_FILE}-wal`), false);
+  assert.equal(before.includes(`${BACKUP_DATABASE_FILE}-shm`), false);
+
+  chmodSync(dataDir, 0o500);
+  chmodSync(blobsDir, 0o500);
+
+  const outDir = join(root, "out");
+  let summary;
+  try {
+    summary = await createBackup({ dataDir, outDir });
+  } finally {
+    chmodSync(dataDir, 0o700);
+    chmodSync(blobsDir, 0o700);
+  }
+  assert.equal(summary.ok, true);
+
+  assert.deepEqual(readdirSync(dataDir).sort(), before);
+  assert.equal(existsSync(join(dataDir, `${BACKUP_DATABASE_FILE}-wal`)), false);
+  assert.equal(existsSync(join(dataDir, `${BACKUP_DATABASE_FILE}-shm`)), false);
+  assert.equal(existsSync(join(outDir, BACKUP_MANIFEST_FILE)), true);
+});
+
+test("backup refuses a lone WAL sidecar without creating another", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { mode: 0o700 });
+  const db = await openSqliteDatabase(join(dataDir, BACKUP_DATABASE_FILE));
+  db.close();
+  writeFileSync(join(dataDir, `${BACKUP_DATABASE_FILE}-wal`), new Uint8Array());
+
+  const outDir = join(root, "out");
+  await assert.rejects(
+    createBackup({ dataDir, outDir }),
+    (error: unknown) => error instanceof BackupError && error.code === "BACKUP_SNAPSHOT_FAILED",
+  );
+  assert.equal(existsSync(outDir), false);
+  assert.equal(existsSync(join(dataDir, `${BACKUP_DATABASE_FILE}-shm`)), false);
+});
+
+test("a manifest omitting a referenced blob is refused by verify and restore", async (t) => {
+  const fixture = await makeBackup(t);
+  mutateManifest(fixture.backupDir, (manifest) => {
+    const blobs = manifest.blobs as Array<{ name: string; size: number }>;
+    const removed = blobs.find((blob) => blob.name === REFERENCED_ZERO);
+    assert.ok(removed);
+    manifest.blobs = blobs.filter((blob) => blob.name !== REFERENCED_ZERO);
+    const counts = manifest.counts as { blobs: number; blob_bytes: number };
+    counts.blobs -= 1;
+    counts.blob_bytes -= removed.size;
+  });
+  unlinkSync(join(fixture.backupDir, BACKUP_BLOB_DIR, REFERENCED_ZERO));
+
+  const report = await verifyBackup({ backupDir: fixture.backupDir });
+  assert.ok(issueCodes(report).includes("BACKUP_BLOB_REFERENCED_MISSING"), JSON.stringify(report.issues));
+  await assertRestoreRefused(fixture, join(fixture.root, "restored-referenced"));
+});
+
+test("restore re-checks referenced blobs against staged bytes and cleans staging", async (t) => {
+  const fixture = await makeBackup(t);
+  const target = join(fixture.root, "target");
+  await assert.rejects(
+    restoreBackup({
+      backupDir: fixture.backupDir,
+      dataDir: target,
+      hooks: {
+        async afterCopy(stagingDir: string): Promise<void> {
+          const db = new DatabaseSync(join(stagingDir, BACKUP_DATABASE_FILE));
+          try {
+            db.prepare(
+              "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?, 'proj_1', ?, 'ready', ?)",
+            ).run("body_staged_missing", "absentBlobKey_123456", NOW);
+          } finally {
+            db.close();
+          }
+        },
+      },
+    }),
+    (error: unknown) =>
+      error instanceof RestoreError && error.code === "RESTORE_BLOB_REFERENCED_MISSING",
+  );
+  assert.equal(existsSync(target), false);
+  assert.deepEqual(stagingDirs(fixture.root, "target"), []);
+});
+
+test("restore cleans staging after a mid-copy failure", async (t) => {
+  const fixture = await makeBackup(t);
+  const target = join(fixture.root, "copy-target");
+  await assert.rejects(
+    restoreBackup({
+      backupDir: fixture.backupDir,
+      dataDir: target,
+      hooks: {
+        async afterVerify(): Promise<void> {
+          unlinkSync(join(fixture.backupDir, BACKUP_BLOB_DIR, ORPHAN));
+        },
+      },
+    }),
+    (error: unknown) => error instanceof RestoreError && error.code === "RESTORE_COPY_MISMATCH",
+  );
+  assert.equal(existsSync(target), false);
+  assert.deepEqual(stagingDirs(fixture.root, "copy-target"), []);
+});
+
+test("backup refuses a schema newer than bundled and a missing referenced blob", async (t) => {  const root = tempDir(t);
+  const aheadDir = join(root, "ahead");
+  mkdirSync(aheadDir, { mode: 0o700 });
+  const aheadDb = await openSqliteDatabase(join(aheadDir, BACKUP_DATABASE_FILE));
+  await aheadDb.run(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)",
+    [NOW],
+  );
+  aheadDb.close();
+  const aheadOut = join(root, "ahead-out");
+  await assert.rejects(
+    createBackup({ dataDir: aheadDir, outDir: aheadOut }),
+    (error: unknown) => error instanceof BackupError && error.code === "BACKUP_SCHEMA_AHEAD",
+  );
+  assert.equal(existsSync(aheadOut), false);
+
+  const missingDir = join(root, "missing");
+  mkdirSync(missingDir, { mode: 0o700 });
+  const missingDb = await openSqliteDatabase(join(missingDir, BACKUP_DATABASE_FILE));
+  await missingDb.run(
+    "INSERT INTO accounts (id, email, status, created_at) VALUES (?, ?, 'active', ?)",
+    ["acct_1", "owner@example.test", NOW],
+  );
+  await missingDb.run(
+    "INSERT INTO projects (id, owner_account_id, title, status, created_at) VALUES (?, ?, ?, 'active', ?)",
+    ["proj_1", "acct_1", "Ops", NOW],
+  );
+  await missingDb.run(
+    "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?, ?, ?, 'ready', ?)",
+    ["body_1", "proj_1", "absentBlobKey_123456", NOW],
+  );
+  missingDb.close();
+  const missingOut = join(root, "missing-out");
+  await assert.rejects(
+    createBackup({ dataDir: missingDir, outDir: missingOut }),
+    (error: unknown) =>
+      error instanceof BackupError && error.code === "BACKUP_BLOB_REFERENCED_MISSING",
+  );
+  assert.equal(existsSync(missingOut), false);
+});
+
+test("verify rejects a schema mismatch and a schema newer than bundled", async (t) => {
+  const mismatch = await makeBackup(t);
+  mutateManifest(mismatch.backupDir, (manifest) => {
+    manifest.schema_version = 3;
+  });
+  const mismatchReport = await verifyBackup({ backupDir: mismatch.backupDir });
+  assert.ok(issueCodes(mismatchReport).includes("BACKUP_SCHEMA_MISMATCH"), JSON.stringify(mismatchReport.issues));
+
+  const ahead = await makeBackup(t);
+  const aheadDb = new DatabaseSync(join(ahead.backupDir, BACKUP_DATABASE_FILE));
+  try {
+    aheadDb.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)").run(NOW);
+  } finally {
+    aheadDb.close();
+  }
+  refreshManifestDatabase(ahead.backupDir);
+  mutateManifest(ahead.backupDir, (manifest) => {
+    manifest.schema_version = 999;
+  });
+  const aheadReport = await verifyBackup({ backupDir: ahead.backupDir });
+  assert.ok(issueCodes(aheadReport).includes("BACKUP_SCHEMA_AHEAD"), JSON.stringify(aheadReport.issues));
+  await assertRestoreRefused(ahead, join(ahead.root, "restored-ahead"));
+});
+
+test("restore refuses a staged schema newer than the build and cleans staging", async (t) => {
+  const fixture = await makeBackup(t);
+  const target = join(fixture.root, "schema-target");
+  await assert.rejects(
+    restoreBackup({
+      backupDir: fixture.backupDir,
+      dataDir: target,
+      hooks: {
+        async afterCopy(stagingDir: string): Promise<void> {
+          const db = new DatabaseSync(join(stagingDir, BACKUP_DATABASE_FILE));
+          try {
+            db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)").run(NOW);
+          } finally {
+            db.close();
+          }
+        },
+      },
+    }),
+    (error: unknown) =>
+      error instanceof RestoreError && error.code === "RESTORE_SCHEMA_UNSUPPORTED",
+  );
+  assert.equal(existsSync(target), false);
+  assert.deepEqual(stagingDirs(fixture.root, "schema-target"), []);
+});
+
+test("verify distinguishes an unreadable database from an integrity failure", async (t) => {
+  const unreadable = await makeBackup(t);
+  const unreadablePath = join(unreadable.backupDir, BACKUP_DATABASE_FILE);
+  const unreadableSize = statSync(unreadablePath).size;
+  writeFileSync(unreadablePath, Buffer.alloc(unreadableSize, 0x41));
+  refreshManifestDatabase(unreadable.backupDir);
+  const unreadableReport = await verifyBackup({ backupDir: unreadable.backupDir });
+  assert.ok(
+    issueCodes(unreadableReport).includes("BACKUP_DATABASE_UNREADABLE"),
+    JSON.stringify(unreadableReport.issues),
+  );
+
+  const corrupted = await makeBackup(t);
+  const corruptedPath = join(corrupted.backupDir, BACKUP_DATABASE_FILE);
+  const fd = openSync(corruptedPath, "r+");
+  try {
+    // Corrupt a cell pointer on page 3; integrity_check returns errors rather
+    // than failing to open.
+    writeSync(fd, Buffer.from([0xff, 0xff, 0xff, 0xff]), 0, 4, 2 * 4096 + 8);
+  } finally {
+    closeSync(fd);
+  }
+  refreshManifestDatabase(corrupted.backupDir);
+  const corruptedReport = await verifyBackup({ backupDir: corrupted.backupDir });
+  assert.ok(
+    issueCodes(corruptedReport).includes("BACKUP_DATABASE_INTEGRITY_FAILED"),
+    JSON.stringify(corruptedReport.issues),
+  );
+});
+
+test("restore refuses a target inside the backup and backup refuses an output inside the source", async (t) => {
+  const fixture = await makeBackup(t);
+  await assert.rejects(
+    restoreBackup({
+      backupDir: fixture.backupDir,
+      dataDir: join(fixture.backupDir, "inside"),
+    }),
+    (error: unknown) =>
+      error instanceof RestoreError && error.code === "RESTORE_TARGET_INSIDE_BACKUP",
+  );
+
+  await assert.rejects(
+    createBackup({ dataDir: fixture.dataDir, outDir: join(fixture.dataDir, "backup-inside") }),
+    (error: unknown) => error instanceof BackupError && error.code === "BACKUP_OUT_INSIDE_SOURCE",
+  );
+  assert.equal(existsSync(join(fixture.dataDir, "backup-inside")), false);
+});
+
+test("backup and verify bound per-file and total blob bytes before hashing", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "sparse-data");
+  const blobsDir = join(dataDir, BACKUP_BLOB_DIR);
+  mkdirSync(blobsDir, { recursive: true, mode: 0o700 });
+  const db = await openSqliteDatabase(join(dataDir, BACKUP_DATABASE_FILE));
+  db.close();
+  const sparsePath = join(blobsDir, "sparseBlobKey_123456");
+  writeFileSync(sparsePath, new Uint8Array());
+  truncateSync(sparsePath, 1024 ** 4);
+  const outDir = join(root, "sparse-out");
+  await assert.rejects(
+    createBackup({ dataDir, outDir }),
+    (error: unknown) => error instanceof BackupError && error.code === "BACKUP_BLOB_TOO_LARGE",
+  );
+  assert.equal(existsSync(outDir), false);
+
+  const perFile = await makeBackup(t);
+  mutateManifest(perFile.backupDir, (manifest) => {
+    const blobs = manifest.blobs as Array<{ size: number }>;
+    const first = blobs[0];
+    assert.ok(first);
+    const previous = first.size;
+    first.size = 20000;
+    (manifest.counts as { blob_bytes: number }).blob_bytes += 20000 - previous;
+  });
+  const perFileReport = await verifyBackup({ backupDir: perFile.backupDir });
+  assert.ok(issueCodes(perFileReport).includes("BACKUP_FILE_TOO_LARGE"), JSON.stringify(perFileReport.issues));
+
+  const total = await makeBackup(t);
+  const manifest = readManifest(total.backupDir);
+  const entryCount = 65537;
+  const entrySize = 16 * 1024;
+  manifest.blobs = Array.from({ length: entryCount }, (_, index) => ({
+    name: `blob_${index.toString().padStart(6, "0")}`,
+    size: entrySize,
+    sha256: "0".repeat(64),
+  }));
+  manifest.counts = { blobs: entryCount, blob_bytes: entryCount * entrySize };
+  rewriteManifest(total.backupDir, manifest);
+  const totalReport = await verifyBackup({ backupDir: total.backupDir });
+  assert.ok(
+    issueCodes(totalReport).includes("BACKUP_TOTAL_BYTES_EXCEEDED"),
+    JSON.stringify(totalReport.issues.slice(0, 5)),
+  );
+});

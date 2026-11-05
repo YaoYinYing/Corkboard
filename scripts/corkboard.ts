@@ -806,6 +806,17 @@ function backupOption(value: string | undefined, name: string): string {
   return value;
 }
 
+// Operator-facing error text must not expose an absolute path (for example a
+// temporary staging directory) on stderr.
+function redactPaths(message: string): string {
+  return message.replace(/(?:\/[A-Za-z0-9._-]+)+/g, "<path>");
+}
+
+function printCliFailure(code: string, message: string, json: boolean): void {
+  if (json) console.log(JSON.stringify({ ok: false, code }));
+  console.error(`corkboard: ${redactPaths(message)}`);
+}
+
 function printVerifyIssues(report: {
   issues: Array<{ code: string; file?: string }>;
   issues_truncated: boolean;
@@ -819,12 +830,14 @@ function printVerifyIssues(report: {
 
 // Creates a consistent SQLite snapshot plus an exact copy of the blob
 // directory into a new 0700 directory. Never writes to the source.
-async function backupCommand(values: Values): Promise<void> {
+async function backupCommand(values: Values, extraPositionals: number): Promise<void> {
+  if (extraPositionals > 0) throw new BackupCliError("backup accepts no positional arguments");
   const dataDir = backupOption(values["data-dir"], "--data-dir");
   const outDir = backupOption(values.out, "--out");
+  const json = values.json === true;
   try {
     const summary = await createBackup({ dataDir, outDir });
-    if (values.json === true) {
+    if (json) {
       console.log(JSON.stringify(summary));
       return;
     }
@@ -834,30 +847,35 @@ async function backupCommand(values: Values): Promise<void> {
     console.log(`created_at: ${summary.created_at}`);
   } catch (error) {
     if (error instanceof BackupError) {
-      if (values.json === true) {
-        console.log(JSON.stringify({ ok: false, code: error.code }));
-      } else {
-        console.error(`corkboard: ${error.message}`);
-      }
+      printCliFailure(error.code, error.message, json);
       process.exitCode = 1;
       return;
     }
-    throw error;
+    printCliFailure("BACKUP_FAILED", error instanceof Error ? error.message : "backup failed", json);
+    process.exitCode = 1;
   }
 }
 
 // Validates the manifest, every size/digest, required and unexpected entries,
 // PRAGMA integrity_check, schema compatibility, and blob referential integrity.
-async function verifyBackupCommand(values: Values): Promise<void> {
+async function verifyBackupCommand(values: Values, extraPositionals: number): Promise<void> {
+  if (extraPositionals > 0) throw new BackupCliError("verify accepts no positional arguments");
   const backupDir = backupOption(values.backup, "--backup");
+  const json = values.json === true;
   let report;
   try {
     report = await verifyBackup({ backupDir });
   } catch (error) {
-    if (error instanceof BackupInspectError) throw new BackupCliError(error.message);
-    throw error;
+    if (error instanceof BackupInspectError) {
+      printCliFailure("BACKUP_INSPECT_FAILED", error.message, json);
+      process.exitCode = 2;
+      return;
+    }
+    printCliFailure("VERIFY_FAILED", error instanceof Error ? error.message : "verify failed", json);
+    process.exitCode = 1;
+    return;
   }
-  if (values.json === true) {
+  if (json) {
     console.log(JSON.stringify(report));
   } else {
     console.log(`ok: ${report.ok ? "yes" : "no"}`);
@@ -875,12 +893,14 @@ async function verifyBackupCommand(values: Values): Promise<void> {
 
 // Verifies first, then installs into a temporary sibling and renames it. The
 // target must be absent or empty; nothing is ever overwritten.
-async function restoreCommand(values: Values): Promise<void> {
+async function restoreCommand(values: Values, extraPositionals: number): Promise<void> {
+  if (extraPositionals > 0) throw new BackupCliError("restore accepts no positional arguments");
   const backupDir = backupOption(values.backup, "--backup");
   const dataDir = backupOption(values["data-dir"], "--data-dir");
+  const json = values.json === true;
   try {
     const summary = await restoreBackup({ backupDir, dataDir });
-    if (values.json === true) {
+    if (json) {
       console.log(JSON.stringify(summary));
       return;
     }
@@ -888,14 +908,18 @@ async function restoreCommand(values: Values): Promise<void> {
     console.log(`database: ${summary.database.file} (${summary.database.size} bytes, sha256:${summary.database.sha256})`);
     console.log(`blobs: ${summary.blobs} (${summary.blob_bytes} bytes)`);
   } catch (error) {
-    if (error instanceof BackupInspectError) throw new BackupCliError(error.message);
+    if (error instanceof BackupInspectError) {
+      printCliFailure("BACKUP_INSPECT_FAILED", error.message, json);
+      process.exitCode = 2;
+      return;
+    }
     if (error instanceof RestoreError) {
-      if (values.json === true) {
+      if (json) {
         console.log(
           JSON.stringify({ ok: false, code: error.code, issues: error.issues }),
         );
       } else {
-        console.error(`corkboard: ${error.message}`);
+        console.error(`corkboard: ${redactPaths(error.message)}`);
         for (const issue of error.issues) {
           console.error(issue.file === undefined ? issue.code : `${issue.code}(${issue.file})`);
         }
@@ -903,7 +927,8 @@ async function restoreCommand(values: Values): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    throw error;
+    printCliFailure("RESTORE_FAILED", error instanceof Error ? error.message : "restore failed", json);
+    process.exitCode = 1;
   }
 }
 
@@ -943,11 +968,11 @@ async function main(): Promise<void> {
     case "doctor":
       return doctorCommand(values, positionals.length - 1);
     case "backup":
-      return backupCommand(values);
+      return backupCommand(values, positionals.length - 1);
     case "verify":
-      return verifyBackupCommand(values);
+      return verifyBackupCommand(values, positionals.length - 1);
     case "restore":
-      return restoreCommand(values);
+      return restoreCommand(values, positionals.length - 1);
     case "serve":
       await startServer();
       return;
@@ -1009,6 +1034,23 @@ if (isEntryPoint()) {
       ((command === "prune" || backupCommandName) && parseFailure)
         ? 2
         : 1;
+    if (backupCommandName) {
+      // Commands handle their own runtime failures; reaching here means a usage
+      // error or an unexpected escape. JSON mode still gets one stdout object.
+      if (process.argv.slice(2).includes("--json")) {
+        const code =
+          exitCode === 2
+            ? "USAGE_ERROR"
+            : command === "verify"
+              ? "VERIFY_FAILED"
+              : command === "restore"
+                ? "RESTORE_FAILED"
+                : "BACKUP_FAILED";
+        console.log(JSON.stringify({ ok: false, code }));
+      }
+      console.error(`corkboard: ${redactPaths(message)}`);
+      process.exit(exitCode);
+    }
     console.error(`corkboard: ${message}`);
     process.exit(exitCode);
   });
