@@ -37,7 +37,7 @@ Flags (defaults come from the profile):
 | `--concurrency <n>` | Bounded in-flight HTTP requests, 1–64 |
 | `--expiry-messages <n>` | Messages created with a future expiry and then expired, 1–1000 |
 | `--rate-limit-requests <n>` | Rapid requests in the dedicated rate-limit server, 6–500 (minimum 6 so the fixed burst of 5 exposes both a `200` and a `429`) |
-| `--base-sha <sha>` | Override the reported base revision (otherwise `git rev-parse HEAD`); must be hexadecimal |
+| `--base-sha <sha>` | Override the reported base revision (otherwise `git rev-parse HEAD`); must be 4–64 hexadecimal characters. The report does not mark that the value was overridden |
 
 The four count flags replace the profile's counts in every scenario and in the reported
 `config`; speaker counts, prune backlog, samples, and latency guards stay profile-defined.
@@ -67,7 +67,7 @@ Scenarios and their assertions:
 | `boundary` | 8192-byte text accepted, 8193-byte text rejected | `201` then `400 VALIDATION_ERROR`; exactly one message stored |
 | `concurrent_speakers` | 4/8 speakers exchanging messages, with replies to another speaker's seed | All expected messages created; reply references retained; the project lists in ascending unique `seq` |
 | `metadata_search_pagination` | Summary search (`q=`) and `after_seq` cursor pages while the concurrent-speaker phase runs | All rows returned exactly once in ascending order; page cursors advance and terminate; search hits match the planted count |
-| `unauthorized_revoked` | No credential, invalid credential, revoked credential, member without a grant, non-member; revoked send | `401 UNAUTHENTICATED` (no/invalid/revoked), `403 FORBIDDEN` (no grant), `404 NOT_FOUND` (non-member); the revoked send writes nothing |
+| `unauthorized_revoked` | No credential, invalid credential, revoked credential, member without a grant, non-member; revoked send | `401 UNAUTHENTICATED` (no/invalid/revoked), `403 FORBIDDEN` (no grant), `404 NOT_FOUND` (non-member); the revoked send adds no listed (seq-visible) message |
 | `body_expiry` | Future-expiry messages, injected-clock `expireDueBodies`, then body/list checks | All due messages expired, all ciphertext blobs deleted, zero failures; body fetch is `410 BODY_EXPIRED`; metadata survives as `expired` |
 | `operator_cleanup` | Real `expire-bodies` and `prune` CLI commands on the temporary installation | Both exit `0`; `expire-bodies` reports zero failures; `prune` deletes the backdated revoked-session backlog; message counts are unchanged |
 | `rate_limit_burst` | A second server on the temp installation with 30/minute, burst 5 | At least one `200` and one `429 RATE_LIMITED` with integer `Retry-After >= 1`; no other status |
@@ -86,7 +86,8 @@ revision and `dirty` flag, node/platform/arch/cpu counts, resolved config, and:
 - `scenarios.<name>.requests`, `statuses`, `error_codes`, `latency_ms`
   (`count`, `p50`, `p95`, `max` in milliseconds), and scenario-specific `details`.
 - `correctness.passed` / `correctness.failures`: the load-bearing result. Exit code is
-  `1` for any failure and `0` otherwise.
+  `0` on pass, `1` on any correctness failure, `2` on invalid arguments, and `130`/`143`
+  when the harness handles `SIGINT`/`SIGTERM`.
 - `thresholds`: coarse latency guards. `environment_dependent` is always `true`.
   A breach is recorded in `breaches` but does **not** change the exit code, because a
   slow or contended machine is not a correctness failure.
@@ -130,7 +131,7 @@ platform:     linux x64, 40 cpus
 | `boundary` | 2 | `201×1`, `400×1` | 2.3 / 10.8 / 10.8 | 8192 bytes accepted, 8193 rejected |
 | `concurrent_speakers` | 42 | `200×2`, `201×40` | 16.5 / 24.9 / 26.2 | 4 speakers, 40 messages, 16 replies, listing page |
 | `metadata_search_pagination` | 5 | `200×5` | 1.9 / 3.9 / 3.9 | 200 ordered rows in 2 full pages, 20 search hits |
-| `unauthorized_revoked` | 6 | `401×4`, `403×1`, `404×1` | 1.1 / 1.4 / 1.4 | revoked send wrote 0 rows |
+| `unauthorized_revoked` | 6 | `401×4`, `403×1`, `404×1` | 1.1 / 1.4 / 1.4 | revoked send added no listed message |
 | `body_expiry` | 42 | `200×2`, `201×20`, `410×20` | 1.3 / 16.6 / 17.4 | 20 expired, 20 blobs deleted, 0 failures |
 | `operator_cleanup` | 0 | — | — | CLI exit 0/0, 25 sessions pruned, 261 messages unchanged |
 | `rate_limit_burst` | 12 | `200×5`, `429×7` | 1.2 / 20.3 / 20.3 | 7 rate-limited, `Retry-After` valid |

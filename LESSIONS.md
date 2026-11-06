@@ -1061,8 +1061,9 @@ prevented regression; when to remove the advice.
 - **Failure:** The first 8 KiB text-boundary plan used `"x".repeat(8192)`. That
   payload is rejected by the 2000-grapheme rule first, so it never exercises the
   8192-byte branch; a soak asserting only "rejected" would have passed while
-  testing the wrong limit. With four bytes per grapheme, 2000 graphemes reach only
-  8000 bytes, so the byte cap looks unreachable.
+  testing the wrong limit. Assuming at most four UTF-8 bytes per grapheme (as the
+  first plan did), 2000 graphemes reach only 8000 bytes, so the byte cap looks
+  unreachable; wider clusters such as a pair of regional indicators are 8 bytes.
 - **Reproducer:** `"x".repeat(8192)` returns `VALIDATION_ERROR` for graphemes; 1024
   flag clusters (two regional indicators, 8 bytes, one grapheme) are 8192 bytes and
   1024 graphemes and are accepted; adding one ASCII byte makes 8193 bytes and is
