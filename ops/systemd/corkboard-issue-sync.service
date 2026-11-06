@@ -1,0 +1,17 @@
+[Unit]
+Description=Corkboard GitHub Issue sync (one-shot)
+Documentation=file:///home/yinying/repo/Corkboard/docs/issue-sync.md
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15min
+WorkingDirectory=/home/yinying/repo/Corkboard
+ExecStart=/home/yinying/.nvm/versions/node/v24.22.1/bin/node --experimental-strip-types /home/yinying/repo/Corkboard/scripts/issue-sync.ts
+Environment=HOME=/home/yinying
+Environment=CORKBOARD_GH_BIN=/usr/bin/gh
+Environment=CORKBOARD_ISSUE_SYNC_ACCOUNT=YaoYinYing
+SyslogIdentifier=corkboard-issue-sync
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10

@@ -3,6 +3,88 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-06 — a durable scheduler needs the digest, not the cursor, as its dedupe truth
+
+- **Failure avoided:** A one-shot Issue sync that used only a "last seen timestamp"
+  cursor would miss a comment edited later or a comment whose page arrived out of
+  order. A cursor written before the append would lose an ingested record on a crash;
+  a cursor written after the append would re-ingest it if the append were not durable.
+- **Reproducer:** With two comments sharing a `createdAt` but edited in the reverse
+  order, timestamp-only cursors skip one. Killing the process between the digest
+  append and the cursor rename reproduces the crash window.
+- **Fix:** The append-only `digest.jsonl` is the source of truth. Records are keyed by
+  `(comment databaseId, updatedAt)`; every pass rebuilds the seen set from the digest
+  and writes the cursor afterwards with an atomic temp+rename. The cursor is
+  observability, not dedupe state. A malformed digest or cursor fails closed instead
+  of silently forgetting keys.
+- **Test:** `tests/unit/issue-sync.test.ts` covers repeat passes, edits under a new
+  `updatedAt`, in-batch duplicates, malformed digest/cursor, and lock exclusion.
+- **Prevents:** Duplicate Issue ingestion after a crash or a restarted session, and
+  missed edits that arrive out of order.
+- **Remove when:** GitHub offers a monotonic per-comment version that can be trusted
+  as the sole cursor without a local digest.
+
+## 2026-11-06 — discovery ordering and bodies are separate from ingestion
+
+- **Failure avoided:** `gh issue list --state all --limit 50` does not state its
+  ordering and, with `--json number,title,updatedAt,comments`, materializes every
+  comment body into the fixed `gh` output buffer. A 32 MiB buffer can then overflow
+  before the bounded per-issue comment pages are ever read, and "50 issues" was not
+  provably the most recently updated window.
+- **Reproducer / test:** Point a fake `gh` at the pass and assert the exact discovery
+  invocation. The committed full-pass test requires
+  `api repos/owner/repo/issues?state=all&sort=updated&direction=desc&per_page=50`
+  and asserts the discovery arguments contain neither `comments` nor `--json`.
+  Removing `sort=updated` makes the test fail (mutation-checked).
+- **Fix:** Discovery is the REST issues endpoint, updated-descending, with a numeric
+  `comments` count (`updated_at`/`comments` fields); pull-request records in that
+  response are filtered out. Bodies are fetched only through the existing bounded
+  `repos/<repo>/issues/<n>/comments?per_page=100&page=N` paging. A 60 s
+  per-`gh` timeout plus `TimeoutStartSec=15min` bounds wall time.
+- **Prevents:** An unordered window, buffer overflow on large comment histories, and
+  a discovery call that silently ingests stale or duplicate pages.
+- **Remove when:** a single GraphQL/REST query can return the ordered issue window
+  and per-issue comment counts without bodies, with a documented pagination bound.
+
+## 2026-11-06 — reclaiming a stale lock must never unlink blindly
+
+- **Failure avoided:** The first reclaim path read the lock, checked the PID, and
+  called `unlink(path)`; a different process could have replaced the stale lock with
+  a live one between the check and the unlink, so the pass would delete a live lock
+  and allow overlapping ingestion. The same pass also followed symlinked state paths
+  and could leak a temp file when `write`/`fsync` failed.
+- **Fix:** Reclaim renames the inspected lock to a unique `.stale-*` name, then reads
+  the renamed file and proceeds only if it still carries the inspected token; on a
+  mismatch it restores the file when the path is free and fails closed. A live lock
+  is never deleted. The state directory and cursor/digest/log/lock paths are
+  `lstat`ed and symlinks are rejected; `atomicWriteFile` wraps open/write/fsync/
+  rename in one catch that unlinks the temp file.
+- **Test:** `tests/unit/issue-sync.test.ts` covers stale-PID reclaim (new token,
+  no `.stale-*` residue, release removes the lock), live-lock survival, symlinked
+  state dir/cursor/log with sentinel files unchanged, and temp-file cleanup on a
+  failed write and a failed rename.
+- **Prevents:** Two concurrent passes after a crash, writing through a symlink
+  outside the state directory, and accumulating `.tmp-*` files after a failed pass.
+- **Remove when:** the platform offers an atomic compare-and-swap lock primitive and
+  filesystem containment, rather than lstat/rename conventions.
+
+## 2026-11-06 — systemd rate-limits successful one-shot starts too
+
+- **Failure:** A `Type=oneshot` service with `StartLimitBurst=3` and
+  `StartLimitIntervalSec=30min` refused the fourth manual start inside two minutes
+  ("start of the service was attempted too often") even though all three previous
+  runs exited `0`. Successful one-shot starts count toward the limit.
+- **Reproducer:** `systemctl --user start corkboard-issue-sync.service` three times,
+  then a fourth within the interval; the fourth fails before `ExecStart`.
+- **Fix:** Do not put a start-rate limit on a timer-driven one-shot that the operator
+  may also run manually. The hourly timer plus `Persistent=true` is the retry
+  mechanism; a failure stays visible in `status`/journal. Recover with
+  `systemctl --user reset-failed <unit>` if a limit was ever configured.
+- **Prevents:** A correct sync pass being blocked by an earlier success, and an
+  auto-restart storm hidden behind a rate limit.
+- **Remove when:** systemd stops counting successful starts, or the unit gains a
+  genuinely different retry design.
+
 ## 2026-11-06 — rotation must copy stored grants, not re-derive them
 
 - **Failure avoided:** A `rotate-key` built as "revoke, then call `issue-key` with the

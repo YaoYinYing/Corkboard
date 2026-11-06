@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Corkboard GitHub Issue sync
+
+[Timer]
+OnCalendar=*-*-* *:38:00
+Persistent=true
+AccuracySec=1min
+Unit=corkboard-issue-sync.service
+
+[Install]
+WantedBy=timers.target
