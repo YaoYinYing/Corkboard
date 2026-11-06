@@ -335,8 +335,11 @@ authorization path, a mutation, or body access.
 - **Bounded replay.** `limit` is 1–100, cursors are non-negative safe integers,
   and `after_seq`/`before_seq` are mutually exclusive. The pager derives links
   from returned rows and an internal `hasMore` probe, never loops, and "jump to
-  latest" uses `Number.MAX_SAFE_INTEGER` as a bounded `before_seq`. No
-  unbounded fetch, recursive request, or client polling exists.
+  latest" uses `Number.MAX_SAFE_INTEGER` as a bounded `before_seq`. The dashboard
+  has no unbounded fetch, recursive request, or client polling. A separate
+  documented REST polling reference client (`scripts/poll.ts`, see
+  [`polling.md`](./polling.md)) runs outside the browser and is not part of this
+  page's request path.
 - **No new writes or logging.** Filtered and paged GETs create no message,
   receipt, body, membership, or credential row. The only write on an
   authenticated page request remains the session `last_seen_at` refresh. Request

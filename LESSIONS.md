@@ -1414,3 +1414,120 @@ prevented regression; when to remove the advice.
   behavior, and a missing-object regression hiding behind green crypto/FK tests.
 - **Remove when:** a storage lifecycle API can deterministically remove a committed
   object row (with its message transition) and the test covers that branch too.
+
+## 2026-11-06 — a durable cursor follows confirmation, not intent
+
+- **Failure:** an at-least-once poller can silently lose a message if it advances its
+  durable `after_seq` cursor when it *sends* `mark_read` (or after processing) rather
+  than after the server's confirmed outcome (a receipt or a definitive
+  `410 BODY_EXPIRED` tombstone). A lost response leaves the client unsure
+  whether the server recorded the receipt; advancing would skip the message forever.
+  The same reference client also risks leaking its bearer credential if it prints an
+  untrusted summary verbatim: a hostile or buggy message can echo the token back into
+  a terminal or log.
+- **Reproducer:** `tests/unit/poll.test.ts` "an uncertain mark_read is retried with
+  the same request and reprocesses on restart" runs three failed attempts for seq 1,
+  asserts the cursor file did not advance, then runs a second pass from seq 0 and
+  asserts the consumer saw seq 1 twice. "the credential is never printed, logged, or
+  placed in a URL" returns a summary containing the token and asserts stdout/stderr
+  and every request URL exclude it.
+- **Fix:** a message's cursor advance is written after `POST .../read` returns `200`
+  naming the requested `message_id` and the `/me` speaker. The sole other advance is
+  the definitive `410 BODY_EXPIRED` tombstone, which can never produce a receipt.
+  Network/`429`/`5xx` retries repeat the identical idempotent POST; any other
+  definitive rejection, or an exhausted retry, leaves the cursor unchanged. Cursor
+  replacement is an atomic `0600` temp-file + fsync + rename bind to
+  `(project_id, speaker_id)`. Every emitted line is redacted, with raw fields redacted
+  before JSON/terminal escaping; `--show-summary` prints metadata only. Dedupe on
+  `message_id`/`(project_id, seq)` is documented as consumer-owned.
+- **Prevents:** treating a sent request as a committed acknowledgement, losing a
+  message across a crash or lost response, and leaking a credential through untrusted
+  message metadata.
+- **Remove when:** the consumer's acknowledgement and its durable cursor are one
+  storage transaction owned by the consumer, rather than an ordered pair of a remote
+  idempotent POST and a local cursor file.
+
+## 2026-11-06 — an abort lifetime that ends at headers does not bound a body
+
+- **Failure:** The first polling client cleared its request timeout/abort
+  controller in `finally` as soon as `fetch()` resolved headers, then called
+  `response.json()`. A server that sent headers and stalled the body could hang the
+  client forever past the documented 15-second deadline, and the parsed body had no
+  byte cap. The same applied to error-body parsing.
+- **Reproducer:** `tests/unit/poll.test.ts` "a stalled response body is aborted at
+  the request deadline" returns a stream that never ends; the client rejects with
+  `TIMEOUT` at a 30 ms deadline. "a signal during a body read stops the client
+  without advancing" aborts mid-stream and asserts a clean stop. "an oversized body
+  fails closed, including an error body" proves the cap for a success and an error
+  response.
+- **Fix:** Keep the scoped controller and timer live until the body is fully
+  consumed, and stream every body through a hard 1 MiB cap. Aborting the controller
+  cancels the stream, so a stalled body rejects. `Content-Length` is never trusted;
+  identity, list, `mark_read` success, and error bodies all use the same reader.
+- **Prevents:** A header-then-stall server holding a client forever and unbounded
+  response materialization.
+- **Remove when:** the runtime supplies a body-read deadline/limit primitive with
+  equivalent semantics and the client delegates to it.
+
+## 2026-11-06 — redact before escaping, and never interpolate an unescaped server code
+
+- **Failure:** Server-derived `error.code` values were interpolated into stderr
+  without terminal escaping, so a hostile server could inject ESC/control sequences
+  into an operator's terminal. Escaping first would also break redaction of a
+  credential that itself contains control characters, because the escaped form no
+  longer matches the raw credential.
+- **Reproducer:** `tests/unit/poll.test.ts` "server error codes are redacted and
+  terminal-escaped" returns an error code containing ESC and the token, then asserts
+  stderr has no raw ESC, includes the `\u001b` escape, and contains `[REDACTED]`.
+  "control and bidirectional summary characters are escaped in output" checks the
+  summary path, and "a control-character credential echoed in a summary is redacted"
+  proves raw-field redaction happens before escaping.
+- **Fix:** Redact raw field values before JSON/terminal escaping, then sanitize the
+  assembled line again at the output boundary. Line-level redaction after escaping is
+  insufficient: escaping hides a credential that contains a control character from the
+  redactor. A second test echoes a control-character credential in a summary and
+  asserts the printable prefix and the raw control character are absent.
+- **Prevents:** Terminal escape injection through server metadata and credential
+  leakage through an escaped spelling.
+- **Remove when:** one shared output sink enforces redact-then-escape for every log
+  and terminal write.
+
+## 2026-11-06 — an unacknowledgeable tombstone must not wedge the cursor
+
+- **Failure:** An at-least-once poller that refuses to advance on `410 BODY_EXPIRED`
+  wedges forever: the server can never create a receipt for an expired body, so every
+  restart retries the same message and re-invokes the consumer.
+- **Reproducer:** `tests/unit/poll.test.ts` "BODY_EXPIRED advances without a receipt
+  while other failures do not" returns `410 BODY_EXPIRED` and asserts the cursor
+  advances; the same test asserts `401`/`403`/`404` and exhausted `5xx` retries do
+  not advance.
+- **Fix:** Treat only the server's definitive `410` + `BODY_EXPIRED` as a consumed
+  metadata tombstone: log an escaped status, advance the cursor, and create no
+  receipt. Any other rejection or transient failure keeps the cursor unchanged.
+- **Prevents:** One expired row permanently blocking a project, and silently skipping
+  a message whose acknowledgement might still succeed.
+- **Remove when:** the service offers an explicit "unreadable tombstone" outcome or a
+  consumer-owned transactional cursor that records the decision.
+
+## 2026-11-06 — trailer SHAs have types; verify the type before committing
+
+- **Failure:** The pushed docs/state tail `3a03613` recorded `Tree-SHA:
+  6b40b94afa11b3563ea1804cff6eb8ae29ed9951` and `Candidate-SHA:
+  d33409df9398a422f81590b107310e53ada6a116`. Both nine-hex prefixes look alike, but
+  the tree is `d33409d…` and `6b40b94…` is the pre-amend candidate commit. The tail
+  cannot be corrected in place without a forbidden force-push.
+- **Reproducer:** `git log -1 --format=%B 3a03613 | git interpret-trailers --parse`
+  shows the swapped fields; `git rev-parse 3a03613^{tree}` returns `d33409d…` while
+  `git cat-file -t 6b40b94` returns `commit`, and `git rev-parse 6b40b94^{tree}` is
+  also `d33409d…`.
+- **Fix:** Record an explicit correction note with both correct values and leave the
+  pushed commit untouched. Going forward, verify each trailer's type before
+  committing: `git write-tree` / `git rev-parse HEAD^{tree}` for `Tree-SHA`,
+  `git write-tree` output for a staged tree, and `git rev-parse HEAD` before a
+  message-only amend for `Candidate-SHA`; check `git cat-file -t <sha>` when a value
+  could be either.
+- **Prevents:** Swapping a tree hash and a commit hash in a trailer, and discovering
+  it only after the commit is pushed and immutable under the campaign's no-force-push
+  rule.
+- **Remove when:** a local commit hook or release script validates that `Tree-SHA`
+  names a tree and `Candidate-SHA` names a commit with that same tree.

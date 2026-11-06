@@ -17,7 +17,8 @@ message, model prompt, tool argument, or tool output.
 
 REST remains the authoritative API. Every MCP tool calls the same service functions and
 authorization layer as REST (`src/service/`); there is no MCP-specific authorization
-decision.
+decision. For a local CLI agent that polls REST instead of speaking MCP, see
+[`polling.md`](./polling.md).
 
 ## Endpoint and authentication
 

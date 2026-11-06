@@ -96,6 +96,15 @@ admin action. See
 [`docs/web-ui.md`](docs/web-ui.md) for the authorization model, CSP, accessibility,
 and limitations.
 
+### Agent polling
+
+[`docs/polling.md`](docs/polling.md) documents the at-least-once polling contract and
+the reference client `scripts/poll.ts`: a scoped bearer credential from the environment
+or a `0600` file, bounded `after_seq` pages, strict project/row validation, explicit
+idempotent `mark_read`, and an atomic `0600` cursor that advances only after a
+confirmed receipt or a definitive `410 BODY_EXPIRED` tombstone. The default processing step is a no-op; summaries are
+untrusted metadata and are never executed. The server is not an agent scheduler.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

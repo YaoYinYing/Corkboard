@@ -112,8 +112,9 @@ link can lead to one empty page. It is bounded to a single page and keeps the
 filter state. An **empty** result renders only the empty-state message, plus a
 "Jump to latest" link when a cursor is present and the page is not already the
 jump-to-latest page; it renders no older or newer link. All navigation is bounded
-by the validated `limit`; there is no unbounded loop, recursive fetch, or client
-polling.
+by the validated `limit`; the dashboard has no unbounded loop, recursive fetch, or
+client polling. The separate agent polling reference client is documented in
+[`polling.md`](./polling.md).
 
 ### Active filter state
 
