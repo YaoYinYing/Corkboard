@@ -83,6 +83,31 @@ async function addPasswordAccount(
   );
 }
 
+// Session publication now re-checks the session row atomically. Tests that
+// build a session principal without an HTTP sign-in still need a real row for
+// that check to observe; the token/CSRF verifiers are never used here.
+async function addSyntheticSession(
+  fx: ServiceFixture,
+  sessionId: string,
+  accountId: string,
+): Promise<void> {
+  const now = fx.deps.now();
+  await fx.db.run(
+    `INSERT INTO sessions
+       (id, account_id, token_prefix, token_verifier, csrf_verifier,
+        created_at, last_seen_at, expires_at, revoked_at)
+     VALUES (?, ?, ?, 'unused', 'unused', ?, ?, ?, NULL)`,
+    [
+      sessionId,
+      accountId,
+      sessionId.slice(0, 16),
+      now.toISOString(),
+      now.toISOString(),
+      new Date(now.getTime() + 12 * 60 * 60 * 1000).toISOString(),
+    ],
+  );
+}
+
 async function loginAsWithCsrf(
   app: App,
   email: string,
@@ -365,6 +390,7 @@ test("a membership removed mid-request prevents publication", async (t) => {
   const { fx } = await withApp(t);
   await createProjectAccount(fx);
   const session = { sessionId: "sess_mid", accountId: "acct_a" };
+  await addSyntheticSession(fx, session.sessionId, session.accountId);
   const principal = await resolveSessionSendPrincipal(fx.deps, session, "proj_a", "spk_a");
   const text = "Mid-request body";
   const digest = `sha256:${await sha256Hex(new TextEncoder().encode(text))}`;
@@ -426,6 +452,7 @@ test("a concurrent publication is a successful replay with no duplicate", async 
   const { fx } = await withApp(t);
   await createProjectAccount(fx);
   const session = { sessionId: "sess_replay", accountId: "acct_a" };
+  await addSyntheticSession(fx, session.sessionId, session.accountId);
   const principal = await resolveSessionSendPrincipal(fx.deps, session, "proj_a", "spk_a");
   const text = "Concurrent publication body";
   const digest = `sha256:${await sha256Hex(new TextEncoder().encode(text))}`;
@@ -486,6 +513,7 @@ test("deactivating the project during a session send prevents publication", asyn
   const { fx } = await withApp(t);
   await createProjectAccount(fx);
   const session = { sessionId: "sess_project_status", accountId: "acct_a" };
+  await addSyntheticSession(fx, session.sessionId, session.accountId);
   const principal = await resolveSessionSendPrincipal(fx.deps, session, "proj_a", "spk_a");
   const text = "Deactivated project body";
   const digest = `sha256:${await sha256Hex(new TextEncoder().encode(text))}`;
@@ -521,6 +549,7 @@ test("a tampered idempotency record cannot publish another speaker's row", async
   await fx.addSpeaker("spk_b", "acct_b");
   await fx.addMembership("proj_a", "spk_b", ALL_SCOPES);
   const session = { sessionId: "sess_tamper", accountId: "acct_a" };
+  await addSyntheticSession(fx, session.sessionId, session.accountId);
   const principal = await resolveSessionSendPrincipal(fx.deps, session, "proj_a", "spk_a");
 
   // A pending row that belongs to another speaker, with an idempotency record

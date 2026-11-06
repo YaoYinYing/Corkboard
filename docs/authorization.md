@@ -149,9 +149,22 @@ A session may send only as a speaker it owns. All of:
    the project is active; and a non-removed membership exists for
    `(project_id, speaker_id)` with `message.send`; otherwise the uniform
    `NOT_FOUND`.
+3. The server-issued session row `principal.sessionId` is still active: not revoked,
+   not past its absolute expiry, and inside the idle window, with an active account.
+   This predicate is part of the same conditional publication `UPDATE` as the
+   ownership and membership checks. Stored session timestamps are canonical
+   `toISOString()` values written by the application, and no API accepts a
+   client-supplied session timestamp. The predicate compares them with SQLite
+   `julianday()`, so an unparseable stored value yields `NULL` and the comparison is
+   not true, failing closed; SQLite may still parse other non-canonical forms.
+   `src/service/sessions.ts` parses the same columns with `new Date(...).getTime()`
+   and rejects non-finite results via `Number.isFinite` before comparing.
 
 This is deliberately separate from `authorizeProject`'s read-only session branch.
-The predicate is folded into the finalize `UPDATE` for a session send.
+The predicate is folded into the finalize `UPDATE` for a session send, so a logout or
+session revocation that lands after request authentication but before publication
+prevents the message atomically. `tests/security/adversarial-probes.test.ts` revokes
+the session between the blob write and finalization and asserts no committed message.
 
 ### Project-owner administration
 
@@ -256,7 +269,16 @@ the action. Auth is required for every row unless stated.
 - Bearer re-checks narrow but do not eliminate TOCTOU. A revocation committing
   after the final re-check and before the atomic SQL statement or plaintext write
   is not prevented. See `docs/architecture.md` and
-  `docs/security-operations.md`.
+  `docs/security-operations.md`. Session sends are stronger: the active session row
+  is part of the same conditional `UPDATE` that publishes, so session revocation,
+  idle/absolute expiry, membership removal, and a lost grant fail closed atomically.
+  The session timestamps are canonical `toISOString()` values compared with
+  `julianday()`; an unparseable stored value yields `NULL` and fails closed. D1 is
+  SQLite-backed and `julianday()` is a core SQLite date function, so this is portable
+  by the SQLite contract; D1 itself is not executed in this repository.
+- An idempotency replay re-checks that the recorded message still belongs to the
+  authenticated speaker. A row repointed out of band at another speaker's message is
+  `NOT_FOUND`; that state requires database write access, not an API call.
 - Metadata-only reads (`list`, `get`, `/me`, project enumeration) are authorized
   once at request start.
 - There is no cross-project read, no cross-project message reference, and no

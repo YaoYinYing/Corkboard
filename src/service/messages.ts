@@ -33,6 +33,7 @@ import {
   type Principal,
   type ServiceDeps,
 } from "./auth.ts";
+import { SESSION_IDLE_MS } from "./sessions.ts";
 
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
@@ -298,20 +299,31 @@ async function publish(
 ): Promise<{ row: MessageRow; finalized: boolean }> {
   let finalized = false;
   if (principal.sessionViewer === true) {
+    // The session id is set only by the session resolvers; a missing value is
+    // a programming error and must never widen into the bearer path.
+    const sessionId = principal.sessionId;
+    if (sessionId === undefined || sessionId === "") {
+      throw new AppError("NOT_FOUND");
+    }
+    const now = deps.now();
     await deps.db.transaction(async (tx) => {
       // Write-only, result-independent callback: the entire session predicate
-      // (ownership, active account/speaker/project, non-removed membership,
-      // message.send) is part of one conditional UPDATE, so a removal cannot
-      // land between an authorization read and the publication write. No
-      // SELECT and no affected-row count is observed; a D1 adapter can submit
-      // this callback as one batch without returning results.
+      // (session row, ownership, active account/speaker/project, non-removed
+      // membership, message.send) is part of one conditional UPDATE, so a
+      // logout or removal cannot land between an authorization read and the
+      // publication write. No SELECT and no affected-row count is observed; a
+      // D1 adapter can submit this callback as one batch without returning
+      // results.
       await finalizeSessionMessage(tx, {
         projectId,
         messageId,
         bodyObjectId,
-        committedAt: deps.now().toISOString(),
+        committedAt: now.toISOString(),
         speakerId: principal.speakerId,
         accountId: principal.accountId,
+        sessionId,
+        sessionNow: now.toISOString(),
+        sessionIdleCutoff: new Date(now.getTime() - SESSION_IDLE_MS).toISOString(),
       });
     });
     // Infer the outcome only from committed row state. Ready/expired is a
@@ -594,6 +606,13 @@ async function replayOrResume(
   if (record.message_id === null) throw new AppError("UNAVAILABLE");
   const messageId = record.message_id;
   const existing = await loadMessage(deps, projectId, messageId);
+  // The idempotency row is scoped to the authenticated speaker. A row whose
+  // message belongs to another speaker is out-of-band tampering: fail closed
+  // instead of replaying another speaker's metadata (or resuming their row).
+  // The uniform NOT_FOUND matches the existing pending-row impossibility test.
+  if (existing !== undefined && existing.sender_speaker_id !== principal.speakerId) {
+    throw new AppError("NOT_FOUND");
+  }
 
   if (existing !== undefined && (existing.body_state === "ready" || existing.body_state === "expired")) {
     return { status: "done", result: sendResult(existing, bodyDigest) };

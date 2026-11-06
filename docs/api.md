@@ -34,6 +34,17 @@ UTC ISO-8601 with milliseconds unless stated otherwise.
 A bearer token authenticates a **speaker**. The server derives `speaker_id` from the
 token; clients cannot submit an authoritative sender.
 
+There is no application JWT/OIDC path. The only accepted bearer values are this
+server's opaque `cb_` speaker credentials and `cb_oat_` OAuth access credentials.
+A JWT-shaped value, including one with `alg: none` or admin/speaker claims, is treated
+as an unknown credential and returns `401 UNAUTHENTICATED`; no application or service
+code imports, parses, verifies, or trusts a JWT claim. `jose@6.2.15` is a transitive
+dependency of `@modelcontextprotocol/sdk`, never imported by `src/` and never loaded by
+application auth code (the SDK's optional client auth-extensions module may import it).
+`tests/security/adversarial-probes.test.ts` asserts the rejection, the
+absence of a direct JWT dependency, the absence of JWT imports in `src/`, and the
+lockfile's `jose` reachability through only the MCP SDK.
+
 A human session authenticates an **account**, never a speaker and never a credential.
 It is accepted only by the three `/api/v1/session` routes, the OAuth sign-in/consent
 pages (which may create a session), and the HTML dashboard pages (which derive an
@@ -635,7 +646,9 @@ Counts are a snapshot of current rows and are not paginated or time-windowed.
 Requires `message.send`, active membership, and a grant for the calling credential. Header `Idempotency-Key` is mandatory
 (1–128 non-space printable ASCII characters, 0x21–0x7E). Idempotency is scoped to `(authenticated speaker, project, key)`: the same
 key in another speaker or project is independent, and a response is never returned
-across those boundaries.
+across those boundaries. An out-of-band row repointed at another speaker's message
+fails closed with `NOT_FOUND` instead of replaying that message's metadata; reaching
+that state requires database write access, not an API call.
 
 Body:
 

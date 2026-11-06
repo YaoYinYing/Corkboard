@@ -194,8 +194,10 @@ write.
   that writes a message. It does not use the viewer branch above; a dedicated
   authority re-validates, from storage and again inside the publication
   transaction, that the selected speaker is owned by the session account, the
-  account/speaker/project are active, the membership is non-removed, and the
-  membership capabilities include `message.send`. The stored sender is that
+  account/speaker/project are active, the membership is non-removed, the
+  membership capabilities include `message.send`, and the server-issued session row
+  is still active (not revoked, not past absolute expiry, inside the idle window).
+  The stored sender is that
   selected speaker. A foreign speaker (even a project member with
   `message.send`), an inactive speaker or account, a removed membership, a
   speaker without `message.send`, and an unreadable project are the same uniform
@@ -438,6 +440,64 @@ replay filters; key rotation/restore; active HTML attachments; OAuth redirect/PK
 refresh replay; CSRF/session fixation; CDN credential downgrade; sender digest
 forgery or omission; bit-flipped ciphertext; AAD/digest substitution across
 project/message/object; truncated or swapped blob.
+
+## Adversarial probe matrix (TODO 352)
+
+Status: implemented and executed at this tree. The executable suite is
+`tests/security/adversarial-probes.test.ts` (20 tests: 15 top-level probes plus five
+session-predicate subtests). Every probe drives the real
+platform-neutral `createApp` router in-process; no authorization or service path is
+replaced with a stub. Existing coverage is cited instead of duplicated. Status,
+stable error code, and body shape are compared; **no constant-time or bit-identical
+timing claim is made**, and these probes do not assert one.
+
+| Clause | Probes | Result |
+| --- | --- | --- |
+| Object-level access control | Unknown and foreign project ids across project detail, stats, message list/send, and message metadata/body/read/expire; unknown and cross-project message ids while the caller is a member of both projects; foreign/unknown credential ids on credential revoke and grant routes; unknown/foreign speaker ids on credential and membership routes; audit-object and receipt-by-id absence. `/api/v1/projects` never lists the foreign project. | Non-members get the same `404 NOT_FOUND` shape for unknown and foreign objects. An active member without the explicit credential grant gets the documented `403 FORBIDDEN`. A foreign message id creates no receipt and its `read_by` is never exposed. Receipts have no id-addressable route; audit has no read route and `/overview` renders only the account's own rows. |
+| JWT claims | An `alg:none` token with admin/speaker claims and an HS256-shaped token are sent to `/api/v1/me`, project list, send, `/mcp`, and a session cookie. A `src/` import/use scan and a direct `package.json` dependency scan are paired with a lockfile reachability assertion. | **Not applicable: no application JWT exists.** Probe confirms rejection as an unknown opaque credential (`401 UNAUTHENTICATED`), not JWT validation. No application or service code imports, parses, verifies, or trusts a JWT claim, and there is no direct JWT dependency. `jose@6.2.15` is a transitive dependency of `@modelcontextprotocol/sdk`, never imported by `src/` and never loaded by application auth code (the SDK's optional client auth-extensions module may import it); the lockfile assertion pins that it is requested by no other package. |
+| Idempotency ownership | Same key by another speaker in the same project; same key in another project; same key + same/different payload; direct row repointing at another speaker's message. | Keys are scoped per `(speaker, project)`: three independent messages, no cross-speaker replay, and `200` replay only when the payload is identical. A different payload under the same key returns `409 CONFLICT` before any replay result. A tampered row (`NOT_FOUND`, no metadata echo) is **not API-reachable**; the probe requires database write access and is defense in depth. |
+| Time-of-check races | Injected blob-store seam revokes the bearer credential, removes the membership, or revokes the session after authentication and blob write, immediately before finalization; separate cases repoint the session account, deactivate the account, backdate the absolute/idle timestamps, and store an unparseable expiry timestamp. | All cases fail closed. Bearer revocation is `403 FORBIDDEN` (documented post-authentication order); membership removal is `404 NOT_FOUND`; session revocation, account rebinding, inactive account, absolute expiry, and idle expiry now prevent publication atomically, because the active session row is part of the conditional `UPDATE`. No sequence is allocated and no committed row is created; the provisional pending row/blob remains the documented reclaimable artifact. Stored session timestamps are canonical `toISOString()` and unparseable values fail the `julianday()` comparison closed. The bearer window after its final re-check and before the `UPDATE` is **not** prevented and is not faked here. |
+| Spoofed sender | REST JSON with `sender`, `sender_id`, `account_id`, `created_at`, `received_at`, `committed_at`, `seq`, `speaker_id`, `compression`, `body_digest`; MCP tool arguments with identity fields; web message form with extra identity/digest/time fields; OAuth consent form with extra `account_id`/`sender`/timestamps/`seq`. | Server identity and clock always win. Server-owned REST fields are `400`; unknown REST/web fields are ignored; MCP's strict schema rejects them; OAuth's issued token resolves to the selected owned speaker/account, never the injected identity. `client_sent_at` remains stored untrusted metadata, not authority. |
+| Hostile headers | `Host`, `X-Forwarded-For/Proto/Host/Prefix`, `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `X-HTTP-Method-Override`, `X-Original-URL`, `X-Rewrite-URL`; duplicate `Authorization`; 20 KB `Authorization`; duplicate `Content-Length`; `Content-Type` confusion; percent-encoded CRLF path; raw CR/LF header value; `OPTIONS`. | Forwarded/proxy headers are not read, echoed, or logged; routing and identity are unchanged. Duplicate/absurd auth is `401`; duplicate length and non-JSON login are `400`; method override is ignored. Percent-encoded CRLF remains an opaque `404` id with no header split or reflection. The HTTP platform rejects raw CR/LF header values before the app. No CORS headers. |
+| Origin / fetch metadata / CSRF | Login and dashboard POSTs with `Sec-Fetch-Site: cross-site`/`same-site`, foreign `Origin`, hostile `Referer`; OAuth consent without `X-CSRF-Token`; cross-site dashboard message write. | Cross-site/same-site and foreign Origin are `400` with no session cookie; `Referer` is not consulted; same-origin/`none` succeeds. A cross-site authenticated write writes nothing. OAuth consent without the session CSRF header is `403`; a hostile Origin does not substitute for it. |
+| Injection | SQL metacharacters in project/message ids, `sender`, `type`, and `q`; wildcard `%`/`_`; path traversal; JSON `__proto__`/`constructor`/`prototype`; 70 KB body; 20,000-deep JSON; markup/template syntax in project metadata, speaker name, message summary, body, and `q`. | All ids and filters stay parameterized; wildcard characters are literal; tables remain intact and the foreign project is never returned. `type`/`sender` injection-shaped values are `400 VALIDATION_ERROR`; `q` is always bound as a literal `LIKE` pattern, so `q=' OR 1=1 --` returns `200` with an empty list. Prototype keys are ignored and `Object.prototype` is unchanged. Bodies over 64 KiB are `413`; deep JSON is a bounded `400`, never `500`. Every rendered value is HTML-escaped, pages contain no executable markup, and the strict CSP is present. |
+| MCP scope and session isolation | Foreign project/message ids in list/get/send/mark_read; spoofed identity arguments; another credential's `Mcp-Session-Id`; unknown session id. | Service returns the same stable `NOT_FOUND`; no receipt or write occurs. Another credential's session and an unknown session are the same `404 Session not found`. Strict tool schemas reject spoofed fields before the service. |
+
+Non-applicable or deliberately out of scope:
+
+- **JWT validation.** No application JWT/OIDC issuer, parser, key, or claim path
+  exists; the clause is satisfied by proving rejection, not by validating claims.
+  `jose@6.2.15` is a transitive dependency of `@modelcontextprotocol/sdk`, never
+  imported by `src/` and never loaded by application auth code (the SDK's optional
+  client auth-extensions module may import it), and there is no direct JWT dependency.
+- **Receipt-by-id and audit-by-id routes.** Neither is implemented. Receipts appear
+  only as `read_by` on an authorized message; audit rows appear only in the
+  bounded owner-scoped `GET /overview`.
+- **Sort fields.** The message list has no client-selectable sort; ordering is fixed
+  server-side, so there is no sort-injection surface.
+- **HTTP request decompression and multipart bombs.** There is no HTTP request
+  decompression, multipart parsing, or upload surface; attachment ingestion remains
+  unimplemented. The cryptographic envelope does implement `gzip` with bounded
+  gunzip for stored bodies (`src/crypto/envelope.ts`); those probes are separate and
+  unchanged here. SSRF is inapplicable because no outbound URL fetch exists.
+- **Per-IP/proxy trust.** The application does not read `X-Forwarded-*` or
+  `CF-Connecting-IP`; trusting any of them is a reverse-proxy deployment decision
+  documented in `security-operations.md`.
+- **Timing equality.** Denial responses have the same status, code, and body shape,
+  but no constant-time guarantee is claimed.
+- **Session timestamp format.** Stored session timestamps are canonical
+  `toISOString()` values written by the application, and no API accepts a
+  client-supplied session timestamp. The publication predicate compares them with
+  `julianday()`, which yields `NULL` for an unparseable value and therefore fails
+  closed; SQLite may still parse other non-canonical forms.
+  `src/service/sessions.ts` parses the same columns with `new Date(...).getTime()`
+  and `Number.isFinite` guards for its request-time check.
+  D1 is SQLite-backed and `julianday()` is a core SQLite date function, so the
+  predicate is portable by the SQLite contract; D1 itself is unexecuted here.
+- **Bearer revocation after the final re-check.** A revocation that commits after
+  `publish`'s last authorization read but before its `UPDATE` can still race; this
+  window is documented, not simulated as passing. Session sends close the equivalent
+  window atomically because the session row is in the `UPDATE` predicate.
 
 ## First-slice coverage intent
 

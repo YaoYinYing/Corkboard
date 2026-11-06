@@ -67,7 +67,17 @@ const FINALIZE_SESSION_SQL = `UPDATE messages
         AND s.status = 'active'
         AND a.status = 'active'
         AND p.status = 'active'
-        AND instr(m.capabilities, '"message.send"') > 0)`;
+        AND instr(m.capabilities, '"message.send"') > 0)
+   AND EXISTS (
+     SELECT 1
+       FROM sessions ses
+       JOIN accounts sa ON sa.id = ses.account_id
+      WHERE ses.id = ?7
+        AND ses.account_id = ?6
+        AND ses.revoked_at IS NULL
+        AND sa.status = 'active'
+        AND julianday(ses.expires_at) > julianday(?8)
+        AND julianday(ses.last_seen_at) > julianday(?9))`;
 
 function isRetryable(error: unknown): boolean {
   if (!(error instanceof Error)) {
@@ -98,6 +108,12 @@ function delay(milliseconds: number): Promise<void> {
 
 export interface FinalizeSessionMessageInput extends FinalizeMessageInput {
   accountId: string;
+  /** Server-issued session id whose active row is part of the predicate. */
+  sessionId: string;
+  /** Absolute-expiry comparison bound (server clock, ISO-8601). */
+  sessionNow: string;
+  /** Idle-expiry lower bound (`now - SESSION_IDLE_MS`, ISO-8601). */
+  sessionIdleCutoff: string;
 }
 
 // Publishes only while the selected speaker still passes the session-send
@@ -119,6 +135,9 @@ export async function finalizeSessionMessage(
         input.projectId,
         input.speakerId,
         input.accountId,
+        input.sessionId,
+        input.sessionNow,
+        input.sessionIdleCutoff,
       ]);
       return;
     } catch (error) {

@@ -37,6 +37,12 @@ export interface Principal {
    * session authorization branch.
    */
   sessionViewer?: true;
+  /**
+   * Server-issued session row id, set only by the session resolvers. The
+   * session-send publication predicate re-checks this row atomically so a
+   * session revoked during the request cannot publish.
+   */
+  sessionId?: string;
 }
 
 export interface ProjectAccess {
@@ -345,6 +351,9 @@ export async function authorizeSessionSend(
   // membership's broader capability set.
   if (!principal.scopes.has("message.send")) throw new AppError("NOT_FOUND");
   if (principal.speakerId === "") throw new AppError("NOT_FOUND");
+  if (principal.sessionId === undefined || principal.sessionId === "") {
+    throw new AppError("NOT_FOUND");
+  }
   const membership = await sessionSendMembership(
     db,
     projectId,
@@ -393,6 +402,7 @@ export async function resolveSessionSendPrincipal(
     accountId: session.accountId,
     scopes: new Set<Scope>(["message.send"]),
     sessionViewer: true,
+    sessionId: session.sessionId,
   };
 }
 
@@ -439,6 +449,7 @@ export function sessionAccountPrincipal(session: {
     accountId: session.accountId,
     scopes: new Set<Scope>(["project.read"]),
     sessionViewer: true,
+    sessionId: session.sessionId,
   };
 }
 
@@ -478,6 +489,7 @@ export async function resolveSessionViewer(
         // The session principal carries only the requested read authority.
         scopes: new Set<Scope>([scope]),
         sessionViewer: true,
+        sessionId: session.sessionId,
       };
     }
   }

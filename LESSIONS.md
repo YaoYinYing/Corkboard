@@ -1645,3 +1645,25 @@ prevented regression; when to remove the advice.
 - **Prevents:** A green reproducibility check for a build that is not the one shipped.
 - **Remove when:** the build system emits a manifest or command definition that both
   paths consume directly.
+
+## 2026-11-06 — an atomic predicate must include the principal it authenticated with
+
+- **Failure avoided:** The session-send publication `UPDATE` carried the speaker,
+  account, project, and membership predicate but not the `sessions` row. A logout or
+  session revocation landing after request authentication and before finalization
+  could therefore still publish a message. Separately, an idempotency replay loaded
+  the recorded message by id alone; a row repointed out of band at another speaker's
+  message returned that speaker's metadata instead of failing closed.
+- **Reproducer:** With an injected blob-store seam, revoke the session after `put`
+  and before finalization; the old predicate committed the row. Repoint
+  `idempotency_keys.message_id` at a same-project message owned by another speaker
+  and re-send the same key/payload; the old replay path returned it.
+- **Fix:** Fold the active session row (revoked/absolute-expiry/idle/account status)
+  into `FINALIZE_SESSION_SQL`, carried by a server-set `Principal.sessionId`; and
+  compare `messages.sender_speaker_id` with the authenticated speaker before any
+  idempotency replay or resume.
+- **Prevents:** A "fail closed" claim that covers storage state but omits the session
+  or credential that authorized the request, and replay paths that trust a stored
+  object id without re-checking ownership.
+- **Remove when:** a single authorization object is bound into every atomic write and
+  every replay lookup, so these predicates cannot drift apart.
