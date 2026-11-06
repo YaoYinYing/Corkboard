@@ -316,9 +316,9 @@ recorded there.
 
 - [ ] Implement migration 001 for accounts, projects, speakers, memberships, credentials, messages, receipts, blob objects, idempotency, audit and settings; enable SQLite FK and WAL; D1 compatible SQL.
 - [ ] Create shared TypeScript domain and persistence interfaces with D1 adapter and local SQLite adapter; contract tests execute identical scenarios against both.
-- [ ] Implement server-generated project ID/message ID and atomic per-project `seq`; test 100+ parallel post attempts and rollback/failed upload without duplicates.
-- [ ] Implement server-generated UTC `received_at`/`committed_at`, validation of summaries, language/type, reference and project ownership.
-- [ ] Require and independently verify the sender-supplied plaintext SHA-256 (`body_digest`) before allocating a sequence or committing; mismatch returns `INTEGRITY_MISMATCH`.
+- [x] Implement server-generated project ID/message ID and atomic per-project `seq`; test 100+ parallel post attempts and rollback/failed upload without duplicates.
+- [x] Implement server-generated UTC `received_at`/`committed_at`, validation of summaries, language/type, reference and project ownership.
+- [x] Require and independently verify the sender-supplied plaintext SHA-256 (`body_digest`) before allocating a sequence or committing; mismatch returns `INTEGRITY_MISMATCH`.
 - [ ] Add reliable provisional-message (`seq = NULL`) → private blob write → atomic finalization workflow (single UPDATE assigns seq, publishes `ready`, trigger completes idempotency), retry/reconciliation, ordered-replay concurrency tests, crash recovery, and orphan garbage collection; run the shared contract against SQLite and a D1 adapter (live D1 recorded as an external gap if unavailable).
 - [x] Implement scoped, indexed list/replay/pagination and metadata-only search; test stable ordered replay across gaps/tombstones and bounded queries.
 - [x] Implement `read` receipt table, explicit idempotent `mark_read`, and summarized read state only for authorized project members. Require both `message.read` and `receipt.write`; verify the message is committed and its body integrity passes; pending, expired, corrupt, or inaccessible messages create no receipt. Receipts are client assertions, not proof of understanding or execution.
@@ -328,7 +328,7 @@ recorded there.
 
 ### Phase 2 — Crypto and secure attachment ingestion (**P0**)
 
-- [ ] Document cryptographic envelope version and security properties before writing code; use platform WebCrypto AES-GCM and secure random, no invented cipher.
+- [x] Document cryptographic envelope version and security properties before writing code; use platform WebCrypto AES-GCM and secure random, no invented cipher.
 - [ ] Bind the verified plaintext digest into the AEAD AAD and envelope; store a separate ciphertext SHA-256; verify both on every body read and fail closed with `INTEGRITY_FAILURE` (no content, no receipt).
 - [ ] Define platform root-key provisioning, key-version identifier, rotation, backup/restore test and deletion behavior; keys never stored in `service_settings`.
 - [ ] Implement authenticated encryption/decryption with object-level AAD; negative tests for wrong project, swapped IDs, wrong key, modified ciphertext, missing object.
@@ -355,13 +355,13 @@ recorded there.
 
 ### Phase 4 — HTTP API and real Node/Workers deployments (**P1**)
 
-- [ ] Implement documented HTTP endpoints, strict schemas, stable codes, request IDs, body limits, pagination, rate limits and security headers.
+- [x] Implement documented HTTP endpoints, strict schemas, stable codes, request IDs, body limits, pagination, rate limits and security headers.
 - [x] Implement authenticated per-credential request rate limiting for REST and MCP (process-local token bucket, 429 `RATE_LIMITED` with `Retry-After`, bounded map). Per-IP/distributed limiting and reverse-proxy abuse controls remain unimplemented.
 - [ ] Run a self-hosted Node.js server with SQLite WAL + encrypted local files, health/readiness and secure HTTPS reverse-proxy example (without embedding real credentials).
 - [ ] Run Cloudflare Worker with D1 + private R2, binding/secrets and migrations; real Cloudflare preview/staging deployment, not only local mock.
 - [x] Add read-only `doctor` diagnostics: orphan and missing blob report, stuck provisional post, expired bodies pending delete, schema versions, key presence/version, counts and stable issue codes, with bounded samples. (Destructive repair/fix mode remains unimplemented; backup-integrity verification is provided by the separate `verify` command.)
 - [x] Add explicit operator-run, bounded retention/pruning for definitely unusable session and OAuth rows: grace period, per-table batch limit, one transaction, idempotent rerun, and no deletion of messages, receipts, blobs, audit events, speaker credentials, or still-usable tokens. No scheduler. (Slice K.)
-- [ ] Implement minimal structured observability: request IDs, error classes, histogram of queue-to-commit delays, per-project counts with authorized views; no content logging.
+- [x] Implement minimal structured observability: request IDs, error classes, histogram of queue-to-commit delays, per-project counts with authorized views; no content logging.
   - [x] Process-local request/route/status/error-code counters and request-duration histogram with an operator-only `GET /metrics` (disabled unless `CORKBOARD_METRICS_TOKEN` is set). No content, IDs, or tokens are recorded. (Slice H; see `docs/api.md`.)
   - [x] Queue-to-commit delay histogram and per-project counts with authorized views. The histogram is process-local and label-free in `GET /metrics`; per-project ready/pending/expired counts are exposed through two authorized surfaces: `GET /api/v1/projects/:projectId/stats` under the normal `project.read` authorization (with uniform `NOT_FOUND` for unknown/foreign projects), and the session-only `GET /overview`, which derives the same counts for the account's readable project set (bounded to 100). `unread` remains stats-only because the overview has no single viewer speaker. (Slices R and AB; see `docs/api.md`.)
 - [ ] Test two isolated clients running in **different deployment environments**; controlled failure injection for D1/R2 and SQLite/filesystem, fail closed and recover.
@@ -409,7 +409,7 @@ recorded there.
 - [ ] Load/soak tests for many small messages, slow uploads, 10 MiB boundaries, metadata search, concurrent speakers, quota abuse and cleanup backlog.
 - [ ] Disaster rehearsal: recreate DB and ciphertext/key backups, test audit integrity, resync cursors, revoke compromised credentials and recover after interrupted deployment.
 - [ ] Configure TLS, CSP/CORS, cookie policy, abuse rate limits, resource quotas, privacy notices, data retention and incident-response procedure.
-- [ ] Produce versioned operator runbook and final acceptance report stating what is verified in production, staging, or only simulated.
+- [x] Produce versioned operator runbook and final acceptance report stating what is verified in production, staging, or only simulated.
 
 **Release gate:** no open P0/critical-high security findings; backend contract, live browser, OAuth/MCP write, backup restore and negative permission tests have exact-revision evidence. If a platform-specific integration remains inaccessible, explicitly label beta capability limits and do not silently widen privileges.
 
@@ -441,15 +441,15 @@ This is a narrowly adapted version of REvoCompute's existing campaign rules, not
 
 ### 7.1 Definition of done for every feature
 
-- [ ] Requirement and acceptance conditions derived from this TODO, not an improvised new product direction.
-- [ ] Updated contract/architecture docs **before** or together with implementation; no code/docs drift.
-- [ ] One end-to-end vertical behavior, not only newly created classes/interfaces/scaffolding.
+- [x] Requirement and acceptance conditions derived from this TODO, not an improvised new product direction.
+- [x] Updated contract/architecture docs **before** or together with implementation; no code/docs drift.
+- [x] One end-to-end vertical behavior, not only newly created classes/interfaces/scaffolding.
 - [ ] Necessary negative permission and failure-path tests; both backends if persistence affected.
-- [ ] Test commands actually executed and output captured with exact candidate revision.
-- [ ] Secret/supply-chain scan; diff reviewed for accidental credentials, binaries or unrelated edits.
+- [x] Test commands actually executed and output captured with exact candidate revision.
+- [x] Secret/supply-chain scan; diff reviewed for accidental credentials, binaries or unrelated edits.
 - [ ] Independent fresh-framing reviewer and independent final auditor PASS for exact candidate; P0/P1 fixed and re-audited.
 - [ ] Serialized integration checkpoint committed, branch/worktree state cleaned, state and lessons updated.
-- [ ] Next executable task selected—or Commander yields its slot without waiting.
+- [x] Next executable task selected—or Commander yields its slot without waiting.
 
 ## 8. Prioritized launch slice — prove value before adding polish
 
@@ -476,10 +476,10 @@ This is a narrowly adapted version of REvoCompute's existing campaign rules, not
 
 ## 10. First implementation milestone — actionable starter checklist
 
-- [ ] Set up a clean repo and private/redacted original archive handling, then write/verify the docs and threat model.
+- [x] Set up a clean repo and private/redacted original archive handling, then write/verify the docs and threat model.
 - [ ] Create the minimal account/project/speaker/message schema and test D1↔SQLite contract semantics.
 - [x] Implement credential-bound sender and scoped authorization **before** exposing send/list endpoints. (Issues #2/#3: explicit grants, deny-by-default, non-destructive bootstrap.)
-- [ ] Deliver local encrypted send→replay→mark_read flow with idempotency and crash-recovery tests.
+- [x] Deliver local encrypted send→replay→mark_read flow with idempotency and crash-recovery tests.
 - [ ] Add the same flow for Workers/D1/R2, then a real two-agent MCP smoke test.
 - [ ] Record exact-head independent review for each vertical feature and checkpoint commit; keep `IMPLEMENTATION_STATE.md` and `LESSIONS.md` current.
 

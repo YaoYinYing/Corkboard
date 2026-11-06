@@ -3,6 +3,20 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-06 — a checkbox is a claim; cite the evidence or leave it open
+
+- **Failure avoided:** A reconciliation pass is tempted to tick a TODO box whose
+  headline feature exists while a bundled clause does not (for example an AAD detail,
+  a readiness endpoint, or an attachment path), or to treat a docs claim as executable
+  evidence.
+- **Rule:** Check a box only when every clause has a named test, doc section, or pushed
+  commit, and record that citation in the `IMPLEMENTATION_STATE.md` reconciliation
+  section. Leave a bundled item unchecked rather than weakening its wording, and name
+  the missing clause.
+- **Prevents:** Campaign state that overstates coverage and hides an unimplemented
+  surface behind a green headline.
+- **Remove when:** CI can map every TODO box to a required executable evidence artifact.
+
 ## 2026-11-06 — a durable scheduler needs the digest, not the cursor, as its dedupe truth
 
 - **Failure avoided:** A one-shot Issue sync that used only a "last seen timestamp"

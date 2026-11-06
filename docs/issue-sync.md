@@ -8,10 +8,12 @@ literal Commander restart, so Issue #9 remains open.
 
 ## What it does and does not do
 
-- Reads up to 50 issues, most recently updated first, with the REST call
+- Reads up to 50 issue records, most recently updated first, with the REST call
   `gh api "repos/<owner>/<repo>/issues?state=all&sort=updated&direction=desc&per_page=50"`.
-  The repository issues endpoint also returns pull requests; those records are
-  filtered out. Discovery returns a **numeric** comment count, never comment bodies.
+  That 50-record window includes pull-request entries returned by the issues endpoint;
+  those records are filtered out after the window is applied, so a pass may read fewer
+  than 50 issues. Discovery reads a **numeric** comment count and never comment bodies;
+  the REST response may include issue bodies, which the script does not read or store.
   Each issue's comments are then read via
   `gh api repos/<owner>/<repo>/issues/<n>/comments` (bounded paging).
 - Appends each **new or edited** comment exactly once to
@@ -68,7 +70,10 @@ scheduler.
   double-ingesting (`5` while a live holder exists). A stale holder (dead PID) is
   reclaimed by atomically renaming the inspected lock aside and proceeding only when
   the renamed file still carries the token that was inspected; a lock that changed
-  in between is left in place and the pass fails closed. A live lock is never deleted.
+  in between is restored to the lock path when that path is still free and the pass
+  fails closed. In the rare three-process corner where another process has already
+  created a new lock, the inspected lock stays under its `.stale-*` name instead.
+  A live lock is never deleted.
 
 ## State, cursor, digest, logs
 
@@ -90,9 +95,10 @@ cursor, the next pass recomputes "seen" from the digest and does not duplicate t
 record.
 
 The journal also receives one line per pass (`SyslogIdentifier=corkboard-issue-sync`).
-Cursor and digest write failures are written to both `issue-sync.log` (as
-`status=state-error`) and stderr; a pre-check rejection of the state
-directory itself is reported to stderr and the journal only.
+Cursor/digest state failures (unreadable or malformed state, a rejected symlink, and
+write failures) are written to both `issue-sync.log` (as `status=state-error`) and
+stderr; a pre-check rejection of the state directory itself is reported to stderr and
+the journal only.
 
 ## Bounds and limitations
 
