@@ -15,13 +15,15 @@ claims a production or staging deployment.
 ## Docker Compose (local)
 
 A multi-stage image and a one-service [`compose.yaml`](../compose.yaml) provide a
-local Docker Compose installation of the same Node.js 24 + SQLite build. The base
-image tag is unpinned and the recorded evidence used a locally assembled stand-in
-base; see the reproducibility caveat in [`docker.md`](./docker.md). See
-[`docker.md`](./docker.md) for the quickstart, non-destructive `init`, first-owner
-bootstrap, fixed non-root UID and volume ownership, read-only secrets file, persistence
-proof, upgrade/rollback, and the explicit Workers/D1/R2 gap. Docker steps are not run in
-CI; they are documented commands with local evidence in `IMPLEMENTATION_STATE.md`.
+local Docker Compose installation of the same Node.js 24 + SQLite build. Both
+stages pin the official `node:24` base by digest
+(`sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`,
+Node 24.22.2 / npm 11.19.1); the recorded evidence was re-run on that real base.
+See [`docker.md`](./docker.md) for the quickstart, non-destructive `init`,
+first-owner bootstrap, fixed non-root UID and volume ownership, read-only secrets
+file, persistence proof, upgrade/rollback, and the explicit Workers/D1/R2 gap.
+Docker steps are not run in CI; they are documented commands with local evidence
+in `IMPLEMENTATION_STATE.md`.
 
 ## Self-hosted Node.js 24 LTS
 

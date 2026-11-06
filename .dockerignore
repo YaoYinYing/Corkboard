@@ -18,6 +18,14 @@ keys
 .env.*
 *.env
 secrets.env
+# Local registry/package-manager auth config must never enter the build context.
+.npmrc
+.netrc
+.yarnrc*
+.yarn
+.pnpm-store
+auth.json
+.config
 *.key
 *.pem
 *.p12

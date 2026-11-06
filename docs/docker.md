@@ -3,15 +3,14 @@
 **Scope:** local Docker Compose installation of the shipped self-hosted Node.js 24 +
 SQLite + local-blob service. This is the local half of `TODO.md` Phase 4 item 368.
 
-> **Reproducibility caveat.** The real `node:24` base image was never pulled in the
-> environment that produced the recorded evidence (registry pulls timed out). The
-> Dockerfile still targets the unpinned `node:24` tag. The recorded
-> build/UID/mode/health/persistence/restart outputs therefore come from a locally
-> assembled stand-in (`node:22-bookworm-slim` + host Node 24.22.1 + npm 10.9.9), not
-> from the referenced image. Pin a digest and re-verify when registry access exists.
-> The npm bundled with the real base (likely 11.x) is untested, and the stand-in
-> results cover Dockerfile/Compose mechanics and the Node 24 runtime, not the
-> referenced Debian/npm layer. Do not read the recorded outputs as real-base results.
+> **Base image provenance.** The image is built from the official `node:24-bookworm-slim`
+> image at digest
+> `sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`
+> (Node 24.22.2, npm 11.19.1, Debian bookworm). Both Dockerfile stages pin that
+> digest for reproducibility. The recorded build and smoke output in
+> `IMPLEMENTATION_STATE.md` was produced on this real base. Registry access was
+> intermittent during the work, which led to an earlier, incorrect stand-in
+> attribution; the provenance was re-checked against the local image and digest.
 
 This document does **not** provide or claim a Cloudflare Workers/D1/R2 deployment.
 There is no D1/R2 adapter and no Cloudflare access or test has been performed. That
@@ -31,10 +30,11 @@ reverse proxy (see [`runbook.md`](./runbook.md#31-reverse-proxy-tls-termination)
 No host Node.js or npm is required. The image builds the application and installs only
 production dependencies at runtime.
 
-The Dockerfile references `node:24-bookworm-slim` by tag and **no digest is pinned**:
-pulls of the real base timed out in the build environment, so the tag was never
-resolved here. Pin a digest for a production build and re-run the checks once registry
-access exists. Docker checks are documented commands, not CI steps.
+The Dockerfile pins both stages to the official `node:24-bookworm-slim` image by tag and
+digest (`sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`).
+The digest was resolved and verified locally (Node 24.22.2, npm 11.19.1), so
+rebuilds stay on the same base even if the tag moves. Docker checks are documented
+commands, not CI steps.
 
 ## 2. Quick start
 
@@ -43,8 +43,13 @@ From the repository root:
 ```sh
 # CORKBOARD_SECRETS_DIR must be an absolute host path outside this repository,
 # owned by the operator, with a 0600 corkboard.env readable by container UID/GID
-# 1000 (the fixed non-root identity). If your account is not UID 1000:
+# 1000 (the fixed non-root identity). Compose cannot enforce that the path is
+# absolute or outside the repository; treat both as operator discipline.
+# If your account is not UID 1000, every ancestor directory must be traversable
+# (x) by UID 1000, and the leaf must be writable by the init run:
 #   sudo install -d -m 0700 -o 1000 -g 1000 "$CORKBOARD_SECRETS_DIR"
+# Chowning only the leaf is not enough when a parent is 0700 and owned by another
+# account.
 export CORKBOARD_SECRETS_DIR="$HOME/.config/corkboard"
 install -d -m 0700 "$CORKBOARD_SECRETS_DIR"
 
@@ -86,11 +91,13 @@ curl -fsS http://127.0.0.1:8787/healthz
 # {"status":"ok"}
 ```
 
-On every container start the entrypoint requires `/run/secrets/corkboard.env`, when
-present, to be a readable regular file with mode exactly `0600`; any other mode (for
-example `0644`) fails closed. The error names the file and its octal mode, never its
-contents. Keep the mount source an absolute path outside the repository, owned by the
-operator.
+The entrypoint tolerates an absent `/run/secrets/corkboard.env` so `init` can
+create it. When present, it must be a readable regular file with mode exactly
+`0600`; any other mode (for example `0644`) fails closed. The mode error names
+the file and its on-disk mode, never its contents. `serve` separately fails
+closed when required keys are missing. Keep the mount source an absolute path
+outside the repository, owned by the operator; Compose cannot enforce either
+property, so it is operator discipline.
 
 The entrypoint sources `/run/secrets/corkboard.env` in the server process at startup.
 It is not baked into the image, is not present in `compose.yaml` (`environment` /
@@ -166,7 +173,8 @@ only, because session and CSRF cookies are `Secure`.
   with a read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, and a
   bounded `/tmp` tmpfs; only `/data` and `/tmp` are writable.
 - The secrets file must be readable by UID 1000 and must be `0600`; the entrypoint
-  refuses any other mode. It is not part of
+  refuses any other mode when the file exists. Absence is allowed so `init` can
+  create it, and `serve` then fails closed on missing keys. It is not part of
   the data volume and must be backed up separately. **Key loss means ciphertext loss.**
   Key rotation is not implemented.
 
@@ -281,9 +289,10 @@ is lost. The full procedure is in [`runbook.md`](./runbook.md#9-upgrade-and-roll
 - Compose: no secret values, no `env_file`, no `CORKBOARD_ROOT_KEY` /
   `CORKBOARD_CREDENTIAL_PEPPER` entries. `docker inspect` `Config.Env` therefore shows
   only the non-secret defaults.
-- Runtime: `/run/secrets/corkboard.env` is bind-mounted **read-only** and sourced by the
-  entrypoint into the server process environment. The server must hold the keys in
-  memory to decrypt; this is not end-to-end encryption.
+- Runtime: `/run/secrets/corkboard.env` is bind-mounted **read-only** and, when
+  present, sourced by the entrypoint into the server process environment. Absence is
+  allowed for `init`; `serve` fails closed without the required keys. The server must
+  hold the keys in memory to decrypt; this is not end-to-end encryption.
 - The `0600` file lives outside the repository and outside the data directory. Back it
   up separately; never commit, paste, or log it. `init` prints only its path.
 

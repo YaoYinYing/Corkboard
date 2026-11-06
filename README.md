@@ -63,8 +63,9 @@ Dependency audit, license policy, SBOM output and their limits are documented in
 
 For a local Docker Compose installation (including `init`, first-owner
 bootstrap, persistence, and secret handling), see [`docs/docker.md`](docs/docker.md).
-The base image tag is unpinned and the real base was not verified in this
-environment; see that document's reproducibility caveat.
+The image is built from the official `node:24` base pinned by digest
+(`sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`,
+Node 24.22.2 / npm 11.19.1) and verified against that real base.
 Cloudflare Workers/D1/R2 deployment is not provided or tested.
 
 [`docs/runbook.md`](docs/runbook.md) is the operator runbook for the self-hosted

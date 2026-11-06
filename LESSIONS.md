@@ -3,35 +3,27 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
-## 2026-11-05 — an unverified base image cannot back a "reproducible" claim
+## 2026-11-05 — re-check provenance when registry access is intermittent
 
-- **Failure:** A Docker checkpoint was described as a "reproducible" installation while
-  the `node:24` base had never been pulled (registry timeouts), the tag was unpinned,
-  and every recorded output came from a locally assembled stand-in
-  (`node:22-bookworm-slim` + host Node 24.22.1 + npm 10.9.9). The state section was
-  accurate, but docs, README, deployments, and the commit trailer overclaimed.
-- **Reproducer:** `docker compose build` fails to resolve `node:24` metadata; the same
-  commands still "pass" because a local `node:24` tag was made by `docker commit`.
-- **Fix:** Call the deliverable a local Docker Compose installation, put the
-  reproducibility caveat at the top of `docs/docker.md`, and state that recorded outputs
-  are not real-base results. Pin a digest and re-verify when registry access exists.
-- **Prevents:** Shipping a reproducibility claim whose base image, npm version, and
-  Debian layer were never exercised.
-- **Remove when:** A digest-pinned base is pulled and the full check sequence is rerun
-  against it.
-
-## 2026-11-05 — evidence must name its actual base
-
-- **Failure:** The checkpoint evidence said only that a "stand-in" was used, without
-  naming its ingredients or the fact that its npm and Debian layers differed from the
-  referenced image. An auditor could not tell which claims the evidence supported.
-- **Fix:** Record the exact stand-in (`node:22-bookworm-slim`, host Node 24.22.1, npm
-  10.9.9), say what it covers (Dockerfile/Compose mechanics, Node 24 runtime) and what
-  it does not (the referenced Debian/npm layer, likely npm 11.x), and repeat the
-  limitation wherever the evidence is linked.
-- **Prevents:** Evidence that silently changes meaning between the run and the reader.
-- **Remove when:** Docker checks run against the pinned real base and no stand-in is
-  referenced.
+- **Failure:** Docker checkpoint text claimed the real `node:24` base had never been
+  pulled and that every recorded output came from a locally assembled stand-in
+  (`node:22-bookworm-slim` + host Node 24.22.1 + npm 10.9.9). That was wrong: the
+  official `node:24` image was present locally, with Node 24.22.2, npm 11.19.1,
+  Debian bookworm, and digest
+  `sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`; the
+  retained build layers show the recorded runs used it. Intermittent registry
+  timeouts made the wrong attribution plausible, and it was almost shipped in the
+  docs, state, and a commit trailer.
+- **Reproducer:** `docker image inspect node:24` showed the official image, its Node
+  and npm versions, and that digest; `docker pull node:24@sha256:01d5...` resolved to
+  the same image.
+- **Fix:** Pin that digest in both Dockerfile stages, rebuild, re-run the full smoke
+  on the pinned base, and correct every provenance sentence. The durable lesson is
+  narrower: because registry access was intermittent, provenance claims must be
+  re-checked against the local image and digest before they are published.
+- **Prevents:** Publishing evidence whose base image, npm version, or Debian layer is
+  attributed to the wrong image.
+- **Remove when:** Docker provenance is captured directly in CI from the pinned digest.
 
 ## 2026-11-05 — `docker compose run -v` cannot relax a service's read-only bind
 

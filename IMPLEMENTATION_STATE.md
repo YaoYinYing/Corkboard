@@ -19,7 +19,8 @@ as the work it describes.
 
 | Commit | Tree | Capability | Reviews |
 | --- | --- | --- | --- |
-| this checkpoint | commit trailer `Tree-SHA` | Docker Compose local installation (TODO 368 local half): multi-stage `Dockerfile` on `node:24-bookworm-slim` (build with dev dependencies and `npm run build`; runtime `npm ci --omit=dev --ignore-scripts`, `dist` with `dist/migrations`, fixed non-root `1000:1000`, `/data` `0700`, `STOPSIGNAL SIGTERM`, `/healthz` healthcheck, no secrets), `.dockerignore`, one-service `compose.yaml` (named data volume, read-only secrets-directory bind, loopback publish, `restart: unless-stopped`, healthcheck, non-secret env only), `scripts/docker-entrypoint.sh`, and `docs/docker.md` (quickstart, non-destructive `init` through a second read-write mount, first-owner bootstrap, UID/volume ownership, secret handling, persistence/restart, backup/restore, ports/TLS, single-process limits, upgrade/rollback, explicit Workers/D1/R2 gap). Docs links added; TODO item 368 stays unchecked because the Worker half is unimplemented. No runtime code, dependency, migration, or CI change | Base `341c9ad72ee5356f56dbb093cc01095b4c0f8ff8`; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (509 tests: 508 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `CORKBOARD_SECRETS_DIR=... docker compose config` exit 0; `docker compose build` exit 0 (tag `corkboard:local`, image `sha256:8cebd922e01571c3d0743073bf891625ffc22ebedbbb050a2e02fed43bca0641`); first `init` exit 0, second exit 1 with unchanged secrets; `docker compose up -d` healthy and `/healthz` `{"status":"ok"}`; container `uid=1000 gid=1000`, `/data` `700`, DB `600`, `/data/blobs` `700`; secrets bind `RW=false` and a write attempt failed `Read-only file system`; secret values absent from `docker inspect`, `docker compose config`, and image layers; restart preserved the account and project rows; `docker compose down -v` removed the stack. **Caveat:** the real `node:24-bookworm-slim` base could not be pulled in this environment (Docker Hub/mirror timeouts), so verification used a locally assembled stand-in base from `node:22-bookworm-slim` plus the host Node 24.22.1 binary and npm 10.9.9; the Dockerfile references the real tag, and no base digest is pinned because resolution failed | `scripts/soak.ts` plus `npm run soak` (not part of `npm run check`) runs the real `startServer` on an ephemeral loopback port against a temporary installation outside the repository with synthetic principals. Profiles `quick` (default) and `full`, plus bounded count flags. Scenarios: many small messages with same-key replay; concurrent speakers exchanging replies; the 8192-byte text cap accepted and 8193 rejected; summary search plus ascending cursor pagination; no/invalid/revoked/missing-grant/non-member rejection; injected-clock body expiry with blob deletion and a real `expire-bodies` CLI rerun; a real `prune` CLI over a backdated revoked-session backlog (messages unchanged); and a dedicated 30/minute burst-5 server producing the documented `429 RATE_LIMITED` responses with `Retry-After`. One JSON report on stdout (counts, status/error classes, p50/p95/max) plus a short stderr summary; any `INTEGRITY_*`, unexpected 5xx, network/timeout, duplicate, ordering, or authorization assertion failure exits non-zero. Coarse latency guards are environment-dependent and non-fatal. `docs/soak.md` documents scope, commands, report fields, thresholds, evidence, safety, and gaps. The only default-suite addition is a fast argument/percentile/threshold/boundary unit test. No dependency, migration, or runtime behavior change. Attachments/10 MiB, slow uploads, quotas, D1/Workers/R2, TLS, and multi-process are not covered | Base `a530693f479a7b8fbcc277f8cf367b81b466126d`; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (509 tests: 508 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run soak -- --profile quick` exit 0 (319 requests, 261 messages created, 0 integrity failures, 0 unexpected 5xx, 0 network errors, 0 replay duplicates, 7 expected 429s; 25 sessions pruned; all 261 messages unchanged); synthetic data and throwaway keys in a temp directory only; no production data or real secret used |
+| this checkpoint | commit trailer `Tree-SHA` | Docker Compose local installation (TODO 368 local half): multi-stage `Dockerfile` on `node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9` (build with dev dependencies and `npm run build`; runtime `npm ci --omit=dev --ignore-scripts`, `dist` with `dist/migrations`, fixed non-root `1000:1000`, `/data` `0700`, `STOPSIGNAL SIGTERM`, `/healthz` healthcheck, no secrets), `.dockerignore`, one-service `compose.yaml` (named data volume, read-only secrets-directory bind, loopback publish, `restart: unless-stopped`, healthcheck, non-secret env only), `scripts/docker-entrypoint.sh`, and `docs/docker.md` (quickstart, non-destructive `init` through a second read-write mount, first-owner bootstrap, UID/volume ownership, secret handling, persistence/restart, backup/restore, ports/TLS, single-process limits, upgrade/rollback, explicit Workers/D1/R2 gap). Docs links added; TODO item 368 stays unchecked because the Worker half is unimplemented. No runtime code, dependency, migration, or CI change | Base `341c9ad72ee5356f56dbb093cc01095b4c0f8ff8`; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (509 tests: 508 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `CORKBOARD_SECRETS_DIR=... docker compose config` exit 0; `docker compose build` exit 0 on pinned `node:24@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9` (image `sha256:bf75542fa9692170726ea7ebb8f95a8d3ecbbac6853f375a247483de1234e68b`; first 5 layers match the pinned base); first `init` exit 0, second exit 1 with unchanged secrets; secrets mode `0644` rejected, `0600` accepted, absence allowed, and `serve` without keys exit 1; `up -d --wait` healthy and `/healthz` `{"status":"ok"}`; `id` = `uid=1000(node) gid=1000(node)`; `/data` `700`, DB `600`, `/data/blobs` `700`; `ReadonlyRootfs=true`, `CapDrop=["ALL"]`, `no-new-privileges:true`, secrets bind `RW=false`, `/app` and `/run/secrets` writes fail `Read-only file system`, `/tmp` writable; secret key names absent from config/inspect/image; bootstrapped owner and project rows survived restart; `down -v` removed the stack with no residue; real base verified: Node 24.22.2, npm 11.19.1, Debian 12.15 |
+| `fcaf6a0` | `a6a121f` | `scripts/soak.ts` plus `npm run soak` (not part of `npm run check`) runs the real `startServer` on an ephemeral loopback port against a temporary installation outside the repository with synthetic principals. Profiles `quick` (default) and `full`, plus bounded count flags. Scenarios: many small messages with same-key replay; concurrent speakers exchanging replies; the 8192-byte text cap accepted and 8193 rejected; summary search plus ascending cursor pagination; no/invalid/revoked/missing-grant/non-member rejection; injected-clock body expiry with blob deletion and a real `expire-bodies` CLI rerun; a real `prune` CLI over a backdated revoked-session backlog (messages unchanged); and a dedicated 30/minute burst-5 server producing the documented `429 RATE_LIMITED` responses with `Retry-After`. One JSON report on stdout (counts, status/error classes, p50/p95/max) plus a short stderr summary; any `INTEGRITY_*`, unexpected 5xx, network/timeout, duplicate, ordering, or authorization assertion failure exits non-zero. Coarse latency guards are environment-dependent and non-fatal. `docs/soak.md` documents scope, commands, report fields, thresholds, evidence, safety, and gaps. The only default-suite addition is a fast argument/percentile/threshold/boundary unit test. No dependency, migration, or runtime behavior change. Attachments/10 MiB, slow uploads, quotas, D1/Workers/R2, TLS, and multi-process are not covered | Base `a530693f479a7b8fbcc277f8cf367b81b466126d`; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (509 tests: 508 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; `npm run soak -- --profile quick` exit 0 (319 requests, 261 messages created, 0 integrity failures, 0 unexpected 5xx, 0 network errors, 0 replay duplicates, 7 expected 429s; 25 sessions pruned; all 261 messages unchanged); synthetic data and throwaway keys in a temp directory only; no production data or real secret used |
 | this checkpoint | commit trailer `Tree-SHA` | Docs (Phase 8): versioned operator runbook and acceptance report. `docs/runbook.md` v1 (dated 2026-11-05) covers prerequisites, secrets/data separation, `init` and provisioning, serving/stop/health, reverse-proxy TLS example, credential issuance/inventory/revocation and rotation limits, REST/MCP/dashboard send, idempotency, body expiry/`expire-bodies`/`prune`, backup/verify/restore and disaster recovery, `doctor`, incident response, audit-read limits, known limits, and sequential-migration upgrade/rollback. `docs/acceptance-report.md` v1 maps TODO §6 Phase 8, the release gate, and §8 measures to Verified locally / Verified in CI / Verified externally / Simulated only / Not implemented / Untested, with exact revisions (`e79d60e` head, `2a17a75` UI browser evidence, `7812505` blank validation), CI run IDs, and explicit no-production/no-staging/no-real-secret statements. Both are linked from `docs/deployments.md` and `README.md`; no runtime, test, migration, or package change | Base `e79d60e001e5ac6c6eee7f06e17a86aa48d16c4f`; contract audit BLOCKed the first tree `b06d748` (tree `4ad768b`) on a false "no CI run" row, five false "no browser capture" rows, and four runbook precision defects; fixed tree `13c2fc9` PASSed with two asset-citation nits; final tree `feec245` (commit `a95e156`) delta PASS; security review not applicable beyond document secrecy (secret scan passes); pushed on `origin/main` at `a95e156`; CI run 42136790858 success; all cited commands exist in `scripts/corkboard.ts` and were checked against the built CLI; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (502 tests: 501 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; synthetic temp-directory smoke exercised init/provisioning/serve/REST send/replay/conflict/body/list/prune/expire-bodies/doctor/backup/verify/restore and init refusals, with no token or key printed; no production or staging deployment and no real secret used |
 | this checkpoint | commit trailer `Tree-SHA` | Slice AD: reject blank message summary and text at the message-send layer — new message-only `validateMessageSummary`/`validateMessageText` wrappers call the restored length-only `validateSummary`/`validateText`, then reject a value consisting only of Unicode `White_Space` and/or `Default_Ignorable_Code_Point` characters with `VALIDATION_ERROR`; the check runs after the grapheme/byte checks so limit errors keep precedence; any character outside those categories makes it non-blank (U+2800, non-whitespace controls, lone combining marks are accepted); non-blank internal spaces/newlines stay valid and are never trimmed or normalized; project title/summary keep their base `trim()`-based behavior and `validateSummary` stays length-only; the service validates before its replay/resume decision, so a historically blank payload cannot be replayed with its old key; docs state the exact rule and replay edge; domain, REST, MCP, and dashboard tests assert rejection (including Unicode blank cases) and no writes, project-metadata regression tests pin the unchanged behavior, and `"a b"`/multi-line acceptance remains | Base `b26b2faa9ae12ee4b128bafc88b5b98770c0d5a9`; finding from real-browser evidence at `2a17a75` (Issue #6); audit round 1 PASSed on candidate `de225e9` (tree `964cf6c`), then the contract audit BLOCKed the project-metadata scope leak on `66a55fd`; final tree `d0fb133` (commit `7812505`) security PASS + contract PASS (delta audits); pushed on `origin/main`; Issue #6 fix comment posted; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (502 tests: 501 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0 |
 | this checkpoint | commit trailer `Tree-SHA` | Slice AC: dashboard message send — `GET`/`POST /projects/:projectId/messages/new`, sender select restricted to active account-owned speakers with an active membership carrying `message.send`, summary/text/type/language, optional same-project reply and optional RFC 3339 body expiry, server-computed digest, per-render hidden idempotency key (same payload replays, different payload `409`), session CSRF/fetch-metadata and 64 KiB adapter buffering, uniform `404` for unreadable project/foreign or ineligible speaker, `303` to the timeline; dedicated `authorizeSessionSend`/`authorizeMessageSend` path (never `authorizeProject`'s read branch); the session predicate is folded into the one write-only, result-independent finalize `UPDATE`, and the outcome is inferred only from the post-commit row (ready/expired = success/replay; pending/missing = uniform `404`) | Base `30cf884c080184ccdf7a01e6123c5a70283b432f`; round-1 audits on `06e072f`/`c7847be` were security PASS and contract BLOCK; round-2 on `7a0ae29`/`f8108b2` was security PASS with only contract-accuracy BLOCKs; round-3 on `fa9147b`/`26774c6` passed both audits, and the hardening tree `4d5117f` (commit `2a17a75`) binds the sender into both finalize statements and adds the tampered-idempotency test; security PASS + contract PASS on tree `4d5117f`; `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (496 tests: 495 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0; pushed on `origin/main` at `2a17a75` |
@@ -1788,7 +1789,10 @@ pushed.
 
 ## Docker Compose local installation (TODO 368 local half, 2026-11-05)
 
-- **Deliverables.** `Dockerfile` is a two-stage build on `node:24-bookworm-slim`.
+- **Deliverables.** `Dockerfile` is a two-stage build on the official
+  `node:24-bookworm-slim` image pinned by digest
+  (`sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`,
+  Node 24.22.2 / npm 11.19.1 / Debian bookworm).
   The build stage installs with `npm ci --ignore-scripts` and runs `npm run build`;
   the runtime stage installs with `npm ci --omit=dev --ignore-scripts` and contains
   only `dist` (including `dist/migrations`), production `node_modules`, package
@@ -1796,19 +1800,22 @@ pushed.
   `0700` (an empty named volume inherits that ownership and mode on first use), exposes
   `8787`, checks `GET /healthz`, and uses `STOPSIGNAL SIGTERM`. No secrets or
   repository data are copied. `.dockerignore` excludes git metadata, dependencies,
-  build output, reports, tests/docs, local data, and secret patterns. The base tag
-  `node:24` is unpinned (see **Claim narrowing**).
+  build output, reports, tests/docs, local data, secret patterns, and local
+  registry/package-manager auth config (`.npmrc`, `.netrc`, `.yarnrc*`, `.yarn`,
+  `.pnpm-store`, `auth.json`, `.config`). Both stages pin the base digest.
 - **Compose.** `compose.yaml` defines one `corkboard` service with the named
   `corkboard-data` volume at `/data`, a read-only bind of the operator's
   `CORKBOARD_SECRETS_DIR` at `/run/secrets`, loopback-only publication of `8787`,
   `restart: unless-stopped`, the same healthcheck, and only non-secret environment
   values. The service also runs with `read_only: true`, `cap_drop: [ALL]`,
   `no-new-privileges:true`, and a bounded `/tmp` tmpfs, so only `/data` and `/tmp` are
-  writable. `scripts/docker-entrypoint.sh` sources `/run/secrets/corkboard.env` only
-  when it exists as a readable regular file with mode exactly `0600`; any other mode
-  fails closed with an error that never prints file contents, and then execs the
+  writable. `scripts/docker-entrypoint.sh` tolerates an absent
+  `/run/secrets/corkboard.env` so `init` can create it; when present it must be a
+  readable regular file with mode exactly `0600`, and any other mode fails closed
+  with an error naming the path and mode but never file contents. It then execs the
   requested command, so provisioning commands receive the keys and
-  `CORKBOARD_DATA_DIR` without `env_file` or secrets in `Config.Env`.
+  `CORKBOARD_DATA_DIR` without `env_file` or secrets in `Config.Env`; `serve` still
+  fails closed when required keys are missing.
 - **Init and bootstrap.** The one-shot `init` uses the service plus a second
   read-write mount of the same host directory:
   `docker compose run --rm -v "$CORKBOARD_SECRETS_DIR:/run/secrets-rw" corkboard node
@@ -1822,47 +1829,53 @@ pushed.
   backup/restore, ports/TLS, process-local limits, upgrade/rollback, and the explicit
   Workers/D1/R2 gap. `docs/deployments.md`, `docs/runbook.md`, and `README.md` link to
   it.
-- **Verification caveat.** The real `node:24` base could not be pulled from any
-  registry in this environment (Docker Hub and mirrors timed out; the Docker daemon is
-  configured with a local SOCKS proxy). The verified build used a locally assembled
-  stand-in base from the available `node:22-bookworm-slim` plus the host's Node 24.22.1
-  binary and the image's npm 10.9.9; the Dockerfile still references the real tag. The
-  base digest is not pinned because digest resolution failed. The npm bundled with the
-  real base (likely 11.x) is untested, and the stand-in results cover Dockerfile/Compose
-  mechanics plus the Node 24 runtime, not the referenced Debian/npm layer.
-- **Claim narrowing (2026-11-05 follow-up).** Because the referenced base was never
-  pulled and its tag is unpinned, the deliverable is documented as a **local Docker
-  Compose installation**, not a reproducible one. `docs/docker.md` carries a
-  reproducibility caveat at the top; `README.md` and `docs/deployments.md` link to it
-  and state the limitation. Recorded outputs must not be read as real-base results.
-  TODO item 368 stays unchecked.
-- **Evidence.** `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (509 tests:
-  508 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0;
-  `CORKBOARD_SECRETS_DIR=... docker compose config` exit 0; `docker compose build`
-  exit 0 (tag `corkboard:local`, image
-  `sha256:8cebd922e01571c3d0743073bf891625ffc22ebedbbb050a2e02fed43bca0641`); the
-  first `init` exit 0 and the second exit 1 with unchanged secrets; `docker compose up
-  -d` healthy and `/healthz` `{"status":"ok"}`; `id` = `1000:1000`, `/data` `700`, DB
-  `600`, `/data/blobs` `700`; the secrets bind is `RW=false` and a write attempt failed
-  `Read-only file system`; secret values are absent from `docker inspect`,
-  `docker compose config`, and the image layers; a restart preserved the bootstrapped
-  account and project rows; `docker compose down -v` removed the container, volume,
-  and network; the stand-in image, secrets directory, and temporary files were removed.
-- **Hardening re-verification (2026-11-05 follow-up, same stand-in base).** Rebuilt
-  image `sha256:86678252bf58a612b90f0b43bbf00546a46fbf1a9c6914e40ff87f84626d7809`.
-  `docker compose config` exit 0 and shows `read_only: true`, `cap_drop: [ALL]`,
-  `no-new-privileges:true`, `/tmp` tmpfs, `user: 1000:1000`, and loopback
-  `127.0.0.1:8787:8787`. BuildKit still timed out resolving the unpinned remote tag, so
-  the build used `DOCKER_BUILDKIT=0 docker compose build` (legacy builder, local
-  stand-in) exit 0; that builder difference is part of the unverified real-base gap.
-  Secrets mode `0644` was rejected by the entrypoint (exit `1`, no key material in the
-  error) and `0600` accepted. `up -d` was healthy with `ReadonlyRootfs=true`,
-  `CapDrop=["ALL"]`, `SecurityOpt=["no-new-privileges:true"]`; `id` =
+- **Provenance correction (2026-11-05 follow-up).** Earlier state, docs, lessons,
+  and commit trailers claimed the real `node:24` base had never been pulled and that
+  every output came from a locally assembled stand-in. That was false.
+  `docker image inspect node:24` shows the official image (Node 24.22.2, npm 11.19.1,
+  Debian bookworm, digest
+  `sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`);
+  pulling `node:24@sha256:01d5...` resolved to the same image, and the retained
+  build layers from the 20:18-20:19 run are layers of that image. Registry timeouts
+  were real but recovered; the provenance was recorded wrongly and is corrected
+  here. The durable lesson is that provenance claims must be re-checked while
+  registry access is intermittent.
+- **Pinned rebuild (2026-11-05 follow-up).** Both Dockerfile stages now use
+  `node:24@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9`.
+  Verification of that base: `docker pull` by exact digest reported "Image is up to
+  date"; `node -v` = `v24.22.2`, `npm -v` = `11.19.1`, `/etc/debian_version` =
+  `12.15`. A fresh default BuildKit `docker compose build` succeeded and produced
+  image
+  `sha256:bf75542fa9692170726ea7ebb8f95a8d3ecbbac6853f375a247483de1234e68b`; the
+  image's first 5 layers are exactly the pinned base's 5 layers (prefix match),
+  confirming the real base was used.
+- **Evidence (fresh, pinned real base).** `npm ci --ignore-scripts` exit 0;
+  `npm run check` exit 0 (509 tests: 508 pass, 1 skipped live-D1, 0 fail);
+  `npm run build` exit 0; `CORKBOARD_SECRETS_DIR=... docker compose config` exit 0
+  (shows `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges:true`, `/tmp`
+  tmpfs, `user: 1000:1000`, loopback `127.0.0.1:8787:8787`, and the read-only
+  secrets bind); `docker compose build` exit 0 (image
+  `sha256:bf75542fa9692170726ea7ebb8f95a8d3ecbbac6853f375a247483de1234e68b`); first
+  `init` exit 0 and printed only the secrets path (host file `0600 1000:1000`); the
+  second `init` exit 1 with unchanged secrets (same SHA-256); entrypoint mode `0644`
+  rejected exit 1 with
+  `docker-entrypoint: /run/secrets/corkboard.env mode must be exactly 600 (found 644)`,
+  `0600` accepted exit 0, an absent file accepted exit 0, and `serve` without keys
+  exited 1 with `CORKBOARD_ROOT_KEY is not set`; `up -d --wait` reached healthy and
+  `/healthz` returned `{"status":"ok"}`; `id` =
   `uid=1000(node) gid=1000(node) groups=1000(node)`; `/data` `700`, DB `600`,
-  `/data/blobs` `700`; the secrets bind was `RW=false` and writes to it and to `/app`
-  failed `Read-only file system`; `/tmp` was writable; a bootstrapped owner and project
-  row survived restart (`[Object: null prototype] { n: 1 }`); `down -v` removed the
-  stack.
+  `/data/blobs` `700`; inspect showed `ReadonlyRootfs=true`, `CapDrop=["ALL"]`,
+  `SecurityOpt=["no-new-privileges:true"]`, `Privileged=false`; the secrets bind was
+  `RW=false` and writes to it and `/app` failed `Read-only file system` while `/tmp`
+  was writable; secret key names were absent from `docker compose config`,
+  `docker inspect`, and the image config; a bootstrapped owner (`acct_...`) and
+  project (`proj_...`) both returned `{ n: 1 }` after restart; `docker compose down
+  -v` removed the stack with 0 containers, volumes, and networks left; temporary
+  directories and `corkboard:local` were removed. The local pinned base image was
+  left in place.
+- **Claim scope.** The deliverable is a **local Docker Compose installation** with a
+  digest-pinned base, not a claim of a production/staging deployment or CI coverage.
+  TODO item 368 stays unchecked because the Cloudflare Worker/D1/R2 half is absent.
 - **Not implemented.** The Cloudflare Worker/D1/R2 deployment half has no adapter and
   was not attempted; TODO item 368 remains unchecked. Docker steps are not in CI.
 
