@@ -42,19 +42,32 @@ From the repository root:
 
 ```sh
 # CORKBOARD_SECRETS_DIR must be an absolute host path outside this repository,
-# owned by the operator, with a 0600 corkboard.env readable by container UID/GID
-# 1000 (the fixed non-root identity). Compose cannot enforce that the path is
-# absolute or outside the repository; treat both as operator discipline.
-# If your account is not UID 1000, every ancestor directory must be traversable
-# (x) by UID 1000, and the leaf must be writable by the init run:
-#   sudo install -d -m 0700 -o 1000 -g 1000 "$CORKBOARD_SECRETS_DIR"
-# Chowning only the leaf is not enough when a parent is 0700 and owned by another
-# account.
-export CORKBOARD_SECRETS_DIR="$HOME/.config/corkboard"
-install -d -m 0700 "$CORKBOARD_SECRETS_DIR"
+# with a 0600 corkboard.env readable by container UID/GID 1000 (the fixed
+# non-root identity). Compose cannot enforce that the path is absolute or
+# outside the repository; treat both as operator discipline.
+#
+# Create the directory as the container identity. If this account is not UID
+# 1000, the leaf must be owned by 1000:1000 and every ancestor must be
+# traversable (x) by UID 1000. The /srv path keeps the non-UID-1000 case out of
+# a private home directory, where a 0700 ancestor would still block UID 1000.
+if [ "$(id -u)" -eq 1000 ]; then
+  export CORKBOARD_SECRETS_DIR="$HOME/.config/corkboard"
+  install -d -m 0700 "$CORKBOARD_SECRETS_DIR"
+else
+  SECRETS_DIR=/srv/corkboard/secrets
+  export CORKBOARD_SECRETS_DIR="$SECRETS_DIR"
+  sudo install -d -m 0755 -o root -g root /srv/corkboard
+  sudo install -d -m 0700 -o 1000 -g 1000 "$CORKBOARD_SECRETS_DIR"
+fi
 
 docker compose build
 ```
+
+The one-shot `init` below runs as UID 1000, so the directory it creates the
+secrets file in must be writable by that identity. Choosing a path under a
+non-UID-1000 account's 0700 home and chowning only the leaf still leaves the
+ancestors untraversable; use the `/srv` branch above or grant `x` on every
+ancestor.
 
 ### 2.1 Initialize the data directory and secrets file
 
@@ -92,8 +105,9 @@ curl -fsS http://127.0.0.1:8787/healthz
 ```
 
 The entrypoint tolerates an absent `/run/secrets/corkboard.env` so `init` can
-create it. When present, it must be a readable regular file with mode exactly
-`0600`; any other mode (for example `0644`) fails closed. The mode error names
+create it. When present, it must be a readable regular file, not a symlink
+(including a broken symlink), with mode exactly `0600`; any other mode (for
+example `0644`) fails closed. The mode error names
 the file and its on-disk mode, never its contents. `serve` separately fails
 closed when required keys are missing. Keep the mount source an absolute path
 outside the repository, owned by the operator; Compose cannot enforce either
@@ -172,9 +186,10 @@ only, because session and CSRF cookies are `Secure`.
   modes and reject symlinked paths before listening. Compose also runs the container
   with a read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, and a
   bounded `/tmp` tmpfs; only `/data` and `/tmp` are writable.
-- The secrets file must be readable by UID 1000 and must be `0600`; the entrypoint
-  refuses any other mode when the file exists. Absence is allowed so `init` can
-  create it, and `serve` then fails closed on missing keys. It is not part of
+- The secrets file must be readable by UID 1000, be a regular file rather than a
+  symlink, and must be `0600`; the entrypoint refuses any other mode or a symlink
+  when the path exists. Absence is allowed so `init` can create it, and `serve`
+  then fails closed on missing keys. It is not part of
   the data volume and must be backed up separately. **Key loss means ciphertext loss.**
   Key rotation is not implemented.
 

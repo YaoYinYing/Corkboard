@@ -3,6 +3,26 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — reject symlinked secrets and test shell boundaries against the real script
+
+- **Failure avoided:** `[ -e ]` follows symlinks, so a secrets path that was a
+  symlink to a `0600` file passed the regular-file and mode checks; a broken
+  symlink looked absent and was allowed. A quickstart that creates the secrets
+  directory as a non-UID-1000 account (`install -d -m 0700`) leaves the container
+  identity unable to traverse or write it.
+- **Fix:** check `[ -L ]` before `[ -e ]` and fail closed; document "regular file,
+  not a symlink". Create the directory as `1000:1000` with traversable ancestors,
+  using `/srv` rather than a private home for the non-UID-1000 case.
+- **Test:** `tests/unit/docker-entrypoint.test.ts` copies the real
+  `scripts/docker-entrypoint.sh` and redirects only its fixed path constant to a
+  temp directory, then executes it. It covers absent, `0600`, `0644`, directory,
+  symlink, broken symlink, and unreadable inputs, and asserts a sentinel value
+  never appears in stdout/stderr. Removing the mode check makes it fail.
+- **Prevents:** symlink substitution of the secrets file and silent regressions in
+  the entrypoint boundary.
+- **Remove when:** the entrypoint is replaced by Compose `secrets:` with
+  equivalent guarantees, or the negative suite is ported to the replacement.
+
 ## 2026-11-05 — re-check provenance when registry access is intermittent
 
 - **Failure:** Docker checkpoint text claimed the real `node:24` base had never been
