@@ -155,8 +155,8 @@ The predicate is folded into the finalize `UPDATE` for a session send.
 
 ### Project-owner administration
 
-`authorizeProjectOwner` (dashboard membership editor, member list/add/remove) is
-session-only and requires:
+`authorizeProjectOwner` (dashboard membership editor, member list/add/remove, and the
+read-only policy matrix) is session-only and requires:
 
 ```text
 project.active
@@ -166,9 +166,12 @@ AND owning account.active
 
 Failure is the uniform `NOT_FOUND`. This is stricter than `project.edit`: a
 non-owner member holding `project.edit` cannot administer members, because that
-would let it add a speaker with `message.send` and mint a credential. Membership
-mutation re-reads this predicate inside its transaction and deletes the speaker's
-project grants on removal.
+would let it add a speaker with `message.send` and mint a credential. It also cannot
+read the policy matrix. Membership mutation re-reads this predicate inside its
+transaction and deletes the speaker's project grants on removal. The policy matrix is
+read-only: `listProjectMembers` re-reads the owner predicate, and credential rows are
+read only through the account-owned speaker inventory, which repeats ownership and
+the active-account check; no bearer principal can reach either surface.
 
 ### Human account, speaker, and credential administration
 
@@ -234,6 +237,7 @@ the action. Auth is required for every row unless stated.
 | Mark message read (receipt) | — | Yes | `message.read` **and** `receipt.write`; body must verify; no receipt on pending/expired/corrupt/inaccessible |
 | Explicitly expire a body | Dashboard has no UI | Yes | `project.edit`; `ready → expired` only |
 | List project members | Yes | — | Owner |
+| Read project policy matrix | Yes | — | Owner; read-only (active members and capabilities plus the session account's owned-speaker credential grants on the project) |
 | Add/remove project member | Yes | — | Owner; `member.manage` is not consulted |
 | List owned speakers | Yes | — | Active account; lists all owned speakers, including inactive |
 | Issue credential; add/remove credential grant | Yes | — | Owned active speaker + active account; issuance/grant predicates above (add also needs account read) |

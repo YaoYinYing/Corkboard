@@ -354,8 +354,10 @@ actionable and prune stale ones.
 - **Decision:** Inventory and revocation require `speakers.owner_account_id` = the
   session account (active account), with a uniform `404` for foreign/unknown
   speakers and for credential IDs not belonging to the path speaker. The listing
-  selects only ID, timestamps, revoked state, and grant rows; the token, prefix, and
-  verifier are never selected or rendered. Revocation is a soft `revoked_at`
+  selects non-secret metadata (ID, timestamps, revoked state, scope identifiers, and
+  grant rows); the token, prefix, and verifier are never selected or rendered, and
+  the inventory page renders neither the prefix nor the scope identifiers. Revocation
+  is a soft `revoked_at`
   assignment that retains the row and grants, is idempotent, and audits one
   `credential.revoke` row only for the transition that actually happened.
   Revoke-then-issue through the existing issuance flow is the documented replacement

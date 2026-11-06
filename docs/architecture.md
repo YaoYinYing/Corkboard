@@ -386,6 +386,7 @@ with the existing service functions.
   (`POST`), `/projects/new`, `/projects/:projectId` (`GET` and `POST`),
   `/projects/:projectId/edit`, `/projects/:projectId/members` (`GET` and `POST`),
   `/projects/:projectId/members/:speakerId/remove` (`POST`),
+  `/projects/:projectId/policy` (`GET`),
   `/projects/:projectId/messages/new` (`GET` and `POST`),
   `/projects/:projectId/messages/:messageId/body`,
   `/speakers`, `/speakers/:speakerId/key` (`GET` and `POST`),
@@ -403,7 +404,7 @@ with the existing service functions.
   `/projects/:projectId/messages/new`, `/speakers/:speakerId/key`, and
   `/speakers/:speakerId/credentials/:credentialId/revoke`, plus POSTs to the
   GET-only paths `isWebPath` also names (`/overview`, `/projects/new`,
-  `/projects/:projectId/edit`,
+  `/projects/:projectId/edit`, `/projects/:projectId/policy`,
   `/projects/:projectId/messages/:messageId/body`, `/speakers`,
   `/speakers/:speakerId/credentials`, and
   `/static/app.css`). Those GET-only POSTs still receive the router's `405`,

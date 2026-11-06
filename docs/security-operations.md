@@ -154,7 +154,9 @@ operator-facing rules are:
   existing grant is an idempotent no-op.
 - The credential inventory is account-owner-only and shows only non-secret metadata:
   credential ID, created time, expiry, revoked state, and project grants. It never
-  selects or renders the token, public prefix, verifier, or scope column. The revoke
+  selects or renders the token, public prefix, or verifier; the service does select
+  the non-secret `scope_json` column and returns parsed scope identifiers, but the
+  inventory page does not render them (the owner-only policy matrix does). The revoke
   route is speaker-scoped, so a credential ID belonging to another speaker is a
   uniform `404`, and the write re-reads the speaker's ownership and the active
   account inside its transaction. A successful transition writes a sanitized

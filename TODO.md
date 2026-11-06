@@ -385,7 +385,7 @@ recorded there.
 
 ### Phase 6 — Dashboard, localization and administration (**P1**)
 
-- [ ] Build login/account pages, project list/create/edit, speaker directory/credential management, per-project membership editor and fine-grained policy matrix.
+- [x] Build login/account pages, project list/create/edit, speaker directory/credential management, per-project membership editor and fine-grained policy matrix. (Routes in `src/app/web.ts`: `/login`, `/`, `/overview`, project create/edit, `/projects/:projectId/members`, `/projects/:projectId/policy`, `/speakers`, `/speakers/:speakerId/key`, and `/speakers/:speakerId/credentials` with provide/revoke/grant editing. The read-only owner policy matrix lists active members against the seven scopes and the session account's owned-speaker credential grants on the project. Evidence: `tests/integration/web.test.ts`, `members-web.test.ts`, `speakers-web.test.ts`, `overview.test.ts`, and `policy-web.test.ts`; `docs/web-ui.md`, `docs/authorization.md`, and `docs/api.md`.)
 - [x] Implement project timeline: message summary bubbles in ascending **server sequence**, sender and timestamp, reply jump, tombstone state and read receipts, body reveal on authorized click only.
 - [x] Provide metadata filters, search, past replay, cursor pagination and accessible mobile/desktop layout; no active HTML/JS from messages or file previews.
 - [ ] Add service overview: authorized counts/traffic, error summaries, storage pressure and auditable administrative operations without disclosing project-private data across tenants.

@@ -3,8 +3,9 @@
 **Status: implemented locally for Node.js + SQLite (vertical slices L and M plus
 dashboard project create/edit, speaker credential issuance, per-speaker credential
 inventory, revocation, and per-credential project-grant editing, the per-project
-membership editor, the authorized account service overview, and dashboard message
-send, with the approved design system tokens applied).**
+membership editor, the read-only per-project policy matrix, the authorized account
+service overview, and dashboard message send, with the approved design system tokens
+applied).**
 The dashboard is server-rendered HTML for a signed-in **account**. Message reads,
 filters, replay, and body reveal remain read-only; the timeline gains a compose link
 and a new-message form. The writes are project create, project title/summary edit,
@@ -42,6 +43,7 @@ See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/projects/:projectId/members` | `GET` | Active membership list and add form; requires the signed-in account to own the project. |
 | `/projects/:projectId/members` | `POST` | Form-encoded add of an active owned speaker with an explicit capability set; `303` to the list. |
 | `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; deletes that speaker's grants for the project; `303` to the list. |
+| `/projects/:projectId/policy` | `GET` | Read-only, project-owner-only policy matrix: active members against the seven scopes, their capability summary, and this account's owned-speaker credential grants on the project. |
 | `/projects/:projectId/messages/new` | `GET` | Compose form when the account can read the project; sender choices are its own send-capable speakers. |
 | `/projects/:projectId/messages/new` | `POST` | Form-encoded send as the selected owned speaker; `303` to the timeline; requires the session CSRF check. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
@@ -330,8 +332,10 @@ matching the fail-closed authorization check that treats it as inactive. The
 speaker, credential, and grant reads are three independent parameterized SELECTs;
 each repeats the owner/active-account predicate. There is no read-snapshot claim:
 an ownership transfer between reads can only make a later read return empty, never
-add another account's rows. The page never selects, renders, or logs the raw
-token, the public prefix, the keyed verifier, or the `scope_json` column. Credentials
+add another account's rows. The inventory page never selects, renders, or logs the raw
+token, the public prefix, or the keyed verifier. The service selects the non-secret
+`scope_json` column and returns parsed stored scope identifiers for the read-only
+[policy matrix](#policy-matrix); the inventory page does not render them. Credentials
 issued by the dashboard, the CLI, and the OAuth server are all ordinary `credentials`
 rows, so all of them for that speaker appear here. Revoking an OAuth-issued access
 credential also makes its refresh unusable, because the refresh path re-reads the
@@ -497,6 +501,57 @@ membership; an already removed row returns `NOT_FOUND`. Credential issuance is
 available here, and the credential inventory, soft revocation, and project-grant
 editing are described above; dashboard credential rotation remains unimplemented and
 atomic rotation is CLI-only (`rotate-key`).
+
+## Policy matrix
+
+`GET /projects/:projectId/policy` is a read-only, **project-owner-only** page linked
+from the timeline for the owning account. Like the membership editor it requires the
+signed-in account to equal `projects.owner_account_id`, with the project and that
+account active; it does not accept `project.edit` as a substitute. A non-owner member
+(including one holding `project.edit`), a foreign or unknown project, and an inactive
+project are the same uniform `404`. A revoked, expired, idle-expired, or malformed
+session redirects to `/login`; an inactive owning account fails session validation and
+takes the same redirect. The dashboard never reads an `Authorization` header, so a
+bearer-only request is unauthenticated and redirects to `/login`, and the service
+owner predicate rejects a bearer principal with `NOT_FOUND`. The page makes no write,
+has no form and no CSRF token, and evaluates no query parameter other than `lang`
+(the shared `sessions.last_seen_at` refresh still applies).
+
+The page calls the existing service functions rather than a new query path.
+`listProjectMembers` re-reads the owner predicate and returns the active
+(non-removed) memberships, ordered by `joined_at` then speaker ID. The matrix uses
+those members as rows and the seven `SCOPES` identifiers as columns; each cell states
+"Granted" or "Not granted" in text, so state is never colour-only, and a final column
+repeats each member's capability set in canonical order. The table uses `<caption>`,
+`<thead>`, `<th scope="col">`, and `<th scope="row">`; the member table is a labelled
+scrollable region so a narrow viewport does not scroll the whole page.
+
+Credential rows come from `listOwnedSpeakers` plus `listOwnedSpeakerCredentials` for
+each speaker owned by the session account, filtered to credentials with a grant on
+this project. Each call repeats the account-ownership and active-account predicate.
+The page renders only non-secret metadata already available to the owner: the
+credential ID (not the public prefix), the derived `active`/`expired`/`revoked`/
+`unknown` state, and its stored scope identifiers. Revoked and expired credentials
+that still hold a grant are shown with that state; an inactive owned speaker's
+credentials are shown because neither the owner predicate nor the inventory requires
+speaker activity. A foreign account's speaker or credential, and an owned credential
+without a grant on this project, never appear. No token, public prefix, verifier,
+body, or summary is selected or rendered.
+
+**Limits.** At most **100** active members are rendered; when more exist the page says
+the list is truncated. Credential rows consider at most **100** owned speakers and
+render at most **100** rows, with a truncation note when either bound is reached. If
+the speaker bound is reached and no matching credential row was found among the first
+100 speakers, the empty state says so ("among the first 100 owned speakers") instead
+of asserting that no credential exists. The caps bound result size, not the
+underlying scan, and there is no pagination. The page performs one inventory read per
+considered owned speaker (up to 100), so its bounded query amplification is accepted
+for this read-only owner page and is not a scan-cost guarantee. The
+membership and credential reads are independent; the owner predicate is re-read by
+`listProjectMembers` and ownership is repeated per credential read, but the page makes
+no snapshot or cross-read consistency claim. Credential scope identifiers are a
+ceiling, not an inferred grant; effective rights remain the membership/credential
+intersection at each service authorization.
 
 ## Message send
 
@@ -692,6 +747,9 @@ Fail-closed behavior:
   inactive project/speaker/account, or no eligible speaker is `404`.
 - A member without `project.edit` is also `404` on the edit form and update,
   even though the read timeline remains available to that member.
+- A non-owner member (even with `project.edit`) is `404` on the membership editor and
+  the policy matrix, as is an unknown, foreign, or inactive project; a bearer
+  principal is rejected by the owner predicate.
 - A speaker owned by another account is `404` on the credential inventory and on
   revocation, and a credential ID that does not belong to the path speaker is the
   same `404` with no state change.
@@ -702,8 +760,8 @@ Fail-closed behavior:
   integrity failure is a generic safe error page with no partial content.
 
 The message read surface performs no project, message, credential, or read-receipt
-write, and no page marks a message read. The service overview makes no project,
-message, credential, or audit write; the shared authenticated-page
+write, and no page marks a message read. The service overview and the policy matrix
+make no project, message, credential, or audit write; the shared authenticated-page
 `sessions.last_seen_at` refresh still applies. The writes are the session row inserted
 by `POST /login`, the `sessions.last_seen_at` refresh on authenticated page
 requests, `POST /projects` (project plus owner-membership insert),
@@ -828,6 +886,11 @@ bounded form before checking CSRF.
   labeled navigation landmark, and a skip link targets `main`. The project and
   speaker forms use explicit `<label for>`/`id` pairs or implicit label wrapping.
   Project and scope checkbox groups use `<fieldset>`/`<legend>`.
+- The policy matrix is a semantic table with a `<caption>`, column headers
+  (`scope="col"`), and row headers (`scope="row"`). Every granted/not-granted cell
+  carries text, not colour alone, and each table sits in a labelled, keyboard-focusable
+  scrollable region so a narrow viewport does not require page-level horizontal
+  scrolling.
 - The one-time credential page presents the token as selectable text (no script-driven
   copy control) and an assertive `role="alert"` warning; the accessible text also
   states that the value is shown once.
@@ -867,6 +930,13 @@ bounded form before checking CSRF.
   `speakers(owner_account_id)`. The overview's aggregates and scans can therefore
   read more rows than they return; add reviewed indexes with measured query plans
   (SQLite and D1) before claiming the caps bound scan cost.
+- The policy matrix renders at most 100 active members, considers at most 100 owned
+  speakers, and renders at most 100 credential rows, with a note when a bound is
+  reached; a truncated empty credential result says it covers only the first 100
+  owned speakers. It has no pagination, search, or filtering. It shows credential
+  IDs, states, and scope identifiers only; the public prefix, verifier, and raw token
+  are never selected or rendered. It performs one inventory read per considered
+  owned speaker, so the bound limits rendered rows and reads, not scan cost.
 - Search covers message **summaries only**. There is no body search, full-text
   index, ranking, highlighting, saved search, or search across projects.
 - `type` and `sender` are exact-match filters using the API identifiers. The

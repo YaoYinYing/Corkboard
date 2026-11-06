@@ -67,6 +67,8 @@ export interface OwnedCredential {
   revokedAt: string | null;
   /** Derived for display; revocation wins over expiry. */
   state: CredentialState;
+  /** Stored scope identifiers (a ceiling, not an inferred grant). */
+  scopes: Scope[];
   projects: CredentialGrant[];
 }
 
@@ -596,13 +598,15 @@ async function accountCanReadProject(
 //
 // The inventory selects only non-secret columns. The raw token was displayed
 // once at issuance and cannot be recovered here; the public prefix is not shown
-// either, so the page cannot be used to correlate or probe a credential. The
-// speaker, credential, and grant reads are three independent SELECTs; each
-// repeats the owner/active-account predicate. This is a read path, so it does
-// not use the write transaction (`SqlDatabase.transaction` is BEGIN IMMEDIATE
-// and buffers writes for D1's batch emulation). There is no snapshot claim: an
-// ownership transfer between reads can only make a later read return empty,
-// never add a foreign speaker's rows.
+// either, so the page cannot be used to correlate or probe a credential. Scope
+// identifiers are non-secret capability names and are returned for the policy
+// matrix; the inventory page does not render them. The speaker, credential, and
+// grant reads are three independent SELECTs; each repeats the owner/active-
+// account predicate. This is a read path, so it does not use the write
+// transaction (`SqlDatabase.transaction` is BEGIN IMMEDIATE and buffers writes
+// for D1's batch emulation). There is no snapshot claim: an ownership transfer
+// between reads can only make a later read return empty, never add a foreign
+// speaker's rows.
 export function credentialState(
   revokedAt: string | null,
   expiresAt: string | null,
@@ -638,8 +642,9 @@ export async function listOwnedSpeakerCredentials(
     created_at: string;
     expires_at: string | null;
     revoked_at: string | null;
+    scope_json: string;
   }>(
-    `SELECT c.id, c.created_at, c.expires_at, c.revoked_at
+    `SELECT c.id, c.created_at, c.expires_at, c.revoked_at, c.scope_json
        FROM credentials c
        JOIN speakers s ON s.id = c.speaker_id
        JOIN accounts a ON a.id = s.owner_account_id
@@ -681,6 +686,7 @@ export async function listOwnedSpeakerCredentials(
       expiresAt: row.expires_at,
       revokedAt: row.revoked_at,
       state: credentialState(row.revoked_at, row.expires_at, nowMs),
+      scopes: SCOPES.filter((scope) => parseScopeJson(row.scope_json).has(scope)),
       projects: grants.get(row.id) ?? [],
     })),
     grantableProjects: speakerProjects

@@ -87,6 +87,11 @@ const MAX_TIMELINE_LIMIT = 100;
 // allocation starts at 1, so this bound is safe without knowing the max.
 const LATEST_SEQ = Number.MAX_SAFE_INTEGER;
 const FORM_MEDIA_TYPE = "application/x-www-form-urlencoded";
+// Read-only policy page result bounds, matching the overview's 100-row cap. The
+// caps bound rendered result size, not the underlying scan.
+const MAX_POLICY_MEMBERS = 100;
+const MAX_POLICY_SPEAKERS = 100;
+const MAX_POLICY_CREDENTIALS = 100;
 
 interface TimelineFilters {
   type?: string;
@@ -221,6 +226,23 @@ const EN = {
   memberDuplicate: "That speaker is already an active member.",
   memberLastOwner: "The last owner membership cannot be removed.",
   removeMemberAction: "Remove",
+  policyLink: "Policy matrix",
+  policyTitle: "Project policy",
+  policyCaption: "Active members and their scopes in this project",
+  policyMemberColumn: "Member",
+  policyGranted: "Granted",
+  policyNotGranted: "Not granted",
+  policyMembersTruncated: "Only the first 100 active members are shown.",
+  policyCredentialsHeading: "Credential grants on this project",
+  policyCredentialsEmpty:
+    "No credential owned by this account holds a grant on this project.",
+  policyCredentialsEmptyTruncated:
+    "No credential among the first 100 owned speakers holds a grant on this project.",
+  policyCredentialsTruncated:
+    "Only the first 100 owned speakers are considered, and at most 100 credential rows are shown.",
+  policyCredentialColumn: "Credential",
+  policyCredentialStateColumn: "State",
+  policyCredentialScopesColumn: "Credential scopes",
   composeMessageAction: "New message",
   newMessageTitle: "New message",
   messageSenderLabel: "Send as",
@@ -390,6 +412,20 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   memberDuplicate: "该说话者已经是活跃成员。",
   memberLastOwner: "无法移除最后一个所有者成员。",
   removeMemberAction: "移除",
+  policyLink: "策略矩阵",
+  policyTitle: "项目策略",
+  policyCaption: "此项目的活跃成员及其权限范围",
+  policyMemberColumn: "成员",
+  policyGranted: "已授予",
+  policyNotGranted: "未授予",
+  policyMembersTruncated: "仅显示前 100 名活跃成员。",
+  policyCredentialsHeading: "此项目的凭证授权",
+  policyCredentialsEmpty: "此账户没有持有该项目授权的凭证。",
+  policyCredentialsEmptyTruncated: "在前 100 名已拥有的说话者中，没有凭证持有该项目授权。",
+  policyCredentialsTruncated: "仅考虑前 100 名已拥有的说话者，最多显示 100 行凭证。",
+  policyCredentialColumn: "凭证",
+  policyCredentialStateColumn: "状态",
+  policyCredentialScopesColumn: "凭证权限范围",
   composeMessageAction: "新建消息",
   newMessageTitle: "新建消息",
   messageSenderLabel: "发送者",
@@ -482,6 +518,7 @@ const WEB_CSS = `:root {
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --table-border-collapse: collapse;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -549,6 +586,14 @@ button { padding: var(--space-2) var(--space-3); border: 1px solid var(--brand);
 .project-form fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); margin: 0; display: grid; gap: var(--space-1); }
 .project-form legend { font-weight: 600; padding: 0 var(--space-1); }
 .grant-list { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-1); }
+.policy-table-wrap { overflow-x: auto; margin-block: var(--space-2) var(--space-4); }
+.policy-table-wrap:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.policy-table { width: 100%; min-width: 40rem; border-collapse: var(--table-border-collapse); }
+.policy-table caption { text-align: left; font-weight: 600; padding-bottom: var(--space-2); }
+.policy-table th, .policy-table td { border: 1px solid var(--border); padding: var(--space-1) var(--space-2); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.policy-table thead th { background: var(--surface-muted); }
+.policy-granted { color: var(--success); font-weight: 600; }
+.policy-denied { color: var(--ink-muted); }
 .form-actions { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: center; margin: 0; }
 @media (min-width: 48rem) { .message dl { grid-template-columns: max-content 1fr max-content 1fr; } }
 @media (max-width: 40rem) { dl { grid-template-columns: 1fr; } }
@@ -1533,6 +1578,147 @@ async function handleMemberRemove(
   }
 }
 
+interface PolicyCredentialRow {
+  speaker: OwnedSpeakerCredentials["speaker"];
+  credential: OwnedCredential;
+}
+
+interface PolicyData {
+  members: readonly ProjectMember[];
+  membersTruncated: boolean;
+  credentials: readonly PolicyCredentialRow[];
+  credentialsTruncated: boolean;
+}
+
+function renderScopeCodes(locale: Locale, scopes: readonly string[]): string {
+  return scopes.length === 0
+    ? escapeHtml(t(locale, "speakerNoScopes"))
+    : scopes.map((scope) => `<code>${escapeHtml(scope)}</code>`).join(" ");
+}
+
+// Read-only, owner-only matrix. Scope cells pair text with a class, never colour
+// alone, and every dynamic value is escaped. There is no form and no CSRF token.
+function renderPolicyPage(
+  locale: Locale,
+  url: URL,
+  projectId: string,
+  data: PolicyData,
+): Response {
+  const memberHeader = SCOPES.map(
+    (scope) => `<th scope="col"><code>${escapeHtml(scope)}</code></th>`,
+  ).join("");
+  let memberTable: string;
+  if (data.members.length === 0) {
+    memberTable = `<p class="empty">${escapeHtml(t(locale, "membersEmpty"))}</p>`;
+  } else {
+    const rows = data.members
+      .map((member) => {
+        const cells = SCOPES.map((scope) => {
+          const granted = member.capabilities.includes(scope);
+          return `<td class="${granted ? "policy-granted" : "policy-denied"}">${escapeHtml(t(locale, granted ? "policyGranted" : "policyNotGranted"))}</td>`;
+        }).join("");
+        return `<tr>
+<th scope="row">${escapeHtml(displaySpeakerName({ id: member.speakerId, display_name: member.displayName }))} <code>${escapeHtml(member.speakerId)}</code></th>${cells}<td>${renderScopeCodes(locale, member.capabilities)}</td>
+</tr>`;
+      })
+      .join("\n");
+    memberTable = `<div class="policy-table-wrap" role="region" aria-labelledby="policy-caption" tabindex="0">
+<table class="policy-table">
+<caption id="policy-caption">${escapeHtml(t(locale, "policyCaption"))}</caption>
+<thead><tr><th scope="col">${escapeHtml(t(locale, "policyMemberColumn"))}</th>${memberHeader}<th scope="col">${escapeHtml(t(locale, "membersCapabilitiesLabel"))}</th></tr></thead>
+<tbody>
+${rows}
+</tbody>
+</table>
+</div>${data.membersTruncated ? `\n<p class="hint">${escapeHtml(t(locale, "policyMembersTruncated"))}</p>` : ""}`;
+  }
+
+  let credentialSection: string;
+  if (data.credentials.length === 0) {
+    // With a truncated speaker list the absolute "no credential" claim would be
+    // false: an unseen speaker may hold a grant. Say what was actually checked.
+    const emptyKey = data.credentialsTruncated
+      ? "policyCredentialsEmptyTruncated"
+      : "policyCredentialsEmpty";
+    credentialSection = `<p class="empty">${escapeHtml(t(locale, emptyKey))}</p>`;
+  } else {
+    const rows = data.credentials
+      .map(({ speaker, credential }) => {
+        const active = credential.state === "active";
+        return `<tr>
+<th scope="row">${escapeHtml(displaySpeakerName(speaker))} <code>${escapeHtml(speaker.id)}</code></th>
+<td><code>${escapeHtml(credential.id)}</code></td>
+<td>${renderScopeCodes(locale, credential.scopes)}</td>
+<td${active ? ' class="status"' : ""}>${escapeHtml(t(locale, credentialStateKey(credential.state)))}</td>
+</tr>`;
+      })
+      .join("\n");
+    credentialSection = `<div class="policy-table-wrap" role="region" aria-labelledby="policy-credentials-heading" tabindex="0">
+<table class="policy-table">
+<caption id="policy-credentials-heading">${escapeHtml(t(locale, "policyCredentialsHeading"))}</caption>
+<thead><tr><th scope="col">${escapeHtml(t(locale, "speakerNameLabel"))}</th><th scope="col">${escapeHtml(t(locale, "policyCredentialColumn"))}</th><th scope="col">${escapeHtml(t(locale, "policyCredentialScopesColumn"))}</th><th scope="col">${escapeHtml(t(locale, "policyCredentialStateColumn"))}</th></tr></thead>
+<tbody>
+${rows}
+</tbody>
+</table>
+</div>${data.credentialsTruncated ? `\n<p class="hint">${escapeHtml(t(locale, "policyCredentialsTruncated"))}</p>` : ""}`;
+  }
+
+  const content = `<p><a href="/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}">${escapeHtml(t(locale, "backToTimeline"))}</a></p>
+<h1>${escapeHtml(t(locale, "policyTitle"))}</h1>
+${memberTable}
+<h2>${escapeHtml(t(locale, "policyCredentialsHeading"))}</h2>
+${credentialSection}`;
+  return htmlResponse(
+    200,
+    renderPage(locale, url, t(locale, "policyTitle"), content),
+  );
+}
+
+async function handlePolicy(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const principal = sessionAccountPrincipal(session);
+  // Project-owner-only, matching the membership editor. `listProjectMembers`
+  // re-reads the same predicate before returning any rows.
+  await authorizeProjectOwner(deps, principal, projectId);
+  const allMembers = await listProjectMembers(deps, principal, projectId);
+
+  // Credential rows come only from the account's owned speakers through the
+  // existing inventory path; each speaker read repeats the ownership and active
+  // account predicate. A grant row, not a membership, decides inclusion.
+  const ownedSpeakers = await listOwnedSpeakers(deps, principal);
+  const speakers = ownedSpeakers.slice(0, MAX_POLICY_SPEAKERS);
+  let credentialsTruncated = ownedSpeakers.length > MAX_POLICY_SPEAKERS;
+  const credentials: PolicyCredentialRow[] = [];
+  for (const speaker of speakers) {
+    const inventory = await listOwnedSpeakerCredentials(deps, principal, speaker.id);
+    for (const credential of inventory.credentials) {
+      if (!credential.projects.some((project) => project.id === projectId)) continue;
+      if (credentials.length >= MAX_POLICY_CREDENTIALS) {
+        credentialsTruncated = true;
+        break;
+      }
+      credentials.push({ speaker: inventory.speaker, credential });
+    }
+  }
+
+  return renderPolicyPage(locale, url, projectId, {
+    members: allMembers.slice(0, MAX_POLICY_MEMBERS),
+    membersTruncated: allMembers.length > MAX_POLICY_MEMBERS,
+    credentials,
+    credentialsTruncated,
+  });
+}
+
 interface MessageFormValues {
   speakerId: string;
   summary: string;
@@ -1835,6 +2021,16 @@ async function handleMessageCreate(
   }
 }
 
+function credentialStateKey(state: OwnedCredential["state"]): MessageKey {
+  return state === "revoked"
+    ? "statusRevoked"
+    : state === "expired"
+      ? "statusExpired"
+      : state === "unknown"
+        ? "statusUnknown"
+        : "statusActive";
+}
+
 function displaySpeakerName(speaker: {
   id: string;
   display_name: string | null;
@@ -1938,14 +2134,7 @@ ${options.inventory.credentials
     // service re-checks the credential state and speaker/account status.
     const editable =
       credential.state === "active" && options.inventory.speaker.status === "active";
-    const stateKey =
-      credential.state === "revoked"
-        ? "statusRevoked"
-        : credential.state === "expired"
-          ? "statusExpired"
-          : credential.state === "unknown"
-            ? "statusUnknown"
-            : "statusActive";
+    const stateKey = credentialStateKey(credential.state);
     const projects =
       credential.projects.length === 0
         ? escapeHtml(t(locale, "credentialNoGrants"))
@@ -2559,6 +2748,15 @@ async function handleTimeline(
     if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
   }
 
+  // The policy matrix is owner-only; a non-owner's NOT_FOUND simply omits it.
+  let policyLink = "";
+  try {
+    await authorizeProjectOwner(deps, sessionAccountPrincipal(session), projectId);
+    policyLink = ` <span aria-hidden="true">·</span> <a href="/projects/${escapeHtml(projectId)}/policy${localeQuery(locale)}">${escapeHtml(t(locale, "policyLink"))}</a>`;
+  } catch (error) {
+    if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
+  }
+
   // Show the compose link only when the account owns at least one sender for
   // this project. The compose route (and the send itself) re-authorizes.
   const senders = await listSessionSendSpeakers(deps, session, projectId);
@@ -2567,7 +2765,7 @@ async function handleTimeline(
       ? ""
       : ` <span aria-hidden="true">·</span> <a href="/projects/${escapeHtml(projectId)}/messages/new${localeQuery(locale)}">${escapeHtml(t(locale, "composeMessageAction"))}</a>`;
 
-  const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a>${composeLink}${editLink}</p>
+  const content = `<p><a href="/${localeQuery(locale)}">${escapeHtml(t(locale, "backToProjects"))}</a>${composeLink}${editLink}${policyLink}</p>
 <h1>${escapeHtml(project.title)}</h1>
 ${renderFilterForm(locale, projectId, url, filters, limit)}
 <h2>${escapeHtml(t(locale, "timelineTitle"))}</h2>
@@ -2705,6 +2903,13 @@ export function isWebPath(segments: readonly string[]): boolean {
     segments.length === 3 &&
     segments[0] === "projects" &&
     segments[2] === "members"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 3 &&
+    segments[0] === "projects" &&
+    segments[2] === "policy"
   ) {
     return true;
   }
@@ -2872,6 +3077,14 @@ export async function handleWebRoute(
         return await handleMemberAdd(deps, request, url, locale, segments[1] ?? "");
       }
       return methodNotAllowed(locale, url, "GET, POST");
+    }
+    if (
+      segments.length === 3 &&
+      segments[0] === "projects" &&
+      segments[2] === "policy"
+    ) {
+      if (method !== "GET") return methodNotAllowed(locale, url, "GET");
+      return await handlePolicy(deps, request, url, locale, segments[1] ?? "");
     }
     if (
       segments.length === 5 &&
