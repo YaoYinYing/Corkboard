@@ -57,7 +57,9 @@ backups and storage artifacts, not the operator.
 | `src/mcp/` | Streamable HTTP endpoint and six tools over the same service layer (bearer auth) |
 
 There is no parallel authorization path. HTTP, MCP, and CLI call the same service
-functions.
+functions. The explicit actors/permissions matrix and the exact bearer, session,
+owner, and OAuth predicates are in
+[`authorization.md`](authorization.md).
 
 ## Ports
 

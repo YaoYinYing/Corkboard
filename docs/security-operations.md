@@ -4,6 +4,11 @@ Status: implemented for the Node.js 24 + SQLite self-hosted deployment (vertical
 slices A and B, plus the human account session slice). Cloudflare-specific steps are
 planned.
 
+The complete actor/resource matrix and the exact bearer, session, project-owner, and
+OAuth predicates are in [`authorization.md`](authorization.md). It also lists roles
+that do not exist (no platform administrator; `member.read`/`member.manage` are not
+enforced).
+
 ## Secrets and keys
 
 The server needs two independent secrets plus one configuration path:

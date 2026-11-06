@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -874,6 +875,122 @@ test("duplicate idempotency key with a changed payload maps to CONFLICT", async 
   assert.equal(second.status, 409);
   assert.equal((await jsonBody(second)).error.code, "CONFLICT");
   assert.equal((await fx.db.all("SELECT id FROM messages")).length, 1);
+});
+
+// A real loopback HTTP server around the Web handler. The first message-send
+// POST is intentionally answered by destroying the socket after the handler has
+// committed, simulating a lost response. The handler's response is captured
+// server-side first, so the test still knows what the lost response contained.
+async function startLossySendServer(
+  t: { after(fn: () => void | Promise<void>): void },
+  app: App,
+): Promise<{ base: string; firstResponse: () => JsonObject | undefined }> {
+  let drop = true;
+  let captured: JsonObject | undefined;
+  const server = createServer(async (request, response) => {
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (value !== undefined) {
+          headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+        }
+      }
+      const method = (request.method ?? "GET").toUpperCase();
+      const body = method === "GET" || method === "HEAD" ? undefined : Buffer.concat(chunks);
+      const webResponse = await app(
+        new Request(url, { method, headers, ...(body === undefined ? {} : { body }) }),
+      );
+      if (drop && method === "POST" && url.pathname.endsWith("/messages")) {
+        drop = false;
+        captured = (await webResponse.clone().json()) as JsonObject;
+        request.socket.destroy();
+        return;
+      }
+      response.statusCode = webResponse.status;
+      webResponse.headers.forEach((value, name) => {
+        if (name.toLowerCase() !== "set-cookie") response.setHeader(name, value);
+      });
+      response.end(Buffer.from(await webResponse.arrayBuffer()));
+    } catch {
+      if (!response.headersSent) response.statusCode = 503;
+      response.end();
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  t.after(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
+  );
+  const address = server.address();
+  assert.ok(address !== null && typeof address === "object");
+  return { base: `http://127.0.0.1:${address.port}`, firstResponse: () => captured };
+}
+
+test("a lost send response retried with the same Idempotency-Key yields exactly one message", async (t) => {
+  const { fx, app } = await withApp(t);
+  const alice = await addActor(fx, "alice");
+  await fx.addProject("proj_1", alice.accountId);
+  await fx.addMembership("proj_1", alice.speakerId);
+  const { base, firstResponse } = await startLossySendServer(t, app);
+
+  const send = (body: JsonObject): Promise<Response> =>
+    fetch(`${base}/api/v1/projects/proj_1/messages`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${alice.token}`,
+        "content-type": "application/json",
+        "idempotency-key": "uncertain-key",
+      },
+      body: JSON.stringify(body),
+    });
+
+  // The server commits, then the response is lost. The client sees a failed
+  // request, not a status, which is the uncertain-acceptance window.
+  await assert.rejects(send(payload("uncertain body")));
+  const lost = firstResponse();
+  assert.equal(lost?.seq, 1);
+  assert.equal(typeof lost?.message_id, "string");
+
+  // Retry the identical request with the same key through the same HTTP path.
+  const retried = await send(payload("uncertain body"));
+  assert.equal(retried.status, 200);
+  const retriedBody = await jsonBody(retried);
+  assert.equal(retriedBody.message_id, lost?.message_id);
+  assert.equal(retriedBody.seq, 1);
+
+  // The replay must not merely return stable identifiers: the stored body is
+  // still the original plaintext, not truncated, replaced, or lost.
+  const stored = await call(
+    app,
+    `/api/v1/projects/proj_1/messages/${retriedBody.message_id}/body`,
+    { token: alice.token },
+  );
+  assert.equal(stored.status, 200);
+  const storedBody = await jsonBody(stored);
+  assert.equal(storedBody.text, "uncertain body");
+  assert.equal(storedBody.digest, digestOf("uncertain body"));
+
+  // A different payload under the same key is a conflict, not a second write.
+  const conflict = await send(payload("different body"));
+  assert.equal(conflict.status, 409);
+  assert.equal((await jsonBody(conflict)).error.code, "CONFLICT");
+
+  assert.equal((await fx.db.all("SELECT id FROM messages")).length, 1);
+  assert.equal((await fx.db.all("SELECT id FROM body_objects")).length, 1);
+  assert.equal((await fx.db.all("SELECT key FROM idempotency_keys")).length, 1);
+  const list = await call(app, "/api/v1/projects/proj_1/messages", { token: alice.token });
+  assert.equal((await jsonBody(list)).messages.length, 1);
 });
 
 test("expired bodies map to BODY_EXPIRED at the route", async (t) => {

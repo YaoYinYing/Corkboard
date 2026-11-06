@@ -1346,3 +1346,28 @@ prevented regression; when to remove the advice.
   removal condition is met and the stale claim is pruned. The D1 half remains open.
 - **Remove when (remaining):** a D1 adapter documents how it supplies snapshot reads
   and affected-row counts for read-then-write callbacks.
+
+## 2026-11-06 — a rejected dangling reference is not a missing-object read test
+
+- **Failure:** TODO 334 listed "missing object" next to the crypto negatives, and the
+  only committed "missing" coverage was a schema contract test proving that a
+  `messages.body_object_id` foreign key rejects a reference to a nonexistent
+  `body_objects` row. That proves the FK works, not that a committed message whose
+  ciphertext has disappeared fails closed at the service read path. The ready-message
+  path could have returned content or skipped the receipt guard and the FK test would
+  still pass.
+- **Reproducer:** delete a committed message's blob through `BlobStore.delete` while
+  leaving its `body_objects` row and `ready` state. Before this checkpoint no service
+  or HTTP test asserted `INTEGRITY_FAILURE`, no receipt, and failure audits for that
+  state. A scratch mutation that returns empty plaintext instead of failing closed now
+  fails `a missing ciphertext blob on a committed message fails closed with no content
+  or receipt` with "Missing expected rejection".
+- **Fix:** add the service-level test that starts from a real `sendMessage` result,
+  deletes only the ciphertext with the supported storage port, keeps metadata
+  list-visible as `ready`, and asserts both `getMessageBody` and `markRead` reject with
+  `INTEGRITY_FAILURE`, write no receipt, and audit `message.body.read` /
+  `message.receipt.write` as failures. The FK contract test stays as schema evidence.
+- **Prevents:** treating "the foreign key rejects it" as proof of runtime fail-closed
+  behavior, and a missing-object regression hiding behind green crypto/FK tests.
+- **Remove when:** a storage lifecycle API can deterministically remove a committed
+  object row (with its message transition) and the test covers that branch too.

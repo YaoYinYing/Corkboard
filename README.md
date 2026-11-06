@@ -41,7 +41,7 @@ verify ChatGPT Web integration.
 | Path | Purpose |
 | --- | --- |
 | `TODO.md` | Normative design and acceptance checklist |
-| `docs/` | Architecture, threat model, API, operations, deployments, runbook, acceptance report, campaign contract |
+| `docs/` | Architecture, authorization model, threat model, API, operations, deployments, runbook, acceptance report, campaign contract |
 | `src/` | TypeScript core, storage/crypto/auth, message service, and Node.js adapter |
 | `migrations/` | Versioned, D1/SQLite-compatible SQL |
 | `tests/` | Unit, contract, integration, and security tests |
@@ -104,5 +104,7 @@ MIT. See [LICENSE](LICENSE).
 
 - Never commit credentials. The private, unredacted archival design is intentionally
   untracked; a redacted copy lives in `docs/original-design-redacted.md`.
+- The actors, resources, and exact authorization predicates are in
+  [`docs/authorization.md`](docs/authorization.md).
 - Report vulnerabilities privately to the maintainer; do not open a public issue with
   exploit details or live credentials.

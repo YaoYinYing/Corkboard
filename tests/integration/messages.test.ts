@@ -598,6 +598,55 @@ test("corrupted ciphertext gives INTEGRITY_FAILURE with no receipt and an audit 
   );
 });
 
+test("a missing ciphertext blob on a committed message fails closed with no content or receipt", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+
+  const sent = await send(fx, alice.principal, "proj_1", "key-1", "missing blob target");
+  assert.equal(sent.bodyState, "ready");
+  const object = await fx.db.first<{ id: string; storage_key: string | null }>(
+    `SELECT b.id, b.storage_key FROM body_objects b
+       JOIN messages m ON m.body_object_id = b.id
+      WHERE m.id = ?`,
+    [sent.messageId],
+  );
+  assert.ok(object !== undefined && object.storage_key !== null);
+  const objectId = object.id;
+  const storageKey = object.storage_key;
+
+  // Simulated storage loss after commit: remove only the ciphertext through the
+  // supported BlobStore port. The ready message and its body_objects row stay,
+  // so this is a missing object, not an expiry tombstone or a dangling FK.
+  await fx.blobs.delete(storageKey);
+
+  // Metadata still reports a committed, ready message; only the read path must
+  // fail closed.
+  const list = await listMessages(fx.deps, alice.principal, "proj_1");
+  assert.equal(list.messages[0]?.bodyState, "ready");
+  assert.equal(
+    (await fx.db.all("SELECT id FROM body_objects WHERE id = ?", [objectId])).length,
+    1,
+  );
+
+  await expectCode(
+    getMessageBody(fx.deps, alice.principal, "proj_1", sent.messageId),
+    "INTEGRITY_FAILURE",
+  );
+  await expectCode(markRead(fx.deps, alice.principal, "proj_1", sent.messageId), "INTEGRITY_FAILURE");
+
+  assert.equal((await fx.db.all("SELECT message_id FROM message_receipts")).length, 0);
+  const audits = await fx.db.all<{ operation: string; outcome: string }>(
+    "SELECT operation, outcome FROM audit_events",
+  );
+  assert.ok(audits.length >= 2);
+  assert.ok(audits.every((event) => event.outcome === "failure"));
+  assert.deepEqual(
+    [...new Set(audits.map((event) => event.operation))].sort(),
+    ["message.body.read", "message.receipt.write"],
+  );
+});
+
 test("a re-sealed body with matching ids but a different digest is INTEGRITY_FAILURE", async (t) => {
   const fx = await withFixture(t);
   const alice = await addActor(fx, "alice");
