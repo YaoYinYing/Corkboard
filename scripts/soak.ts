@@ -100,7 +100,7 @@ export interface SoakReport {
   };
 }
 
-interface ProfilePlan {
+export interface ProfilePlan {
   messages: number;
   concurrency: number;
   expiryMessages: number;
@@ -142,6 +142,18 @@ const PROFILE_PLANS: Record<SoakProfile, ProfilePlan> = {
     listP95LimitMs: 8_000,
   },
 };
+
+// Merge the four operator count flags over the profile; every other field
+// (speaker counts, prune backlog, samples, guards) stays profile-defined.
+export function effectivePlan(config: SoakConfig): ProfilePlan {
+  return {
+    ...PROFILE_PLANS[config.profile],
+    messages: config.messages,
+    concurrency: config.concurrency,
+    expiryMessages: config.expiryMessages,
+    rateLimitRequests: config.rateLimitRequests,
+  };
+}
 
 export class SoakUsageError extends Error {
   constructor(message: string) {
@@ -197,10 +209,16 @@ export function parseSoakArgs(args: readonly string[]): SoakConfig {
     values["expiry-messages"] === undefined
       ? plan.expiryMessages
       : parseInteger(values["expiry-messages"], "--expiry-messages", 1, 1_000);
+  // Burst is fixed at 5, so fewer than 6 requests cannot show both a 200 and a 429.
   const rateLimitRequests =
     values["rate-limit-requests"] === undefined
       ? plan.rateLimitRequests
-      : parseInteger(values["rate-limit-requests"], "--rate-limit-requests", 1, 500);
+      : parseInteger(values["rate-limit-requests"], "--rate-limit-requests", 6, 500);
+
+  const baseSha = values["base-sha"];
+  if (baseSha !== undefined && !/^[0-9a-fA-F]{4,64}$/.test(baseSha)) {
+    throw new SoakUsageError("--base-sha must be 4-64 hexadecimal characters");
+  }
 
   return {
     profile: rawProfile,
@@ -208,7 +226,7 @@ export function parseSoakArgs(args: readonly string[]): SoakConfig {
     concurrency,
     expiryMessages,
     rateLimitRequests,
-    ...(values["base-sha"] === undefined ? {} : { baseSha: values["base-sha"] }),
+    ...(baseSha === undefined ? {} : { baseSha }),
   };
 }
 
@@ -382,6 +400,21 @@ function digestOf(text: string): string {
   return `sha256:${createHash("sha256").update(text).digest("hex")}`;
 }
 
+// Stream the body so an oversized or hostile response cannot allocate without
+// bound; an over-cap body is treated as unparseable.
+async function readCappedBody(response: Response): Promise<string | undefined> {
+  if (response.body === null) return "";
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let raw = "";
+  for await (const chunk of response.body) {
+    bytes += chunk.byteLength;
+    if (bytes > MAX_RESPONSE_BYTES) return undefined;
+    raw += decoder.decode(chunk, { stream: true });
+  }
+  return raw + decoder.decode();
+}
+
 async function request(
   base: string,
   path: string,
@@ -402,9 +435,9 @@ async function request(
       ...(options.body === undefined ? {} : { body: options.body }),
       signal: AbortSignal.timeout(SCENARIO_TIMEOUT_MS),
     });
-    const raw = await response.text();
+    const raw = await readCappedBody(response);
     let json: unknown;
-    if (raw !== "" && raw.length <= MAX_RESPONSE_BYTES) {
+    if (raw !== undefined && raw !== "") {
       try {
         json = JSON.parse(raw);
       } catch {
@@ -1338,19 +1371,33 @@ export async function runSoak(config: SoakConfig): Promise<SoakReport> {
   counters.unexpected5xx = 0;
   counters.networkErrors = 0;
   counters.rateLimited = 0;
-  const plan = PROFILE_PLANS[config.profile];
+  const plan = effectivePlan(config);
   const startedAt = new Date();
   const startedMs = performance.now();
   const meta = metadata(config);
   const root = mkdtempSync(join(tmpdir(), "corkboard-soak-"));
   const dataDir = join(root, "data");
-  process.once("exit", () => {
+  const removeTempRoot = (): void => {
     try {
       rmSync(root, { recursive: true, force: true });
     } catch {
       // Best effort; the directory is under the OS temp dir.
     }
-  });
+  };
+  process.once("exit", removeTempRoot);
+  // startServer installs process-wide handlers that exit 0; harness-owned
+  // handlers registered first must win so a signal cannot mask a failure or
+  // leave the temporary installation behind. Convention: 128 + signal number.
+  const onSigint = (): void => {
+    removeTempRoot();
+    process.exit(130);
+  };
+  const onSigterm = (): void => {
+    removeTempRoot();
+    process.exit(143);
+  };
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
 
   const pepper = crypto.getRandomValues(new Uint8Array(32));
   const rootKey = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
@@ -1422,11 +1469,9 @@ export async function runSoak(config: SoakConfig): Promise<SoakReport> {
 
   const thresholds = evaluateThresholds(config.profile, round1(sendP95), round1(listP95));
   const durationMs = performance.now() - startedMs;
-  try {
-    rmSync(root, { recursive: true, force: true });
-  } catch {
-    // The exit hook retries; the directory is under the OS temp dir.
-  }
+  removeTempRoot();
+  process.removeListener("SIGINT", onSigint);
+  process.removeListener("SIGTERM", onSigterm);
   const report: SoakReport = {
     format: "corkboard-soak",
     version: 1,

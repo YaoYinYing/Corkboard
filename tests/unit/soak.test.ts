@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   SoakUsageError,
+  effectivePlan,
   evaluateThresholds,
   latencyStats,
   maxBoundaryText,
@@ -44,6 +45,34 @@ test("soak profile defaults and flags", () => {
   });
 });
 
+test("effective plan applies count overrides and keeps profile-only fields", () => {
+  const config = parseSoakArgs([
+    "--profile",
+    "quick",
+    "--messages",
+    "3",
+    "--concurrency",
+    "1",
+    "--expiry-messages",
+    "1",
+    "--rate-limit-requests",
+    "6",
+  ]);
+  assert.deepEqual(effectivePlan(config), {
+    messages: 3,
+    concurrency: 1,
+    expiryMessages: 1,
+    rateLimitRequests: 6,
+    exchangeSpeakers: 4,
+    exchangePerSpeaker: 10,
+    pruneBacklog: 25,
+    bodySample: 25,
+    replaySample: 10,
+    sendP95LimitMs: 5_000,
+    listP95LimitMs: 3_000,
+  });
+});
+
 test("soak argument validation rejects bad values", () => {
   for (const args of [
     ["--profile", "huge"],
@@ -53,6 +82,9 @@ test("soak argument validation rejects bad values", () => {
     ["--concurrency", "65"],
     ["--expiry-messages", "0"],
     ["--rate-limit-requests", "0"],
+    ["--rate-limit-requests", "5"],
+    ["--base-sha", "not-hex"],
+    ["--base-sha", "abc\u0007def"],
     ["--unknown"],
     ["positional"],
   ]) {

@@ -25,8 +25,8 @@ npm run --silent soak -- --profile quick
 
 The report is one JSON object on stdout; a short human summary is written to stderr.
 Plain `npm run` prints its usual `> corkboard@...` banner before the script, so use
-`--silent` or take the last stdout line when parsing. The harness writes no files and
-leaves no data directory behind.
+`--silent` or take the last stdout line when parsing. The harness writes nothing inside
+the repository; the temporary installation is removed on exit.
 
 Flags (defaults come from the profile):
 
@@ -36,8 +36,11 @@ Flags (defaults come from the profile):
 | `--messages <n>` | Many-small-message count, 1–5000 |
 | `--concurrency <n>` | Bounded in-flight HTTP requests, 1–64 |
 | `--expiry-messages <n>` | Messages created with a future expiry and then expired, 1–1000 |
-| `--rate-limit-requests <n>` | Rapid requests in the dedicated rate-limit server, 1–500 |
-| `--base-sha <sha>` | Override the reported base revision (otherwise `git rev-parse HEAD`) |
+| `--rate-limit-requests <n>` | Rapid requests in the dedicated rate-limit server, 6–500 (minimum 6 so the fixed burst of 5 exposes both a `200` and a `429`) |
+| `--base-sha <sha>` | Override the reported base revision (otherwise `git rev-parse HEAD`); must be hexadecimal |
+
+The four count flags replace the profile's counts in every scenario and in the reported
+`config`; speaker counts, prune backlog, samples, and latency guards stay profile-defined.
 
 | Profile | Small messages | Concurrency | Speakers × each | Expiry messages | Rate burst requests | Prune backlog | Observed quick duration |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -60,7 +63,7 @@ Scenarios and their assertions:
 
 | Scenario | What it exercises | Correctness assertions |
 | --- | --- | --- |
-| `small_messages` | Bounded-concurrency sends of many small messages | Every send returned `201`; all created messages list in strictly ascending unique `seq`; replaying the same idempotency key returns `200` with the same `message_id` and creates no duplicate row |
+| `small_messages` | Bounded-concurrency sends of many small messages | Every send returned `201`; created messages have unique `seq` (checked client-side after sorting; the ordered project listing is asserted in `metadata_search_pagination`); replaying the same idempotency key returns `200` with the same `message_id` and creates no duplicate row |
 | `boundary` | 8192-byte text accepted, 8193-byte text rejected | `201` then `400 VALIDATION_ERROR`; exactly one message stored |
 | `concurrent_speakers` | 4/8 speakers exchanging messages, with replies to another speaker's seed | All expected messages created; reply references retained; the project lists in ascending unique `seq` |
 | `metadata_search_pagination` | Summary search (`q=`) and `after_seq` cursor pages while the concurrent-speaker phase runs | All rows returned exactly once in ascending order; page cursors advance and terminate; search hits match the planted count |
@@ -162,13 +165,14 @@ predates the commit, so `dirty` is `true`.
 ## Safety
 
 - Temporary directory outside the repository; removed on normal exit (and by an
-  `exit` hook). The primary data directory is never read or written.
+  `exit` hook). `SIGINT` exits `130` and `SIGTERM` exits `143`, removing the directory
+  first. The primary data directory is never read or written.
 - Synthetic names, bodies, accounts, and synthetic email addresses only.
-- Freshly generated throwaway root key and pepper, passed only to the child server's
-  environment; never printed, logged, or written to the report.
+- Freshly generated throwaway root key and pepper, passed only to the in-process
+  server configuration; never printed, logged, or written to the report.
 - No bodies, summaries, tokens, Authorization headers, cookies, or full IPs are
   recorded. The report contains counts, latency samples, status/error codes, and
   configuration only.
 - The server's own JSON request log (stdout) is silenced during the run so it cannot
   corrupt the machine-readable report; the harness aggregates from client responses.
-- No outbound network: the child server binds `127.0.0.1` on an ephemeral port.
+- No outbound network: the in-process server binds `127.0.0.1` on an ephemeral port.

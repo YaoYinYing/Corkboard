@@ -1074,3 +1074,22 @@ prevented regression; when to remove the advice.
   the one it claims to cover.
 - **Remove when:** Validation has a documented single length limit, or a byte-first
   ordering that makes the two limits independently reachable.
+
+## 2026-11-05 — a parsed flag is not a wired flag
+
+- **Failure:** `parseSoakArgs` validated `--messages`, `--concurrency`,
+  `--expiry-messages` and `--rate-limit-requests`, and the unit test asserted the
+  parsed config, but `runSoak` read only `PROFILE_PLANS[config.profile]`. Every override
+  was silently ignored. Separately, `startServer` installs process-wide `SIGINT`/
+  `SIGTERM` handlers that call `process.exit(0)`, so signalling a failing soak run
+  could still exit 0.
+- **Reproducer:** `node scripts/soak.ts --profile quick --messages 3 --concurrency 1
+  --expiry-messages 1 --rate-limit-requests 6` still reported 200/8/20/12; `SIGINT` on
+  a `--profile full` run exited 0.
+- **Fix:** Merge the four flags over the profile in one `effectivePlan(config)` helper
+  and test the merged plan, not only parsing; register harness-owned signal handlers
+  immediately after the temp directory exists and exit `130`/`143`.
+- **Prevents:** Flags that look supported because parsing passes, and a library signal
+  handler masking the runner's failure exit code.
+- **Remove when:** Soak config has no separate parse/apply boundary, or the server stops
+  installing process-wide signal handlers.
