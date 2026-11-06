@@ -15,6 +15,7 @@
     "test:contract": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --test --test-reporter=spec \"tests/contract/**/*.test.ts\"",
     "test:security": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --test --test-reporter=spec \"tests/security/**/*.test.ts\"",
     "build": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" node_modules/typescript/lib/tsc.js -p tsconfig.build.json && \"$npm_node_execpath\" scripts/copy-migrations.ts",
+    "soak": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/soak.ts",
     "check": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/secret-scan.ts && \"$npm_node_execpath\" --experimental-strip-types scripts/history-secret-scan.ts && \"$npm_node_execpath\" scripts/license-report.ts && \"$npm_node_execpath\" node_modules/typescript/lib/tsc.js --noEmit && \"$npm_node_execpath\" --test --test-reporter=spec \"tests/**/*.test.ts\"",
     "audit": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/npm-audit.ts",
     "licenses": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/license-report.ts",

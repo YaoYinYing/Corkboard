@@ -1055,3 +1055,22 @@ prevented regression; when to remove the advice.
 - **Prevents:** A checkpoint whose provenance looks present in prose but is invisible
   to tooling, and a re-audit loop over a mechanical formatting defect.
 - **Remove when:** CI enforces the trailer schema on every pushed commit.
+
+## 2026-11-05 — a byte cap can hide behind the grapheme cap
+
+- **Failure:** The first 8 KiB text-boundary plan used `"x".repeat(8192)`. That
+  payload is rejected by the 2000-grapheme rule first, so it never exercises the
+  8192-byte branch; a soak asserting only "rejected" would have passed while
+  testing the wrong limit. With four bytes per grapheme, 2000 graphemes reach only
+  8000 bytes, so the byte cap looks unreachable.
+- **Reproducer:** `"x".repeat(8192)` returns `VALIDATION_ERROR` for graphemes; 1024
+  flag clusters (two regional indicators, 8 bytes, one grapheme) are 8192 bytes and
+  1024 graphemes and are accepted; adding one ASCII byte makes 8193 bytes and is
+  rejected by the byte cap.
+- **Fix:** Build boundary text from a single grapheme that is wider than one byte.
+  `scripts/soak.ts` exports `maxBoundaryText`/`overBoundaryText`, and the unit test
+  asserts both the byte and grapheme counts.
+- **Prevents:** A boundary test that passes by tripping a different validator than
+  the one it claims to cover.
+- **Remove when:** Validation has a documented single length limit, or a byte-first
+  ordering that makes the two limits independently reachable.

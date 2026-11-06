@@ -7,6 +7,11 @@
 checkpoint. This report commit is pending its own independent audit; the capability
 commits it cites were audited.
 
+**Load/soak amendment:** the load/soak rows below were updated by the bounded local
+soak-harness slice at base `a530693f479a7b8fbcc277f8cf367b81b466126d`. Its checkpoint
+commit/tree is recorded in that commit's trailer; the rest of this report still cites
+the revisions above. The harness is documented in [`soak.md`](./soak.md).
+
 **Design truth:** `TODO.md` §6 (Phase 8 and the release gate) and §8 (vertical-slice
 measure).
 
@@ -75,16 +80,18 @@ browser evidence; the only post-capture behavior change is test-covered and beha
 | --- | --- | --- |
 | Automated secret scan, dependency audit, pinned reproducible build, license/notice report, SBOM | **Verified in CI** | CI run `42055915268` (slice Z): `npm run secret-scan`, `secret-scan:history`, `licenses`, `typecheck`, `test`, `build`, `sbom`, upload `reports/`, `npm audit`. Locally `npm run check` also passed at this revision. |
 | Fresh independent security review of current head and exact deployment artifacts | **Partially verified** | Each capability checkpoint through `7812505` records security PASS + contract PASS on an exact tree in `IMPLEMENTATION_STATE.md`. There are **no deployment artifacts** to review because no deployment exists. This docs tree is pending its own independent audit. |
-| Load/soak: many small messages, slow uploads, 10 MiB boundaries, search, concurrent speakers, quota abuse, cleanup backlog | **Untested / Not implemented** | No load or soak run exists. Attachments (10 MiB) are not implemented. Concurrency is covered only by focused tests (`100+ parallel` unit/integration paths and a four-process SQLite test), not by load measurement. |
+| Load/soak: many small messages, slow uploads, 10 MiB boundaries, search, concurrent speakers, quota abuse, cleanup backlog | **Verified locally** (implemented scope; gaps below) | `npm run soak -- --profile quick` exit 0 at base `a530693`: 319 requests, 261 synthetic messages, 0 integrity failures, 0 unexpected 5xx, 0 network errors, 0 replay duplicates. Covered: 200 small messages; 4 concurrent speakers (40 messages, 16 cross-speaker replies); 8192-byte text accepted and 8193 rejected; summary search and ascending cursor pages; 20 injected-clock body expiries (`20` blobs deleted); real `expire-bodies`/`prune` CLI (25 backdated sessions pruned, all 261 messages unchanged); a 30/minute burst-5 server producing 7 documented `429 RATE_LIMITED` responses; and rejected no/invalid/revoked/missing-grant/non-member attempts. **Not covered:** slow uploads (the API accepts bounded JSON only, no streaming upload path), 10 MiB attachments (not implemented), quota abuse (no quotas implemented), D1/Workers/R2, TLS/reverse proxy, and multi-process. See [`soak.md`](./soak.md). |
 | Disaster rehearsal: recreate DB/ciphertext/key backups, audit integrity, resync cursors, revoke credentials, recover after interrupted deployment | **Untested** | Backup/verify/restore are implemented and locally tested (see below), but no rehearsal against a recreated host/keys was executed. Audit integrity is not cryptographically sealed. |
 | TLS, CSP/CORS, cookie policy, abuse rate limits, resource quotas, privacy notices, retention, incident procedure | **Partially verified** | CSP and cookie policy are implemented and asserted in tests; the CSP header was observed locally (`default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`). Per-credential rate limits and login limits are implemented (process-local). **TLS deployment was not executed** (example only). CORS is not enabled. No CORS, quota, privacy-notice, or formal retention-policy artifact exists beyond `docs/security-operations.md` and this runbook. |
 | Versioned operator runbook and final acceptance report stating production/staging/simulated status | **Delivered, pending audit** | [`runbook.md`](./runbook.md) v1 and this report v1. Neither claims production or staging verification. |
 
 **Release gate:** no open P0/critical-high security finding is recorded through
 `7812505`. Backend contract, live-browser dashboard evidence, local OAuth/MCP write,
-backup/restore, and negative permission tests have exact-revision evidence. The gate is
-**not met for a public beta** because ChatGPT Web write, D1/Workers/R2, load/soak,
-disaster rehearsal, key rotation, and a real TLS deployment remain absent or untested.
+backup/restore, bounded local load/soak (text-only implemented scope), and negative
+permission tests have exact-revision evidence. The gate is **not met for a public
+beta** because ChatGPT Web write, D1/Workers/R2, slow uploads and 10 MiB attachment
+boundaries, quota abuse, disaster rehearsal, key rotation, multi-process operation, and
+a real TLS deployment remain absent or untested.
 
 ## §8 vertical-slice measure
 
@@ -146,7 +153,7 @@ disaster rehearsal, key rotation, and a real TLS deployment remain absent or unt
 | Attachments (≤10 MiB, upload/scan/preview) | **Not implemented** | Blocked on Issue #5; text bodies only. The backup 16 KiB blob cap is sized for the 8 KiB text body. |
 | Key rotation (root key / pepper) | **Not implemented** | One root-key version `v1`; rotation requires re-encryption. Pepper rotation invalidates existing verifiers. |
 | Credential rotation / grant editing | **Not implemented** | Soft revocation and revoke-then-issue; `grant-key-project`/`revoke-key-project` are CLI-only. |
-| Load/soak | **Untested** | No run. |
+| Load/soak | **Verified locally (implemented scope)** | `npm run soak -- --profile quick` exit 0 at base `a530693` (319 requests, 261 messages, 0 integrity/5xx/network failures). Slow uploads, 10 MiB attachments, quotas, D1/R2, TLS and multi-process remain uncovered; see [`soak.md`](./soak.md). |
 | Disaster rehearsal | **Untested** | No run; procedure documented in the runbook. |
 | TLS deployment | **Untested** | Reverse-proxy example only; no certificate or proxy was exercised. |
 | Multi-process deployment | **Untested** | A local four-process SQLite persistence test exists. Rate limits, metrics, and MCP sessions are process-local; no multi-process deployment was run. |
@@ -189,8 +196,10 @@ this report does not cite one.
   the intended account/workspace.
 - A live D1 + R2 staging deployment passing the shared contract and a two-client
   exchange.
-- Load/soak results, a disaster rehearsal with recreated keys and backups, and a real
-  TLS reverse-proxy deployment.
+- A longer/full soak, slow-upload and 10 MiB attachment boundaries, quota abuse, and
+  multi-process/D1 deployments (the bounded `quick` scope is in [`soak.md`](./soak.md));
+  a disaster rehearsal with recreated keys and backups; and a real TLS reverse-proxy
+  deployment.
 - Key rotation and credential rotation/grant editing, if implemented.
 - Browser re-capture of the dashboard after any future UI change. Until then, the
   `2a17a75` artifact is the last browser evidence; `7812505` is behavior-only.
