@@ -516,7 +516,7 @@ database write access.
 - **No credential rotation UI, message-expiry management UI, receipt UI,
   project deletion/status change, registration, email verification, or password reset.**
   Credential rotation is implemented only as the operator CLI `rotate-key` for
-  operator-issued credentials; there is no dashboard view and OAuth-issued access
+  non-OAuth credentials; there is no dashboard view and OAuth-issued access
   credentials use their OAuth flow. Per-project grant add/remove is available in the credential inventory
   for active credentials of active speakers.
 - **Health has no readiness probe** and no dependency checks.

@@ -182,7 +182,7 @@ node dist/scripts/corkboard.js issue-key --speaker <speaker_id> \
 node dist/scripts/corkboard.js issue-key --speaker <speaker_id> --project <project_id> \
   --scopes project.edit
 # prints the token once; store it in the agent's own environment
-# rotate an operator-issued credential atomically (prints the replacement token once):
+# rotate a non-OAuth credential atomically (prints the replacement token once):
 node dist/scripts/corkboard.js rotate-key --credential <credential_id>
 # optional: set a new future expiry; without it the old expiry is preserved exactly
 node dist/scripts/corkboard.js rotate-key --credential <credential_id> \
