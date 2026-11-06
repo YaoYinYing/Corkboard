@@ -1,0 +1,37 @@
+services:
+  corkboard:
+    image: corkboard:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Same fixed non-root identity as the image. The SQLite/blob volume and the
+    # host secrets file must be readable/writable by this UID.
+    user: "1000:1000"
+    restart: unless-stopped
+    ports:
+      # Loopback only. TLS and any public exposure belong to a host reverse proxy.
+      - "127.0.0.1:8787:8787"
+    environment:
+      NODE_ENV: production
+      CORKBOARD_DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: "8787"
+    volumes:
+      - corkboard-data:/data
+      # The operator creates this absolute host directory 0700 and puts the
+      # 0600 secrets file in it. It is mounted read-only for the service.
+      - type: bind
+        source: ${CORKBOARD_SECRETS_DIR:?CORKBOARD_SECRETS_DIR must be an absolute host directory}
+        target: /run/secrets
+        read_only: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT ?? '8787') + '/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+
+volumes:
+  corkboard-data:

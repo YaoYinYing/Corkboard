@@ -3,6 +3,29 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — `docker compose run -v` cannot relax a service's read-only bind
+
+- **Failure avoided:** The one-shot `init` needs to create the secrets file in the same
+  host directory the running service mounts read-only. `docker compose run --rm -v
+  "$DIR:/run/secrets" ...` looks like a per-run override, but it did not replace the
+  service's `:ro` bind: the container kept the read-only mount and `touch
+  /run/secrets/x` failed with `Read-only file system`.
+- **Reproducer:** A service whose only `/run/secrets` mount is `type: bind, read_only:
+  true`, then `docker compose run --rm -v DIR:/run/secrets IMAGE sh -c 'touch
+  /run/secrets/x'`.
+- **Fix:** Keep the service mount read-only and mount the same host directory at a
+  second, unused target read-write for the one-shot command
+  (`-v DIR:/run/secrets-rw`, `--secrets-file /run/secrets-rw/corkboard.env`). The file
+  appears on the host and the service reads it through the original read-only mount.
+- **Also confirmed:** Docker initializes an empty named volume from the image path,
+  preserving that directory's ownership and mode. Creating `/data` as `1000:1000`
+  mode `0700` in the image lets a non-root container write the volume without a host
+  `chown`.
+- **Prevents:** A documented init path that only works with a writable secrets mount,
+  and data-volume instructions that require root-owned host setup.
+- **Remove when:** Compose replaces a service's bind on a same-target `run -v`, or the
+  CLI can read the secrets file directly.
+
 ## 2026-11-05 — A global option can parse successfully and still be ignored
 
 - **Failure avoided:** The CLI's option table is global, so `--data-dir` parses for every

@@ -12,6 +12,15 @@ verified/unverified criteria matrix is in [`acceptance-report.md`](./acceptance-
 backup format, and proxy limits; the runbook does not duplicate them. Neither document
 claims a production or staging deployment.
 
+## Docker Compose (local)
+
+A multi-stage image and a one-service [`compose.yaml`](../compose.yaml) provide a
+reproducible local installation of the same Node.js 24 + SQLite build. See
+[`docker.md`](./docker.md) for the quickstart, non-destructive `init`, first-owner
+bootstrap, fixed non-root UID and volume ownership, read-only secrets file, persistence
+proof, upgrade/rollback, and the explicit Workers/D1/R2 gap. Docker steps are not run in
+CI; they are documented commands with local evidence in `IMPLEMENTATION_STATE.md`.
+
 ## Self-hosted Node.js 24 LTS
 
 Requirements: Node.js 24, a writable data directory, and HTTPS termination by a

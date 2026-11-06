@@ -61,6 +61,10 @@ Dependency audit, license policy, SBOM output and their limits are documented in
 
 ### Operations
 
+For a reproducible local Docker Compose installation (including `init`, first-owner
+bootstrap, persistence, and secret handling), see [`docs/docker.md`](docs/docker.md).
+Cloudflare Workers/D1/R2 deployment is not provided or tested.
+
 [`docs/runbook.md`](docs/runbook.md) is the operator runbook for the self-hosted
 Node.js/SQLite service (install, provisioning, serving, credentials, messages,
 backup/restore, diagnostics, limits, upgrade/rollback).

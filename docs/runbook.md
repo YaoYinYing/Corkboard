@@ -26,6 +26,8 @@ they are cross-referenced rather than duplicated here.
   conforming browser will not send them over plaintext HTTP.
 - The service binds `127.0.0.1:8787` by default. `HOST` and `PORT` are the only
   listener settings; there is no TLS listener in the application.
+- A containerized local installation with the same CLI/server is documented in
+  [`docker.md`](./docker.md). It does not change the procedures below.
 
 Build and verify before deploying:
 
