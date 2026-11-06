@@ -27,7 +27,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
   && npm cache clean --force
 
-# dist already contains dist/migrations (scripts/copy-migrations.ts).
+# dist already contains dist/migrations (scripts/build.ts copyMigrations).
 COPY --from=build /app/dist ./dist
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

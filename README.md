@@ -57,6 +57,7 @@ npm run check        # offline: secret scans, license scan, typecheck, tests
 npm run audit        # network: npm advisory database, high/critical only
 npm run licenses     # offline: reports/licenses.{txt,json}
 npm run sbom         # offline: reports/sbom.cdx.json (CycloneDX)
+npm run build:repro  # offline: compile twice and compare SHA-256 manifests
 ```
 
 Dependency audit, license policy, SBOM output and their limits are documented in

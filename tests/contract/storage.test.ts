@@ -388,11 +388,6 @@ test("built adapter opens its bundled migration from dist", async (t) => {  cons
     cwd: repoRoot,
     stdio: "pipe",
   });
-  execFileSync(
-    process.execPath,
-    [join(repoRoot, "scripts", "copy-migrations.ts")],
-    { cwd: repoRoot, stdio: "pipe" },
-  );
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "001_init.sql")));
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "002_credential_project_grants.sql")));
   assert.ok(existsSync(join(repoRoot, "dist", "migrations", "003_sessions.sql")));

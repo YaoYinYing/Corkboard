@@ -1549,3 +1549,40 @@ prevented regression; when to remove the advice.
   rule.
 - **Remove when:** a local commit hook or release script validates that `Tree-SHA`
   names a tree and `Candidate-SHA` names a commit with that same tree.
+
+## 2026-11-06 — source maps make the output directory's depth part of the artifact
+
+- **Failure avoided:** A "compile twice into two temporary directories and diff"
+  proof looks path-independent, but `tsconfig.build.json` emits source maps. Each
+  `.js.map` `sources` entry is the relative path from the map to the source file, so
+  equal inputs compiled into `/tmp/x/a/` and `/tmp/x/deep/nested/` produce different
+  maps. A naive harness reports a false non-reproducibility, or a false pass if both
+  runs happen to share one directory.
+- **Reproducer:** Compile with `tsc -p tsconfig.build.json --outDir /tmp/t/shallow`
+  and `--outDir /tmp/t/deep/nested`; any `.js.map` differs in `sources`
+  (`../../../../…` versus `../../../../../…`) with no source change.
+- **Fix:** `scripts/reproducible-build.ts` puts the two output directories as siblings
+  at the same depth under one temporary parent and compares only those.
+  `docs/supply-chain.md` scopes the proof to the same output depth and states that a
+  `dist/` build is not byte-identical to the temporary builds.
+- **Prevents:** Claiming byte reproducibility across output locations, or failing a
+  deterministic build because the comparison harness itself moved the output.
+- **Remove when:** the build stops emitting path-bearing files (for example
+  `sourceMap: false` or a fixed `sourceRoot`) or the proof normalizes paths explicitly.
+
+## 2026-11-06 — a proof that re-implements the build measures the re-implementation
+
+- **Failure avoided:** The first reproducibility harness duplicated the real build
+  steps (`tsc -p tsconfig.build.json` plus a `cpSync` of `migrations/`) instead of
+  calling them. A later change to `npm run build` could then leave the proof green
+  while the shipped build differed, and documentation calling it "the real build
+  invocation" would be false.
+- **Reproducer:** Compare `package.json`'s `build` command with the harness's private
+  commands after changing one of them; the strings drift with no failing test.
+- **Fix:** `scripts/build.ts` is the single definition of the production build
+  (`compileProject` + `copyMigrations`). `npm run build` runs it and
+  `scripts/reproducible-build.ts` imports it, so the proof cannot compile a different
+  pipeline.
+- **Prevents:** A green reproducibility check for a build that is not the one shipped.
+- **Remove when:** the build system emits a manifest or command definition that both
+  paths consume directly.
