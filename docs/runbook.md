@@ -1,9 +1,10 @@
 # Operator runbook
 
-**Version:** 1 (2026-11-05)
+**Version:** 2 (2026-11-06)
 
-**Applies to:** the self-hosted Node.js 24 + SQLite + local-blob build at `e79d60e`.
-Cloudflare Workers/D1/R2 are not implemented.
+**Applies to:** the self-hosted Node.js 24 + SQLite + local-blob implementation in
+this repository, not a fixed historical build. It includes atomic CLI credential
+rotation (`rotate-key`). Cloudflare Workers/D1/R2 are not implemented.
 
 **Exact commands:** every command and flag below is implemented in
 [`scripts/corkboard.ts`](../scripts/corkboard.ts) and is shown as the built
@@ -90,8 +91,8 @@ set +a
 
 Important CLI behavior: `init` accepts `--data-dir`, but the in-database provisioning
 commands (`bootstrap-owner`, `create-project`, `create-speaker`, `add-member`,
-`remove-member`, `issue-key`, `grant-key-project`, `revoke-key-project`, `revoke-key`)
-read `CORKBOARD_DATA_DIR` from the environment. Passing `--data-dir` to those commands
+`remove-member`, `issue-key`, `rotate-key`, `grant-key-project`, `revoke-key-project`,
+`revoke-key`) read `CORKBOARD_DATA_DIR` from the environment. Passing `--data-dir` to those commands
 is accepted by the parser but does not select the directory. Source the secrets file as
 above, or export `CORKBOARD_DATA_DIR` explicitly.
 
@@ -157,10 +158,46 @@ node dist/scripts/corkboard.js revoke-key --credential "$CREDENTIAL"
 Revocation is soft (`revoked_at`), takes effect on the next request, and is checked on
 every request. Grant removal also takes effect on the next request.
 
-**Rotation is not implemented.** Replace a credential by revoking it and issuing a new
-one with the same projects and scopes. The dashboard inventory supports the same
-revoke-then-issue flow and the same one-project-at-a-time grant add/remove for active
-credentials of active speakers; per-credential expiry selection remains CLI-only.
+### 2.5 Rotate a credential atomically
+
+```sh
+node dist/scripts/corkboard.js rotate-key --credential "$CREDENTIAL"
+# prints the new raw token exactly once, in the same format as issue-key
+node dist/scripts/corkboard.js rotate-key --credential "$CREDENTIAL" \
+  --expires-at 2027-01-01T00:00:00Z
+```
+
+`rotate-key` replaces one active credential with a new credential for the same speaker,
+with exactly the old credential's scopes and current project grants. It writes the new
+credential and grants and sets the old row's `revoked_at`, all in one transaction:
+if issuance of the new credential/grants fails, nothing changes and the old credential
+stays active; if the old-row revocation fails, the new credential is rolled back. The
+old token is unusable on the next request. Only the new token is printed; the old token,
+prefix, and verifier are never read out or logged. Grant rows on the old credential are
+retained (soft revocation), matching `revoke-key`.
+
+Rules and defaults:
+
+- Unknown, already-revoked, expired, or inactive-speaker credentials are rejected with
+  a clear CLI error and no writes. Rotation of an expired credential is deliberately
+  not allowed: re-issue instead.
+- Rotation applies only to non-OAuth speaker credentials. OAuth-issued access
+  credentials are identified by their `cb_oat_` token prefix or a durable
+  `oauth_token_clients` association (their credential IDs are `cred_oat_*`), not by
+  the ID string; they are rejected with a clear error and no writes, and OAuth
+  clients use their OAuth refresh/revocation flow instead.
+- Without `--expires-at`, the replacement keeps the old credential's **exact**
+  `expires_at` (including no expiry). This never silently extends or shortens the
+  lifetime, but it also means rotating a near-expiry credential produces another
+  near-expiry credential; pass `--expires-at <RFC3339>` to move it.
+- `--expires-at` must parse and be in the future; a past value is rejected before any
+  write. There is no flag to remove an existing expiry; issue a fresh key if you need
+  no expiry.
+- Rotation does not widen access: scopes and grants are copied, never recomputed or
+  extended. An ungranted project stays ungranted.
+- Rotation is CLI-only. The dashboard inventory still supports issuance, soft
+  revocation, and one-project-at-a-time grant add/remove; it has no rotation view.
+  Per-credential expiry selection remains CLI-only.
 
 ## 3. Start, stop, and health
 
@@ -254,8 +291,9 @@ Sign in at `/login` over HTTPS. The dashboard provides:
 
 Dashboard authority is account ownership for speakers/credentials and project
 ownership for membership/project edits; a uniform `404` covers foreign and unknown
-objects. There is no credential rotation, expiry management, project
-deletion, or admin action in the UI.
+objects. There is no credential rotation view, expiry management, project
+deletion, or admin action in the UI; rotation is available only through the CLI
+(`rotate-key`).
 
 ## 5. Messages
 
@@ -432,17 +470,20 @@ database write access.
 
 ### 7.2 Credential compromise
 
-1. Revoke the credential: `revoke-key --credential <id>` or the dashboard inventory
-   revoke action. Revocation is checked on every request and MCP request.
+1. If the intended projects and scopes are unchanged, rotate atomically:
+   `rotate-key --credential <id>`. This revokes the old token and prints its replacement
+   in one transaction. Otherwise revoke with `revoke-key --credential <id>` or the
+   dashboard inventory action and issue a replacement. Revocation is checked on every
+   request and MCP request.
 2. If the speaker is compromised or no longer needed, `remove-member` from affected
    projects, which also deletes that speaker's grants.
 3. Preserve request logs and audit records without copying bodies or secrets.
-4. Issue a replacement credential for the intended projects/scopes; deliver it through
-   the agent's own environment, never a prompt, issue, or message.
+4. Deliver the replacement token through the agent's own environment, never a prompt,
+   issue, or message.
 5. Do not rotate the pepper or root key as a routine remedy: pepper rotation invalidates
    existing token verifiers, and root-key rotation requires re-encryption. Neither
-   rotation is implemented. Prefer revoke/reissue. Previously read plaintext cannot be
-   un-read.
+   rotation is implemented. Prefer credential rotation/revoke-and-reissue. Previously
+   read plaintext cannot be un-read.
 6. Notify affected users honestly, including that the server can read bodies and that
    expiry does not erase backups.
 
@@ -474,8 +515,10 @@ database write access.
 - **Not end-to-end encrypted.** The server holds keys and can decrypt.
 - **No credential rotation UI, message-expiry management UI, receipt UI,
   project deletion/status change, registration, email verification, or password reset.**
-  Per-project grant add/remove is available in the credential inventory for active
-  credentials of active speakers; rotation remains unimplemented.
+  Credential rotation is implemented only as the operator CLI `rotate-key` for
+  operator-issued credentials; there is no dashboard view and OAuth-issued access
+  credentials use their OAuth flow. Per-project grant add/remove is available in the credential inventory
+  for active credentials of active speakers.
 - **Health has no readiness probe** and no dependency checks.
 - **A subagent sharing its parent's credential can impersonate the parent.** There is no
   cryptographic attestation of model/process identity.

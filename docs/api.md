@@ -120,6 +120,22 @@ This is how an operator issues the `project.edit` credential used by the expire
 endpoint. `grant-key-project --credential <id> --project <id>` and
 `revoke-key-project --credential <id> --project <id>` manage grants after issuance.
 
+The operator CLI `rotate-key --credential <id> [--expires-at <RFC3339>]` atomically
+replaces one active credential for the same speaker with exactly the old credential's
+scopes and current project grants, then revokes the old row in the same transaction.
+It prints only the new token, once, in the same format as `issue-key`; the old token,
+prefix, and verifier are never read out, logged, or audited. Unknown, revoked, expired,
+and inactive-speaker credentials are rejected with no writes (expired credentials must
+be re-issued). Without `--expires-at`, the replacement keeps the old credential's exact
+`expires_at`, including no expiry; an explicit value must parse and be in the future.
+Rotation copies grants and never recomputes or widens them. Rotation applies only to
+non-OAuth credentials: OAuth-issued access credentials are identified by their
+`cb_oat_` token prefix or an `oauth_token_clients` association (their credential IDs
+are `cred_oat_*`), not by the ID string; they are rejected with no writes and use the
+OAuth refresh/revocation flow instead. The audit event
+`credential.rotate` records the actor account/speaker, bounded project IDs plus the
+true count, scopes, and old/new credential IDs.
+
 Effective rights also require an **active account, active speaker, active project, and
 active membership**; suspended or disabled principals are denied even with a live
 credential. Decision order: no valid credential → `UNAUTHENTICATED`; not a member,
@@ -286,8 +302,10 @@ above). Per-credential project-grant add/remove is available on the same invento
 active credentials of active speakers: it lists only the speaker's active,
 account-readable projects, applies the CLI `grant-key-project` membership rule plus
 account read access, and treats every ineligible target as the uniform `404`.
-Rotation is **not implemented** in any surface: revoke the credential and issue a
-new one. Per-credential expiry selection remains CLI-only (`issue-key --expires-at`).
+The dashboard has **no rotation view**: revoke the credential and issue a new one
+there, or use the operator CLI `rotate-key` for an atomic replacement. Per-credential
+expiry selection remains CLI-only (`issue-key --expires-at`, `rotate-key
+--expires-at`).
 The membership
 editor is `GET`/`POST /projects/:projectId/members` plus
 `POST /projects/:projectId/members/:speakerId/remove`. It is **project-owner-only**:
@@ -312,9 +330,9 @@ target any active (non-removed) membership; an already removed row returns
 [`web-ui.md`](./web-ui.md): the compose form optionally sets one body-expiry
 timestamp, but there is no expiry listing/management/cleanup UI. Per-credential
 project-grant add/remove is implemented on the credential inventory for active
-credentials of active speakers; credential
-rotation, per-credential expiry editing, project deletion/status change,
-and administrative actions remain unimplemented.
+credentials of active speakers; a dashboard credential
+rotation view, per-credential expiry editing, project deletion/status change,
+and administrative actions remain unimplemented (atomic rotation is CLI-only).
 
 ## Endpoints
 
@@ -847,12 +865,12 @@ bounded cursor replay, body reveal, English/Simplified Chinese) is implemented p
 per-project HTML membership editor and the authorized service overview are
 implemented; the dashboard credential inventory, soft revocation, and per-credential
 project-grant editing are
-implemented; dashboard message send is implemented; credential rotation is
-unimplemented in every surface (revoke-then-issue is the replacement; there is no
-atomic rotate), project deletion/status changes remain deferred, and message-expiry
-management is unimplemented (the compose form's optional body-expiry field is the
-only expiry UI; per-credential expiry selection exists only as the CLI
-`issue-key --expires-at` option). The
+implemented; dashboard message send is implemented; there is no dashboard credential
+rotation view (revoke-then-issue remains that path); the operator CLI `rotate-key`
+performs an atomic replacement; project deletion/status changes remain
+deferred; and message-expiry management is unimplemented (the compose form's optional
+body-expiry field is the only expiry UI; per-credential expiry selection exists only
+as the CLI `issue-key --expires-at`/`rotate-key --expires-at` options). The
 bearer-authenticated `/mcp` surface is implemented
 (see above and `mcp.md`);
 the OAuth 2.1 authorization-server core is implemented (see above and `oauth.md`), but

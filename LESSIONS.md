@@ -3,6 +3,42 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-06 — rotation must copy stored grants, not re-derive them
+
+- **Failure avoided:** A `rotate-key` built as "revoke, then call `issue-key` with the
+  same projects and scopes" is not atomic (a crash between the two leaves no usable
+  credential) and can widen or narrow access if it re-derives the project list or
+  scopes instead of copying them. A default of `expires_at = NULL` would silently
+  extend a finite credential's lifetime, and a default that silently copied a
+  near-expiry timestamp without saying so would surprise the operator.
+- **Reproducer:** With one credential granted only to project A and scopes
+  `project.read,message.read`, a re-issue path that uses the speaker's current
+  memberships would also reach project B after a later `add-member`; the copied-grant
+  path leaves B denied. Rotating without an explicit expiry on a credential expiring
+  in one hour shows the choice.
+- **Fix:** `rotate-key` reads the old row and its grants inside one
+  `BEGIN IMMEDIATE` transaction, inserts the replacement credential and exactly those
+  grant rows, then sets the old `revoked_at` in the same transaction. Failures roll
+  back all three writes. Unknown/revoked/expired/inactive-principal credentials are
+  rejected before any write. OAuth-issued access credentials are rejected too: a
+  replacement row would drop the `oauth_token_clients` association and bypass refresh
+  rotation/revocation, so those stay on the OAuth flow. Without `--expires-at`, the old `expires_at` is copied
+  exactly (including `NULL`), and the reference docs state that a near-expiry key stays
+  near expiry unless a future `--expires-at` is passed.
+- **Test:** `tests/integration/cli.test.ts` "rotate-key atomically replaces a
+  credential with identical scopes and grants" (old token 401, new token accepted only
+  on the two granted projects, audit has no token/prefix/verifier), plus rejection,
+  rollback, expiry-default (including `NULL` staying `NULL`), OAuth/invalid-stored-
+  expiry/inactive-owner, and concurrent-double-rotation tests. Injected triggers on
+  grant insert and old-row revocation prove the old token remains active after a
+  failed rotation; the concurrent test proves `BEGIN IMMEDIATE` serializes the pair
+  so exactly one replacement commits.
+- **Prevents:** Non-atomic replacement, silent privilege widening through membership
+  re-derivation, accidental lifetime extension, and orphan credentials/grants.
+- **Remove when:** issuance and rotation share a documented replacement primitive that
+  copies stored authorization exactly, or a D1 adapter provides the read snapshot this
+  read-then-write transaction needs.
+
 ## 2026-11-05 — reject symlinked secrets and test shell boundaries against the real script
 
 - **Failure avoided:** `[ -e ]` follows symlinks, so a secrets path that was a
@@ -1209,5 +1245,8 @@ prevented regression; when to remove the advice.
 - **Prevents:** documentation that promises an operator action that would fail, and
   a security review that assumes symmetric authorization where asymmetry is the
   intended behavior.
-- **Remove when:** an atomic rotate path exists, and a D1 adapter documents how it
-  supplies snapshot reads and affected-row counts for read-then-write callbacks.
+- **Superseded (2026-11-06):** an atomic rotate path now exists
+  (`rotate-key` / `rotateSpeakerCredential`); the rotation half of this entry's
+  removal condition is met and the stale claim is pruned. The D1 half remains open.
+- **Remove when (remaining):** a D1 adapter documents how it supplies snapshot reads
+  and affected-row counts for read-then-write callbacks.

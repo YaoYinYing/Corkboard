@@ -413,7 +413,9 @@ is never removed while a refresh row references the credential. See
   (the CLI `grant-key-project` does not know about OAuth), the live access token may
   work in that project until it expires, and the next refresh fails closed (`invalid_grant`)
   and revokes the family. Do not manage OAuth-issued credentials with the CLI grant
-  commands.
+  commands, and do not rotate them with `rotate-key` (it rejects OAuth-issued rows,
+  identified by the `cb_oat_` token prefix or an `oauth_token_clients` association;
+  their credential IDs are `cred_oat_*`); use the OAuth refresh/revocation flow.
 - D1/Workers parity, real ChatGPT, and browser testing are not verified.
 - OAuth consent, code issuance, token minting, rotation, and revocation are not
   written to `audit_events` in this slice; request logs still record route/status/

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -54,6 +54,26 @@ function run(args: string[], env: Record<string, string> = {}): RunResult {
       stderr: failure.stderr ?? "",
     };
   }
+}
+
+function runAsync(args: string[], env: Record<string, string> = {}): Promise<RunResult> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, ...env },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("close", (code) => resolve({ status: code ?? -1, stdout, stderr }));
+  });
 }
 
 function tempDir(t: { after(fn: () => void): void }): string {
@@ -1474,4 +1494,708 @@ test("init rejects a data directory path containing a carriage return", (t) => {
   assert.match(result.stderr, /newline/i);
   assert.equal(existsSync(badDir), false);
   assert.equal(existsSync(secretsFile), false);
+});
+
+test("rotate-key atomically replaces a credential with identical scopes and grants", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectA = run(["create-project", "--account", accountId, "--title", "A"], env)
+    .stdout.trim();
+  const projectB = run(["create-project", "--account", accountId, "--title", "B"], env)
+    .stdout.trim();
+  const projectC = run(["create-project", "--account", accountId, "--title", "C"], env)
+    .stdout.trim();
+  for (const project of [projectA, projectB, projectC]) {
+    assert.equal(
+      run(["add-member", "--project", project, "--speaker", speakerId], env).status,
+      0,
+    );
+  }
+
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const oldToken = run(
+    [
+      "issue-key",
+      "--speaker",
+      speakerId,
+      "--project",
+      projectA,
+      "--project",
+      projectB,
+      "--scopes",
+      "project.read,message.read",
+      "--expires-at",
+      expiresAt,
+    ],
+    env,
+  ).stdout.trim();
+  assert.match(oldToken, /^cb_[A-Za-z0-9_-]{43}$/);
+
+  const { db, deps } = await openDeps(dataDir, env);
+  try {
+    const old = await db.first<{ id: string; scope_json: string; expires_at: string | null }>(
+      "SELECT id, scope_json, expires_at FROM credentials WHERE speaker_id = ?",
+      [speakerId],
+    );
+    assert.ok(old);
+    const oldPrincipal = await authenticateBearer(deps, `Bearer ${oldToken}`);
+    await authorizeProject(deps, oldPrincipal, projectA, "project.read");
+    await authorizeProject(deps, oldPrincipal, projectB, "project.read");
+    await assert.rejects(
+      authorizeProject(deps, oldPrincipal, projectC, "project.read"),
+      (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+    );
+
+    const rotated = run(["rotate-key", "--credential", old.id], env);
+    assert.equal(rotated.status, 0, rotated.stderr);
+    const newToken = rotated.stdout.trim();
+    assert.match(newToken, /^cb_[A-Za-z0-9_-]{43}$/);
+    assert.equal(rotated.stdout.trim().split("\n").length, 1);
+    assert.equal(rotated.stdout.includes(oldToken), false);
+    assert.equal(rotated.stderr, "");
+
+    // The old token is rejected immediately, including at the HTTP boundary.
+    await assert.rejects(
+      authenticateBearer(deps, `Bearer ${oldToken}`),
+      (error: unknown) => error instanceof AppError && error.code === "UNAUTHENTICATED",
+    );
+    const app = createApp(deps);
+    const call = (token: string): Promise<Response> =>
+      app(
+        new Request("http://localhost/api/v1/me", {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+      );
+    assert.equal((await call(oldToken)).status, 401);
+    const newResponse = await call(newToken);
+    assert.equal(newResponse.status, 200);
+    const me = (await newResponse.json()) as { projects: string[] };
+    assert.deepEqual([...me.projects].sort(), [projectA, projectB].sort());
+
+    // Same scopes, same grants, same expiry policy, and no widening.
+    const newPrincipal = await authenticateBearer(deps, `Bearer ${newToken}`);
+    assert.deepEqual(
+      [...newPrincipal.scopes].sort(),
+      [...oldPrincipal.scopes].sort(),
+    );
+    await authorizeProject(deps, newPrincipal, projectA, "project.read");
+    await authorizeProject(deps, newPrincipal, projectB, "project.read");
+    await assert.rejects(
+      authorizeProject(deps, newPrincipal, projectC, "project.read"),
+      (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+    );
+
+    const oldRow = await db.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ?",
+      [old.id],
+    );
+    assert.notEqual(oldRow?.revoked_at, null);
+    const current = await db.all<{
+      id: string;
+      scope_json: string;
+      expires_at: string | null;
+      revoked_at: string | null;
+      public_prefix: string;
+      secret_verifier: string;
+    }>(
+      `SELECT id, scope_json, expires_at, revoked_at, public_prefix, secret_verifier
+         FROM credentials WHERE speaker_id = ? AND revoked_at IS NULL`,
+      [speakerId],
+    );
+    assert.equal(current.length, 1);
+    const replacement = current[0];
+    assert.ok(replacement);
+    assert.notEqual(replacement.id, old.id);
+    assert.deepEqual(JSON.parse(replacement.scope_json), JSON.parse(old.scope_json));
+    assert.equal(replacement.expires_at, expiresAt);
+    assert.equal(replacement.revoked_at, null);
+
+    const grantsFor = (credentialId: string): Promise<Array<{ project_id: string }>> =>
+      db.all<{ project_id: string }>(
+        `SELECT project_id FROM credential_project_grants
+          WHERE credential_id = ? ORDER BY project_id ASC`,
+        [credentialId],
+      );
+    assert.deepEqual(
+      (await grantsFor(old.id)).map((row) => row.project_id).sort(),
+      [projectA, projectB].sort(),
+    );
+    assert.deepEqual(
+      (await grantsFor(replacement.id)).map((row) => row.project_id).sort(),
+      [projectA, projectB].sort(),
+    );
+    assert.equal(
+      (
+        await db.first<{ n: number }>(
+          "SELECT COUNT(*) AS n FROM credential_project_grants WHERE project_id = ?",
+          [projectC],
+        )
+      )?.n,
+      0,
+    );
+
+    // Sanitized audit: actor, bounded projects, scopes, and IDs only.
+    const audits = await db.all<{
+      actor_account_id: string | null;
+      actor_speaker_id: string | null;
+      project_id: string | null;
+      operation: string;
+      detail: string | null;
+    }>(
+      `SELECT actor_account_id, actor_speaker_id, project_id, operation, detail
+         FROM audit_events WHERE operation = 'credential.rotate'`,
+    );
+    assert.equal(audits.length, 1);
+    const audit = audits[0];
+    assert.ok(audit?.detail);
+    assert.equal(audit.actor_account_id, accountId);
+    assert.equal(audit.actor_speaker_id, speakerId);
+    assert.equal(audit.project_id, null);
+    const detail = JSON.parse(audit.detail) as {
+      credential_id: string;
+      new_credential_id: string;
+      projects: string[];
+      project_count: number;
+      scopes: string[];
+      expires_at: string | null;
+    };
+    assert.equal(detail.credential_id, old.id);
+    assert.equal(detail.new_credential_id, replacement.id);
+    assert.deepEqual([...detail.projects].sort(), [projectA, projectB].sort());
+    assert.equal(detail.project_count, 2);
+    assert.deepEqual([...detail.scopes].sort(), ["message.read", "project.read"]);
+    assert.equal(detail.expires_at, expiresAt);
+
+    const auditText = JSON.stringify(audits);
+    for (const secret of [
+      oldToken,
+      newToken,
+      replacement.public_prefix,
+      replacement.secret_verifier,
+    ]) {
+      assert.equal(auditText.includes(secret), false);
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test("rotate-key rejects unknown, revoked, expired, and inactive credentials without writes", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const { db, deps } = await openDeps(dataDir, env);
+  try {
+    const issue = async (extra: string[] = []): Promise<{ id: string; token: string }> => {
+      const token = run(
+        ["issue-key", "--speaker", speakerId, "--project", projectId, ...extra],
+        env,
+      ).stdout.trim();
+      assert.match(token, /^cb_/);
+      // rowid is insertion order; created_at ties within a millisecond.
+      const row = await db.first<{ id: string }>(
+        "SELECT id FROM credentials WHERE speaker_id = ? ORDER BY rowid DESC LIMIT 1",
+        [speakerId],
+      );
+      assert.ok(row);
+      return { id: row.id, token };
+    };
+    const activeCredential = await issue();
+    const revokedCredential = await issue();
+    const expiredCredential = await issue(["--expires-at", "2000-01-01T00:00:00Z"]);
+    const inactiveCredential = await issue();
+    const activeId = activeCredential.id;
+    const revokedId = revokedCredential.id;
+    const expiredId = expiredCredential.id;
+    const inactiveId = inactiveCredential.id;
+    const activeToken = activeCredential.token;
+    const expiredToken = expiredCredential.token;
+    assert.equal(run(["revoke-key", "--credential", revokedId], env).status, 0);
+
+    const countCredentials = (): Promise<number> =>
+      db
+        .first<{ n: number }>("SELECT COUNT(*) AS n FROM credentials")
+        .then((row) => row?.n ?? -1);
+    const countGrants = (): Promise<number> =>
+      db
+        .first<{ n: number }>("SELECT COUNT(*) AS n FROM credential_project_grants")
+        .then((row) => row?.n ?? -1);
+    const before = { credentials: await countCredentials(), grants: await countGrants() };
+
+    const unknown = run(["rotate-key", "--credential", "cred_missing"], env);
+    assert.notEqual(unknown.status, 0);
+    assert.match(unknown.stderr, /credential not found/);
+    assert.equal(unknown.stdout.includes("cb_"), false);
+
+    const revoked = run(["rotate-key", "--credential", revokedId], env);
+    assert.notEqual(revoked.status, 0);
+    assert.match(revoked.stderr, /credential is revoked/);
+
+    const expired = run(["rotate-key", "--credential", expiredId], env);
+    assert.notEqual(expired.status, 0);
+    assert.match(expired.stderr, /credential is expired/);
+
+    const past = run(
+      ["rotate-key", "--credential", activeId, "--expires-at", "2000-01-01T00:00:00Z"],
+      env,
+    );
+    assert.notEqual(past.status, 0);
+    assert.match(past.stderr, /in the future/);
+
+    const unparseable = run(
+      ["rotate-key", "--credential", activeId, "--expires-at", "not-a-date"],
+      env,
+    );
+    assert.notEqual(unparseable.status, 0);
+    assert.match(unparseable.stderr, /must be an ISO timestamp/);
+    assert.equal(unparseable.stdout.includes("cb_"), false);
+
+    assert.deepEqual(
+      { credentials: await countCredentials(), grants: await countGrants() },
+      before,
+    );
+    // The active credential was not revoked by any rejected attempt.
+    const active = await db.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ?",
+      [activeId],
+    );
+    assert.equal(active?.revoked_at, null);
+    const principal = await authenticateBearer(deps, `Bearer ${activeToken}`);
+    assert.equal(principal.credentialId, activeId);
+    // The expired token cannot authenticate, but its row is unchanged.
+    await assert.rejects(
+      authenticateBearer(deps, `Bearer ${expiredToken}`),
+      (error: unknown) => error instanceof AppError && error.code === "UNAUTHENTICATED",
+    );
+
+    // An inactive speaker blocks rotation even for a still-active credential.
+    await db.run("UPDATE speakers SET status = 'suspended' WHERE id = ?", [speakerId]);
+    const suspended = run(["rotate-key", "--credential", inactiveId], env);
+    assert.notEqual(suspended.status, 0);
+    assert.match(suspended.stderr, /speaker is not active/);
+    assert.equal(suspended.stdout.includes("cb_"), false);
+
+    // No rejected attempt wrote a credential, grant, or rotate audit row.
+    assert.equal(
+      (await db.first<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM audit_events WHERE operation = 'credential.rotate'",
+      ))?.n,
+      0,
+    );
+    assert.deepEqual(
+      { credentials: await countCredentials(), grants: await countGrants() },
+      before,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("rotate-key rolls back entirely when grant or revocation writes fail", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const token = run(["issue-key", "--speaker", speakerId, "--project", projectId], env)
+    .stdout.trim();
+
+  const { db, deps } = await openDeps(dataDir, env);
+  try {
+    const oldId = (
+      await db.first<{ id: string }>("SELECT id FROM credentials WHERE speaker_id = ?", [speakerId])
+    )?.id;
+    assert.ok(oldId);
+    const snapshot = async (): Promise<{
+      credentials: number;
+      grants: number;
+      revokedAt: string | null;
+    }> => ({
+      credentials:
+        (await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM credentials"))?.n ?? -1,
+      grants:
+        (await db.first<{ n: number }>("SELECT COUNT(*) AS n FROM credential_project_grants"))
+          ?.n ?? -1,
+      revokedAt:
+        (
+          await db.first<{ revoked_at: string | null }>(
+            "SELECT revoked_at FROM credentials WHERE id = ?",
+            [oldId],
+          )
+        )?.revoked_at ?? null,
+    });
+    const before = await snapshot();
+
+    // A failing grant copy rolls back the new credential and the revocation.
+    await db.exec(
+      `CREATE TRIGGER fail_rotate_grant BEFORE INSERT ON credential_project_grants
+       BEGIN SELECT RAISE(ABORT, 'injected grant failure'); END`,
+    );
+    const grantFailure = run(["rotate-key", "--credential", oldId], env);
+    assert.notEqual(grantFailure.status, 0);
+    assert.match(grantFailure.stderr, /injected grant failure/);
+    assert.equal(grantFailure.stdout.includes("cb_"), false);
+    assert.deepEqual(await snapshot(), before);
+    await db.exec("DROP TRIGGER fail_rotate_grant");
+
+    // A failing revocation of the old row also rolls back the new credential.
+    await db.exec(
+      `CREATE TRIGGER fail_rotate_revoke BEFORE UPDATE OF revoked_at ON credentials
+       BEGIN SELECT RAISE(ABORT, 'injected revoke failure'); END`,
+    );
+    const revokeFailure = run(["rotate-key", "--credential", oldId], env);
+    assert.notEqual(revokeFailure.status, 0);
+    assert.match(revokeFailure.stderr, /injected revoke failure/);
+    assert.equal(revokeFailure.stdout.includes("cb_"), false);
+    assert.deepEqual(await snapshot(), before);
+    await db.exec("DROP TRIGGER fail_rotate_revoke");
+
+    // The old credential remained usable through every failed attempt.
+    const principal = await authenticateBearer(deps, `Bearer ${token}`);
+    assert.equal(principal.credentialId, oldId);
+    await authorizeProject(deps, principal, projectId, "project.read");
+
+    const success = run(["rotate-key", "--credential", oldId], env);
+    assert.equal(success.status, 0, success.stderr);
+    assert.match(success.stdout.trim(), /^cb_[A-Za-z0-9_-]{43}$/);
+    const after = await snapshot();
+    assert.equal(after.credentials, 2);
+    assert.equal(after.grants, 2);
+    assert.notEqual(after.revokedAt, null);
+  } finally {
+    db.close();
+  }
+});
+
+test("rotate-key preserves the old expiry by default and honors an explicit future expiry", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const firstExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const secondExpiry = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+  const token = run(
+    ["issue-key", "--speaker", speakerId, "--project", projectId, "--expires-at", firstExpiry],
+    env,
+  ).stdout.trim();
+
+  const { db } = await openDeps(dataDir, env);
+  try {
+    const firstId = (
+      await db.first<{ id: string }>("SELECT id FROM credentials WHERE speaker_id = ?", [speakerId])
+    )?.id;
+    assert.ok(firstId);
+    const preserved = run(["rotate-key", "--credential", firstId], env);
+    assert.equal(preserved.status, 0, preserved.stderr);
+    const afterPreserve = await db.first<{ id: string; expires_at: string | null }>(
+      "SELECT id, expires_at FROM credentials WHERE speaker_id = ? AND revoked_at IS NULL",
+      [speakerId],
+    );
+    assert.ok(afterPreserve);
+    assert.equal(afterPreserve.expires_at, firstExpiry);
+    assert.notEqual(afterPreserve.id, firstId);
+    assert.equal(preserved.stdout.trim() === token, false);
+
+    const overridden = run(
+      ["rotate-key", "--credential", afterPreserve.id, "--expires-at", secondExpiry],
+      env,
+    );
+    assert.equal(overridden.status, 0, overridden.stderr);
+    const afterOverride = await db.first<{ expires_at: string | null }>(
+      "SELECT expires_at FROM credentials WHERE speaker_id = ? AND revoked_at IS NULL",
+      [speakerId],
+    );
+    assert.equal(afterOverride?.expires_at, secondExpiry);
+
+    // A credential with no expiry keeps NULL through rotation.
+    run(["issue-key", "--speaker", speakerId, "--project", projectId], env);
+    const noExpiryId = (
+      await db.first<{ id: string }>(
+        "SELECT id FROM credentials WHERE speaker_id = ? ORDER BY rowid DESC LIMIT 1",
+        [speakerId],
+      )
+    )?.id;
+    assert.ok(noExpiryId);
+    const rotatedNull = run(["rotate-key", "--credential", noExpiryId], env);
+    assert.equal(rotatedNull.status, 0, rotatedNull.stderr);
+    const noExpiryReplacement = await db.first<{ id: string; expires_at: string | null }>(
+      "SELECT id, expires_at FROM credentials WHERE speaker_id = ? ORDER BY rowid DESC LIMIT 1",
+      [speakerId],
+    );
+    assert.ok(noExpiryReplacement);
+    assert.notEqual(noExpiryReplacement.id, noExpiryId);
+    assert.equal(noExpiryReplacement.expires_at, null);
+  } finally {
+    db.close();
+  }
+});
+
+test("rotate-key rejects OAuth credentials, invalid stored expiry, and inactive owners without writes", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const token = run(["issue-key", "--speaker", speakerId, "--project", projectId], env)
+    .stdout.trim();
+
+  const { db, deps } = await openDeps(dataDir, env);
+  try {
+    const credentialId = (
+      await db.first<{ id: string }>("SELECT id FROM credentials WHERE speaker_id = ?", [speakerId])
+    )?.id;
+    assert.ok(credentialId);
+    const now = new Date().toISOString();
+
+    const count = async (table: string): Promise<number> =>
+      (await db.first<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`))?.n ?? -1;
+    const snapshot = async (): Promise<{ credentials: number; grants: number }> => ({
+      credentials: await count("credentials"),
+      grants: await count("credential_project_grants"),
+    });
+    const seedCredential = async (id: string, publicPrefix: string): Promise<void> => {
+      await db.run(
+        `INSERT INTO credentials
+           (id, speaker_id, public_prefix, secret_verifier, scope_json, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+        [id, speakerId, publicPrefix, "oauth-verifier", JSON.stringify(["project.read"]), now],
+      );
+    };
+    await db.run(
+      `INSERT INTO oauth_clients
+         (id, client_id, client_name, redirect_uris_json, grant_types_json,
+          response_types_json, created_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+      ["oac_seeded", "cb_cli_seeded", "Seeded", "[]", "[]", "[]", now],
+    );
+
+    // Each guard marker is exercised alone, so removing either condition
+    // changes the outcome of its own case.
+    await t.test("rejects a cb_oat_ token prefix with no client association", async () => {
+      const prefixOnlyId = "cred_prefix_only";
+      await seedCredential(prefixOnlyId, "cb_oat_abcde");
+      const beforePrefix = await snapshot();
+      const rejected = run(["rotate-key", "--credential", prefixOnlyId], env);
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.stderr, /OAuth-issued/);
+      assert.equal(rejected.stdout.includes("cb_"), false);
+      assert.deepEqual(await snapshot(), beforePrefix);
+      const row = await db.first<{ revoked_at: string | null }>(
+        "SELECT revoked_at FROM credentials WHERE id = ?",
+        [prefixOnlyId],
+      );
+      assert.equal(row?.revoked_at, null);
+    });
+
+    await t.test(
+      "rejects an oauth_token_clients association with a normal cb_ prefix",
+      async () => {
+        const associatedId = "cred_association_only";
+        await seedCredential(associatedId, "cb_plainabcde");
+        await db.run(
+          "INSERT INTO oauth_token_clients (credential_id, client_id, created_at) VALUES (?, ?, ?)",
+          [associatedId, "cb_cli_seeded", now],
+        );
+        const beforeAssociation = await snapshot();
+        const rejected = run(["rotate-key", "--credential", associatedId], env);
+        assert.notEqual(rejected.status, 0);
+        assert.match(rejected.stderr, /OAuth-issued/);
+        assert.equal(rejected.stdout.includes("cb_"), false);
+        assert.deepEqual(await snapshot(), beforeAssociation);
+        const row = await db.first<{ revoked_at: string | null }>(
+          "SELECT revoked_at FROM credentials WHERE id = ?",
+          [associatedId],
+        );
+        assert.equal(row?.revoked_at, null);
+      },
+    );
+
+    const before = await snapshot();
+
+    // A stored expiry authorization cannot parse fails closed before writing.
+    await db.run("UPDATE credentials SET expires_at = 'not-a-date' WHERE id = ?", [credentialId]);
+    const invalidExpiry = run(["rotate-key", "--credential", credentialId], env);
+    assert.notEqual(invalidExpiry.status, 0);
+    assert.match(invalidExpiry.stderr, /expiry is invalid/);
+    assert.equal(invalidExpiry.stdout.includes("cb_"), false);
+    await db.run("UPDATE credentials SET expires_at = NULL WHERE id = ?", [credentialId]);
+
+    await db.run("UPDATE accounts SET status = 'suspended' WHERE id = ?", [accountId]);
+    const inactiveOwner = run(["rotate-key", "--credential", credentialId], env);
+    assert.notEqual(inactiveOwner.status, 0);
+    assert.match(inactiveOwner.stderr, /owner account is not active/);
+    assert.equal(inactiveOwner.stdout.includes("cb_"), false);
+
+    assert.deepEqual(await snapshot(), before);
+    const original = await db.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ?",
+      [credentialId],
+    );
+    assert.equal(original?.revoked_at, null);
+    assert.equal(
+      (await db.first<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM audit_events WHERE operation = 'credential.rotate'",
+      ))?.n,
+      0,
+    );
+    // The original operator credential still authenticates once the account
+    // is active again; no rejected attempt changed it.
+    await db.run("UPDATE accounts SET status = 'active' WHERE id = ?", [accountId]);
+    const principal = await authenticateBearer(deps, `Bearer ${token}`);
+    assert.equal(principal.credentialId, credentialId);
+  } finally {
+    db.close();
+  }
+});
+
+test("concurrent rotate-key calls produce exactly one replacement", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const token = run(["issue-key", "--speaker", speakerId, "--project", projectId], env)
+    .stdout.trim();
+
+  const { db, deps } = await openDeps(dataDir, env);
+  try {
+    const oldId = (
+      await db.first<{ id: string }>("SELECT id FROM credentials WHERE speaker_id = ?", [speakerId])
+    )?.id;
+    assert.ok(oldId);
+
+    // BEGIN IMMEDIATE serializes the two processes; the loser re-reads the
+    // revoked source row. Either way exactly one replacement may commit.
+    const results = await Promise.all([
+      runAsync(["rotate-key", "--credential", oldId], env),
+      runAsync(["rotate-key", "--credential", oldId], env),
+    ]);
+    const successes = results.filter((result) => result.status === 0);
+    const failures = results.filter((result) => result.status !== 0);
+    assert.equal(successes.length, 1);
+    assert.equal(failures.length, 1);
+    const failure = failures[0];
+    assert.ok(failure);
+    assert.match(failure.stderr, /credential is revoked|database is locked|database is busy/);
+    assert.equal(failure.stdout.includes("cb_"), false);
+
+    const active = await db.all<{ id: string; expires_at: string | null }>(
+      "SELECT id, expires_at FROM credentials WHERE speaker_id = ? AND revoked_at IS NULL",
+      [speakerId],
+    );
+    assert.equal(active.length, 1);
+    assert.notEqual(active[0]?.id, oldId);
+    const oldRow = await db.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ?",
+      [oldId],
+    );
+    assert.notEqual(oldRow?.revoked_at, null);
+    assert.equal(
+      (await db.first<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM credentials WHERE speaker_id = ?",
+        [speakerId],
+      ))?.n,
+      2,
+    );
+
+    // The winner's token is the only active credential.
+    const winner = await authenticateBearer(deps, `Bearer ${successes[0]?.stdout.trim()}`);
+    assert.equal(winner.credentialId, active[0]?.id);
+    await assert.rejects(
+      authenticateBearer(deps, `Bearer ${token}`),
+      (error: unknown) => error instanceof AppError && error.code === "UNAUTHENTICATED",
+    );
+  } finally {
+    db.close();
+  }
 });

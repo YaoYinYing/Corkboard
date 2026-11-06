@@ -84,7 +84,7 @@ browser evidence; the only post-capture behavior change is test-covered and beha
 | Load/soak: many small messages, slow uploads, 10 MiB boundaries, search, concurrent speakers, quota abuse, cleanup backlog | **Verified locally** (implemented scope; gaps below) | `npm run soak -- --profile quick` exit 0 on the dirty candidate tree based on `a530693` (see [`soak.md`](./soak.md)): 319 requests, 261 synthetic messages, 0 integrity failures, 0 unexpected 5xx, 0 network errors, 0 replay duplicates. Covered: 200 small messages; 4 concurrent speakers (40 messages, 16 cross-speaker replies); 8192-byte text accepted and 8193 rejected; summary search and ascending cursor pages; 20 injected-clock body expiries (`20` blobs deleted); real `expire-bodies`/`prune` CLI (25 backdated sessions pruned, all 261 messages unchanged); a 30/minute burst-5 server producing 7 documented `429 RATE_LIMITED` responses; and rejected no/invalid/revoked/missing-grant/non-member attempts. **Not covered:** slow uploads (the API accepts bounded JSON only, no streaming upload path), 10 MiB attachments (not implemented), quota abuse (no quotas implemented), D1/Workers/R2, TLS/reverse proxy, and multi-process. See [`soak.md`](./soak.md). |
 | Disaster rehearsal: recreate DB/ciphertext/key backups, audit integrity, resync cursors, revoke credentials, recover after interrupted deployment | **Untested** | Backup/verify/restore are implemented and locally tested (see below), but no rehearsal against a recreated host/keys was executed. Audit integrity is not cryptographically sealed. |
 | TLS, CSP/CORS, cookie policy, abuse rate limits, resource quotas, privacy notices, retention, incident procedure | **Partially verified** | CSP and cookie policy are implemented and asserted in tests; the CSP header was observed locally (`default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`). Per-credential rate limits and login limits are implemented (process-local). **TLS deployment was not executed** (example only). CORS is not enabled. No CORS, quota, privacy-notice, or formal retention-policy artifact exists beyond `docs/security-operations.md` and this runbook. |
-| Versioned operator runbook and final acceptance report stating production/staging/simulated status | **Delivered, pending audit** | [`runbook.md`](./runbook.md) v1 and this report v1. Neither claims production or staging verification. |
+| Versioned operator runbook and final acceptance report stating production/staging/simulated status | **Delivered, pending audit** | [`runbook.md`](./runbook.md) v2 and this report v1. Neither claims production or staging verification. |
 
 **Release gate:** no open P0/critical-high security finding is recorded through
 `7812505`. Backend contract, live-browser dashboard evidence, local OAuth/MCP write,
@@ -141,7 +141,7 @@ a real TLS deployment remain absent or untested.
 | CSP, CSRF, XSS, stored injection | **Verified locally** | Integration/security tests; CSP header observed in smoke. |
 | Message-expiry management UI | **Not implemented** | Only the compose form's optional `body_expires_at` field exists. |
 | Receipts UI | **Not implemented** | Receipts are API-only. |
-| Credential rotation | **Not implemented** | Revoke-then-issue is the documented replacement; there is no atomic rotate. Per-credential grant add/remove is implemented locally and covered by `npm run check`; no browser capture is claimed for it. |
+| Credential rotation | **CLI verified locally; no dashboard UI** | `rotate-key --credential <id>` atomically copies scopes/grants, issues a replacement, and revokes the old row in one transaction; `npm run check` integration tests cover old-token rejection, no widening, rollback, and sanitized audit. A manual CLI smoke was observed during implementation; it is not reproducible from the repository. The dashboard still has no rotation view (revoke-then-issue remains that path). Per-credential grant add/remove is implemented locally and covered by `npm run check`; no browser capture is claimed for it. |
 
 ## External acceptance and deferred work
 
@@ -153,7 +153,7 @@ a real TLS deployment remain absent or untested.
 | ChatGPT write-tool support by plan/workspace | **Untested external acceptance** | Must be tested on the intended subscription/workspace; a read-only or manual fallback would have to be documented if unavailable. |
 | Attachments (≤10 MiB, upload/scan/preview) | **Not implemented** | Blocked on Issue #5; text bodies only. The backup 16 KiB blob cap is sized for the 8 KiB text body. |
 | Key rotation (root key / pepper) | **Not implemented** | One root-key version `v1`; rotation requires re-encryption. Pepper rotation invalidates existing verifiers. |
-| Credential rotation | **Not implemented** | Soft revocation and revoke-then-issue; there is no atomic rotate. Dashboard grant add/remove for active credentials of active speakers is implemented (see `web-ui.md`); rotation is not. |
+| Credential rotation | **Verified locally (CLI); no dashboard UI** | `rotate-key` provides atomic replacement with identical scopes/grants and old-row revocation; covered by `npm run check` integration tests (old 401, new accepted, ungranted project still denied, no secrets in logs/audit). A manual CLI smoke was observed during implementation; it is not reproducible from the repository. Dashboard grant add/remove for active credentials of active speakers is implemented (see `web-ui.md`); a rotation view is not. |
 | Load/soak | **Verified locally (implemented scope)** | `npm run soak -- --profile quick` exit 0 on the dirty candidate tree based on `a530693` (see [`soak.md`](./soak.md)): 319 requests, 261 messages, 0 integrity/5xx/network failures. Slow uploads, 10 MiB attachments, quotas, D1/R2, TLS and multi-process remain uncovered; see [`soak.md`](./soak.md). |
 | Disaster rehearsal | **Untested** | No run; procedure documented in the runbook. |
 | TLS deployment | **Untested** | Reverse-proxy example only; no certificate or proxy was exercised. |
@@ -201,6 +201,7 @@ this report does not cite one.
   multi-process/D1 deployments (the bounded `quick` scope is in [`soak.md`](./soak.md));
   a disaster rehearsal with recreated keys and backups; and a real TLS reverse-proxy
   deployment.
-- Key rotation and credential rotation, if implemented.
+- Root-key/pepper (service-key) rotation; speaker credential rotation is now
+  implemented as the CLI `rotate-key` (no dashboard UI).
 - Browser re-capture of the dashboard after any future UI change. Until then, the
   `2a17a75` artifact is the last browser evidence; `7812505` is behavior-only.

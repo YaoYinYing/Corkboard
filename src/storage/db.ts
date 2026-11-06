@@ -46,8 +46,9 @@ export interface SqlDatabase extends SqlTransaction {
    * Only project creation (two inserts) and session message-send publication
    * (one conditional UPDATE carrying its authorization predicate) are
    * write-only, result-independent callers today. Credential issuance,
-   * credential revocation, membership add/remove, and the credential grant
-   * add/remove callbacks are read-then-write callbacks; a D1 adapter cannot
+   * credential rotation, credential revocation, membership add/remove, and the
+   * credential grant add/remove callbacks are read-then-write callbacks; a D1
+   * adapter cannot
    * emulate them without a documented read-snapshot strategy, which remains
    * pre-existing debt. The grant add callback's `?grant=added|exists` outcome
    * also depends on the in-transaction `changes` count from `INSERT OR IGNORE`,

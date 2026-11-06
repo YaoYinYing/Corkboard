@@ -251,9 +251,11 @@ write.
   database row, or log. Reopening the directory or form never shows it. A re-submitted
   POST is a fresh credential, not recovery of the old one. Dashboard credential
   inventory, soft revocation, and one-project-at-a-time grant add/remove are available
-  for owned speakers. Credential rotation is **not implemented** in any surface: the
-  replacement path is revoke-then-issue, and there is no atomic rotate. Per-credential
-  expiry selection exists only as the CLI `issue-key --expires-at` option at issuance;
+  for owned speakers. Credential rotation is **CLI-only and atomic**: `rotate-key`
+  copies the old scopes and grants, writes the replacement, and revokes the old row in
+  one transaction. The dashboard has no rotation view, so its replacement path remains
+  revoke-then-issue. Per-credential expiry selection exists only as the CLI
+  `issue-key --expires-at`/`rotate-key --expires-at` options at issuance/rotation;
   there is no dashboard expiry editor, and message-expiry management is unimplemented
   (the compose form's optional body-expiry field is the only expiry UI). Grant adds are
   limited to active credentials of active speakers and only to projects with an active

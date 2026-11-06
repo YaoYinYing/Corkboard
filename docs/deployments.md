@@ -182,6 +182,11 @@ node dist/scripts/corkboard.js issue-key --speaker <speaker_id> \
 node dist/scripts/corkboard.js issue-key --speaker <speaker_id> --project <project_id> \
   --scopes project.edit
 # prints the token once; store it in the agent's own environment
+# rotate an operator-issued credential atomically (prints the replacement token once):
+node dist/scripts/corkboard.js rotate-key --credential <credential_id>
+# optional: set a new future expiry; without it the old expiry is preserved exactly
+node dist/scripts/corkboard.js rotate-key --credential <credential_id> \
+  --expires-at 2027-01-01T00:00:00Z
 # manage grants after issuance (an active membership is required to grant):
 node dist/scripts/corkboard.js grant-key-project --credential <credential_id> --project <project_id>
 node dist/scripts/corkboard.js revoke-key-project --credential <credential_id> --project <project_id>
@@ -199,11 +204,21 @@ key fails mid-issuance, the new credential and its grants are removed rather tha
 partially provisioned. Existing pre-release credentials have no grants and lose access
 until granted explicitly.
 
-**Key rotation is not implemented.** Bootstrap (`init`) and rotation are separate:
-`init` refuses to touch an existing installation and no command rotates keys. To move
-an existing secrets file, stop the service, move the unchanged `0600` file, point the
-service manager at it, then start and verify token authentication plus body decryption.
-See `security-operations.md`.
+`rotate-key --credential <credential_id> [--expires-at <RFC3339>]` atomically replaces
+one active non-OAuth credential with a new credential for the same speaker,
+copying the old scopes and current project grants and revoking the old row in one
+transaction. Without `--expires-at` the old `expires_at` is preserved exactly,
+including no expiry; an explicit value must parse and be in the future. Unknown,
+revoked, expired, or inactive-principal credentials are rejected with no writes.
+OAuth-issued access credentials are rejected; OAuth clients use their OAuth
+refresh/revocation flow. The command prints only the new token, once.
+
+**Service-key rotation is not implemented.** Bootstrap (`init`) and service-key
+rotation are separate: `init` refuses to touch an existing installation, and no
+command rotates the root key or pepper. `rotate-key` replaces a speaker credential,
+not service secrets. To move an existing secrets file, stop the service, move the
+unchanged `0600` file, point the service manager at it, then start and verify token
+authentication plus body decryption. See `security-operations.md`.
 
 Body expiry cleanup:
 

@@ -7,7 +7,8 @@ import { SCOPES, type Scope } from "../domain/authz.ts";
 import { AppError } from "../domain/errors.ts";
 import { writeAudit } from "./audit.ts";
 import { parseScopeJson, type Principal, type ServiceDeps } from "./auth.ts";
-import type { SqlTransaction } from "../storage/db.ts";
+import { OAUTH_ACCESS_PREFIX } from "./oauth.ts";
+import type { SqlDatabase, SqlTransaction } from "../storage/db.ts";
 
 const MAX_SPEAKER_ID_CHARS = 128;
 const MAX_PROJECT_ID_CHARS = 128;
@@ -221,6 +222,22 @@ export async function getOwnedSpeakerForKey(
   };
 }
 
+// `credential.issue` and `credential.rotate` share one audit budget: at most 32
+// project IDs plus the true count, staying under the 2,048-character detail cap.
+function auditProjectSelection(selected: readonly string[]): {
+  projects: string[];
+  project_count: number;
+} {
+  const projects: string[] = [];
+  let auditChars = 0;
+  for (const projectId of selected.slice(0, MAX_AUDIT_PROJECT_IDS)) {
+    if (auditChars + projectId.length + 3 > 1600) break;
+    projects.push(projectId);
+    auditChars += projectId.length + 3;
+  }
+  return { projects, project_count: selected.length };
+}
+
 // Explicit issuance only. Every selected project needs an active membership for
 // this speaker, and every requested scope must already be one of that
 // membership's capabilities; a scope is checked against every selected project,
@@ -318,13 +335,6 @@ export async function issueProjectCredential(
   // `boundAuditDetail` caps arrays at 32 and drops a detail document over 2048
   // characters, so record the IDs that fit plus the true count instead of
   // letting the sink silently truncate a 100-project selection.
-  const auditProjects: string[] = [];
-  let auditChars = 0;
-  for (const projectId of selected.slice(0, MAX_AUDIT_PROJECT_IDS)) {
-    if (auditChars + projectId.length + 3 > 1600) break;
-    auditProjects.push(projectId);
-    auditChars += projectId.length + 3;
-  }
   await writeAudit(deps, {
     operation: "credential.issue",
     outcome: "success",
@@ -332,13 +342,211 @@ export async function issueProjectCredential(
     actorSpeakerId: speakerId,
     projectId: selected.length === 1 ? (selected[0] ?? null) : null,
     detail: {
-      projects: auditProjects,
-      project_count: selected.length,
+      ...auditProjectSelection(selected),
       scopes,
     },
   });
 
   return { credentialId, token, projects: selected, scopes };
+}
+
+// Narrow dependency surface for operator (CLI) credential administration. The
+// caller already has operator authority; this function only needs the database,
+// the verifier pepper, and a clock.
+export interface CredentialRotationDeps {
+  db: SqlDatabase;
+  pepper: Uint8Array;
+  now: () => Date;
+}
+
+export interface RotateCredentialInput {
+  credentialId: string;
+  /**
+   * ISO-8601 expiry for the replacement. Omitted means the old credential's
+   * exact `expires_at` is kept (including NULL = no expiry): rotation never
+   * silently extends or shortens a credential's lifetime. Pass an explicit
+   * value to move a near-expiry credential.
+   */
+  expiresAt?: string | undefined;
+}
+
+export interface RotatedCredential {
+  credentialId: string;
+  /** Displayed once by the CLI; never persisted or logged. */
+  token: string;
+  projects: string[];
+  scopes: Scope[];
+  expiresAt: string | null;
+}
+
+interface RotationSourceRow {
+  speaker_id: string;
+  public_prefix: string;
+  scope_json: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  speaker_status: string;
+  owner_account_id: string | null;
+  account_status: string | null;
+  oauth_associated: number;
+}
+
+// Atomic operator rotation. Unlike dashboard issuance, there is no session and
+// no Principal: CLI operator trust authorizes the call, but existence and
+// state checks still run here. The old credential must be active, so an
+// unknown, revoked, expired, or inactive-principal credential is rejected with
+// no writes. The replacement copies the old credential's known scopes and its
+// current project grants exactly and revokes the old row in the same
+// BEGIN IMMEDIATE transaction; any failure rolls back all three writes, so the
+// old credential stays active and no orphan credential remains. The old row's
+// grants are retained (soft revocation), matching `revoke-key`.
+export async function rotateSpeakerCredential(
+  deps: CredentialRotationDeps,
+  input: RotateCredentialInput,
+): Promise<RotatedCredential> {
+  if (input.credentialId === "" || input.credentialId.length > MAX_CREDENTIAL_ID_CHARS) {
+    throw new Error(`credential not found: ${input.credentialId}`);
+  }
+  const now = deps.now();
+  const nowMs = now.getTime();
+  let requestedExpiry: string | undefined;
+  if (input.expiresAt !== undefined) {
+    const parsed = new Date(input.expiresAt);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new Error("--expires-at must be an ISO timestamp");
+    }
+    if (parsed.getTime() <= nowMs) {
+      throw new Error("--expires-at must be in the future");
+    }
+    requestedExpiry = parsed.toISOString();
+  }
+
+  const { token, publicPrefix } = generateSpeakerToken();
+  const credentialId = `cred_${randomBase64url(16)}`;
+  const createdAt = now.toISOString();
+
+  const rotated = await deps.db.transaction(async (tx) => {
+    const source = await tx.first<RotationSourceRow>(
+      `SELECT c.speaker_id, c.public_prefix, c.scope_json, c.expires_at,
+              c.revoked_at, s.status AS speaker_status, s.owner_account_id,
+              a.status AS account_status,
+              EXISTS (SELECT 1 FROM oauth_token_clients t
+                       WHERE t.credential_id = c.id) AS oauth_associated
+         FROM credentials c
+         JOIN speakers s ON s.id = c.speaker_id
+         LEFT JOIN accounts a ON a.id = s.owner_account_id
+        WHERE c.id = ?`,
+      [input.credentialId],
+    );
+    if (source === undefined) {
+      throw new Error(`credential not found: ${input.credentialId}`);
+    }
+    // OAuth access credentials are managed by their OAuth client (refresh
+    // rotation and RFC 7009 revocation). Minting an operator credential for the
+    // same speaker would drop the oauth_token_clients association and bypass
+    // that flow, so reject both markers without writing.
+    if (source.oauth_associated !== 0 || source.public_prefix.startsWith(OAUTH_ACCESS_PREFIX)) {
+      throw new Error(
+        `credential is OAuth-issued; use the OAuth flow: ${input.credentialId}`,
+      );
+    }
+    if (source.revoked_at !== null) {
+      throw new Error(`credential is revoked: ${input.credentialId}`);
+    }
+    if (source.expires_at !== null) {
+      const sourceMs = Date.parse(source.expires_at);
+      // Fail closed on a stored value authorization would treat as unusable.
+      if (Number.isNaN(sourceMs)) {
+        throw new Error(`credential expiry is invalid: ${input.credentialId}`);
+      }
+      if (sourceMs <= nowMs) {
+        throw new Error(`credential is expired: ${input.credentialId}`);
+      }
+    }
+    if (source.speaker_status !== "active") {
+      throw new Error(`speaker is not active: ${source.speaker_id}`);
+    }
+    if (source.owner_account_id === null || source.account_status !== "active") {
+      throw new Error(`owner account is not active: ${source.speaker_id}`);
+    }
+
+    // Keep the old expiry policy unless the operator explicitly overrides it.
+    const expiresAt = requestedExpiry === undefined ? source.expires_at : requestedExpiry;
+    const sourceScopes = parseScopeJson(source.scope_json);
+    const scopes = SCOPES.filter((scope) => sourceScopes.has(scope));
+    const grantRows = await tx.all<{ project_id: string }>(
+      `SELECT project_id FROM credential_project_grants
+        WHERE credential_id = ? ORDER BY project_id ASC`,
+      [input.credentialId],
+    );
+    const projects = grantRows.map((row) => row.project_id);
+
+    await tx.run(
+      `INSERT INTO credentials
+         (id, speaker_id, public_prefix, secret_verifier, scope_json, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        credentialId,
+        source.speaker_id,
+        publicPrefix,
+        await hashSecret(token, deps.pepper),
+        JSON.stringify(scopes),
+        expiresAt,
+        createdAt,
+      ],
+    );
+    for (const projectId of projects) {
+      await tx.run(
+        `INSERT INTO credential_project_grants (credential_id, project_id, granted_at)
+         VALUES (?, ?, ?)`,
+        [credentialId, projectId, createdAt],
+      );
+    }
+    const revoked = await tx.run(
+      `UPDATE credentials SET revoked_at = ?
+        WHERE id = ? AND speaker_id = ? AND revoked_at IS NULL`,
+      [createdAt, input.credentialId, source.speaker_id],
+    );
+    if (revoked.changes !== 1) {
+      // Serialized by BEGIN IMMEDIATE, but keep the fail-closed predicate.
+      throw new Error(`credential is revoked: ${input.credentialId}`);
+    }
+    return {
+      credentialId,
+      token,
+      projects,
+      scopes,
+      expiresAt,
+      speakerId: source.speaker_id,
+      accountId: source.owner_account_id,
+    };
+  });
+
+  // Metadata only: never the token, its prefix, or verifier. The audit write is
+  // fail-open and follows the committed transaction, matching other credential
+  // audits; it never changes whether the rotation took effect.
+  await writeAudit(deps, {
+    operation: "credential.rotate",
+    outcome: "success",
+    actorAccountId: rotated.accountId,
+    actorSpeakerId: rotated.speakerId,
+    projectId: rotated.projects.length === 1 ? (rotated.projects[0] ?? null) : null,
+    detail: {
+      credential_id: input.credentialId,
+      new_credential_id: rotated.credentialId,
+      ...auditProjectSelection(rotated.projects),
+      scopes: rotated.scopes,
+      expires_at: rotated.expiresAt,
+    },
+  });
+
+  return {
+    credentialId: rotated.credentialId,
+    token: rotated.token,
+    projects: rotated.projects,
+    scopes: rotated.scopes,
+    expiresAt: rotated.expiresAt,
+  };
 }
 
 function requireOwnedSpeakerId(speakerId: string): void {

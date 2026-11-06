@@ -105,9 +105,9 @@ server never invokes retention. A crash before commit is rolled back by SQLite's
 no interactive transaction. A future adapter must execute a write-only callback — two
 inserts for project creation, or one conditional `UPDATE` for session message-send
 publication — as one `batch()` with no callback-visible results, and must pass the
-shared storage contract. Credential issuance, credential revocation, membership
-add/remove, and the credential grant add/remove callbacks are read-then-write
-callbacks (`tx.first` before writes); they are **pre-existing debt** for D1 because
+shared storage contract. Credential issuance, credential rotation, credential
+revocation, membership add/remove, and the credential grant add/remove callbacks
+are read-then-write callbacks (`tx.first` before writes); they are **pre-existing debt** for D1 because
 they require a documented read-snapshot strategy that does not yet exist. The grant
 add callback's `?grant=added|exists` outcome depends on the in-transaction `changes`
 count from `INSERT OR IGNORE`, which a batch-emulated D1 result cannot supply. No

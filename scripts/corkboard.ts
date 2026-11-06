@@ -27,6 +27,7 @@ import {
   pruneRetention,
   validateRetentionOptions,
 } from "../src/service/retention.ts";
+import { rotateSpeakerCredential } from "../src/service/speakers.ts";
 import { LocalBlobStore } from "../src/storage/blobs/local.ts";
 import { openSqliteDatabase, type SqlDatabase } from "../src/storage/db.ts";
 
@@ -587,6 +588,23 @@ async function issueKeyCommand(values: Values): Promise<void> {
   });
 }
 
+// Operator rotation: one transaction replaces an active credential with an
+// identical-scope, identical-grant credential for the same speaker and revokes
+// the old row. Prints only the new token, exactly like `issue-key`. Without
+// --expires-at the old credential's exact expiry timestamp is preserved, so a
+// near-expiry key stays near expiry; pass --expires-at to move it.
+async function rotateKeyCommand(values: Values): Promise<void> {
+  const credentialId = requireValue(values.credential, "--credential");
+  const pepper = pepperFromEnv();
+  const rotated = await withDb((db) =>
+    rotateSpeakerCredential(
+      { db, pepper, now: () => new Date() },
+      { credentialId, expiresAt: values["expires-at"] },
+    ),
+  );
+  console.log(rotated.token);
+}
+
 async function grantKeyProjectCommand(values: Values): Promise<void> {
   const credentialId = requireValue(values.credential, "--credential");
   const projectId = singleProject(values.project);
@@ -965,6 +983,8 @@ async function main(): Promise<void> {
       return removeMemberCommand(values);
     case "issue-key":
       return issueKeyCommand(values);
+    case "rotate-key":
+      return rotateKeyCommand(values);
     case "grant-key-project":
       return grantKeyProjectCommand(values);
     case "revoke-key-project":
@@ -988,7 +1008,7 @@ async function main(): Promise<void> {
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|backup|verify|restore|serve> [options]; backup accepts --data-dir and --out; verify accepts --backup; restore accepts --backup and --data-dir; all three accept --json; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|rotate-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|backup|verify|restore|serve> [options]; backup accepts --data-dir and --out; verify accepts --backup; restore accepts --backup and --data-dir; all three accept --json; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; rotate-key accepts --credential and optional --expires-at (default preserves the old expiry); prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }
