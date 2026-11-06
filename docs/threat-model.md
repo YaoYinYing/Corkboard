@@ -250,8 +250,19 @@ write.
   `no-store` with the strict CSP; it is never in a redirect, URL, cookie, hidden field,
   database row, or log. Reopening the directory or form never shows it. A re-submitted
   POST is a fresh credential, not recovery of the old one. Dashboard credential
-  inventory and soft revocation are available for owned speakers; only rotation,
-  per-credential grant editing, and expiry selection remain CLI-only. Leaked
+  inventory, soft revocation, and one-project-at-a-time grant add/remove are available
+  for owned speakers. Credential rotation is **not implemented** in any surface: the
+  replacement path is revoke-then-issue, and there is no atomic rotate. Per-credential
+  expiry selection exists only as the CLI `issue-key --expires-at` option at issuance;
+  there is no dashboard expiry editor, and message-expiry management is unimplemented
+  (the compose form's optional body-expiry field is the only expiry UI). Grant adds are
+  limited to active credentials of active speakers and only to projects with an active
+  speaker membership the account can read; every ineligible target is the uniform
+  `404`, and an existing grant is an idempotent no-op. A missing removal returns the
+  same response as a real one. The add path re-checks ownership, credential state,
+  membership, and account read access inside the write transaction; the remove path
+  deliberately re-checks only speaker ownership/status and credential state, so a
+  stale grant remains removable after membership or project access is lost. Leaked
   credentials are revoked through the dashboard or CLI. The route
   remains a cookie-authenticated POST and therefore needs the same CSRF defense; the
   request logger records only the fixed path, never the token.

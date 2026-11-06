@@ -44,10 +44,12 @@ import {
 } from "../service/projects.ts";
 import {
   getOwnedSpeakerForKey,
+  grantOwnedSpeakerCredentialProject,
   issueProjectCredential,
   listOwnedSpeakerCredentials,
   listOwnedSpeakers,
   revokeOwnedSpeakerCredential,
+  revokeOwnedSpeakerCredentialProject,
   type IssuedCredential,
   type OwnedCredential,
   type OwnedSpeaker,
@@ -191,6 +193,17 @@ const EN = {
   credentialGrantsLabel: "Project grants",
   credentialNoGrants: "No project grants.",
   revokeCredentialAction: "Revoke credential",
+  credentialGrantProjectLabel: "Project to grant",
+  credentialGrantAction: "Grant project",
+  credentialGrantHint:
+    "Only active projects this speaker belongs to and your account can read are listed.",
+  credentialNoGrantableProjects: "No project can be granted.",
+  credentialGrantReadOnly:
+    "Grant editing is available only for active credentials of active speakers.",
+  credentialGrantAdded: "Project grant added.",
+  credentialGrantExists: "That project grant already exists.",
+  credentialGrantRemoved: "Project grant removed.",
+  removeGrantAction: "Remove",
   statusRevoked: "Revoked",
   statusExpired: "Expired",
   statusUnknown: "Unknown",
@@ -351,6 +364,15 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   credentialGrantsLabel: "项目授权",
   credentialNoGrants: "没有项目授权。",
   revokeCredentialAction: "撤销凭证",
+  credentialGrantProjectLabel: "要授权的项目",
+  credentialGrantAction: "授权项目",
+  credentialGrantHint: "仅列出此说话者所属且你的账户可读取的活跃项目。",
+  credentialNoGrantableProjects: "没有可授权的项目。",
+  credentialGrantReadOnly: "仅活跃说话者的活跃凭证可以编辑项目授权。",
+  credentialGrantAdded: "已添加项目授权。",
+  credentialGrantExists: "该项目的授权已存在。",
+  credentialGrantRemoved: "已移除项目授权。",
+  removeGrantAction: "移除",
   statusRevoked: "已撤销",
   statusExpired: "已过期",
   statusUnknown: "未知",
@@ -543,6 +565,20 @@ function localeFrom(url: URL): Locale {
 
 function localeQuery(locale: Locale): string {
   return locale === "en" ? "" : "?lang=zh";
+}
+
+// Redirect target for credential mutations: the locale is preserved and an
+// optional non-sensitive outcome marker drives the inventory's status line.
+function credentialsRedirect(
+  locale: Locale,
+  speakerId: string,
+  grant?: "added" | "exists" | "removed",
+): string {
+  const params = new URLSearchParams();
+  if (locale === "zh") params.set("lang", "zh");
+  if (grant !== undefined) params.set("grant", grant);
+  const query = params.toString();
+  return `/speakers/${encodeURIComponent(speakerId)}/credentials${query === "" ? "" : `?${query}`}`;
 }
 
 function formatCommittedAt(locale: Locale, value: string): string {
@@ -1875,6 +1911,19 @@ function renderCredentialsPage(
     options.errorKey === undefined
       ? ""
       : `<p class="error" role="alert">${escapeHtml(t(locale, options.errorKey))}</p>`;
+  const grantNotice = url.searchParams.get("grant");
+  const noticeKey: MessageKey | undefined =
+    grantNotice === "added"
+      ? "credentialGrantAdded"
+      : grantNotice === "exists"
+        ? "credentialGrantExists"
+        : grantNotice === "removed"
+          ? "credentialGrantRemoved"
+          : undefined;
+  const notice =
+    noticeKey === undefined
+      ? ""
+      : `<p class="filter-state" role="status">${escapeHtml(t(locale, noticeKey))}</p>`;
   const items =
     options.inventory.credentials.length === 0
       ? `<p class="empty">${escapeHtml(t(locale, "credentialsEmpty"))}</p>`
@@ -1883,6 +1932,12 @@ ${options.inventory.credentials
   .map((credential: OwnedCredential, index) => {
     const headingId = `credential-${index}-id`;
     const revoked = credential.revokedAt !== null;
+    // Grant editing is active-credential-only, and an inactive speaker's
+    // credentials cannot be used for authorization. Revoked, expired,
+    // unparseable-expiry, and inactive-speaker credentials stay read-only; the
+    // service re-checks the credential state and speaker/account status.
+    const editable =
+      credential.state === "active" && options.inventory.speaker.status === "active";
     const stateKey =
       credential.state === "revoked"
         ? "statusRevoked"
@@ -1895,10 +1950,17 @@ ${options.inventory.credentials
       credential.projects.length === 0
         ? escapeHtml(t(locale, "credentialNoGrants"))
         : `<ul class="grant-list">${credential.projects
-            .map(
-              (project) =>
-                `<li>${escapeHtml(project.title)} <code>${escapeHtml(project.id)}</code></li>`,
-            )
+            .map((project) => {
+              const remove = editable
+                ? `
+<form class="inline-form" method="post" action="/speakers/${encodeURIComponent(options.inventory.speaker.id)}/credentials/${encodeURIComponent(credential.id)}/grants/remove${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
+<input type="hidden" name="project_id" value="${escapeHtml(project.id)}">
+<button type="submit">${escapeHtml(t(locale, "removeGrantAction"))}</button>
+</form>`
+                : "";
+              return `<li>${escapeHtml(project.title)} <code>${escapeHtml(project.id)}</code>${remove}</li>`;
+            })
             .join("")}</ul>`;
     const expiry =
       credential.expiresAt === null
@@ -1911,6 +1973,23 @@ ${options.inventory.credentials
 <input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
 <p class="form-actions"><button type="submit">${escapeHtml(t(locale, "revokeCredentialAction"))}</button></p>
 </form>`;
+    const grantEdit = !editable
+      ? `<p class="hint">${escapeHtml(t(locale, "credentialGrantReadOnly"))}</p>`
+      : options.inventory.grantableProjects.length === 0
+        ? `<p class="hint">${escapeHtml(t(locale, "credentialNoGrantableProjects"))}</p>`
+        : `
+<form class="project-form" method="post" action="/speakers/${encodeURIComponent(options.inventory.speaker.id)}/credentials/${encodeURIComponent(credential.id)}/grants${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
+<p class="filter-field"><label for="credential-grant-${index}">${escapeHtml(t(locale, "credentialGrantProjectLabel"))}</label>
+<select id="credential-grant-${index}" name="project_id" aria-describedby="credential-grant-hint-${index}">${options.inventory.grantableProjects
+          .map(
+            (project) =>
+              `<option value="${escapeHtml(project.id)}">${escapeHtml(project.title)} (${escapeHtml(project.id)})</option>`,
+          )
+          .join("")}</select>
+<span class="hint" id="credential-grant-hint-${index}">${escapeHtml(t(locale, "credentialGrantHint"))}</span></p>
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, "credentialGrantAction"))}</button></p>
+</form>`;
     return `<li><article aria-labelledby="${headingId}">
 <h2 id="${headingId}"><code>${escapeHtml(credential.id)}</code></h2>
 <dl>
@@ -1918,7 +1997,7 @@ ${options.inventory.credentials
 <dt>${escapeHtml(t(locale, "credentialCreatedLabel"))}</dt><dd><time datetime="${escapeHtml(credential.createdAt)}">${escapeHtml(formatCommittedAt(locale, credential.createdAt))}</time></dd>
 <dt>${escapeHtml(t(locale, "credentialExpiresLabel"))}</dt><dd>${expiry}</dd>
 <dt>${escapeHtml(t(locale, "credentialGrantsLabel"))}</dt><dd>${projects}</dd>
-</dl>${revoke}
+</dl>${revoke}${grantEdit}
 </article></li>`;
   })
   .join("\n")}
@@ -1926,7 +2005,7 @@ ${options.inventory.credentials
   const content = `<p><a href="/speakers${localeQuery(locale)}">${escapeHtml(t(locale, "backToSpeakers"))}</a></p>
 <h1>${escapeHtml(t(locale, "credentialsTitle"))}</h1>
 <p>${escapeHtml(t(locale, "speakerNameLabel"))}: ${escapeHtml(displaySpeakerName(options.inventory.speaker))} <code>${escapeHtml(options.inventory.speaker.id)}</code></p>
-${error}${items}`;
+${error}${notice}${items}`;
   return htmlResponse(
     options.status,
     renderPage(locale, url, t(locale, "credentialsTitle"), content),
@@ -2112,6 +2191,80 @@ async function handleSpeakerCredentialRevoke(
     303,
     `/speakers/${encodeURIComponent(speakerId)}/credentials${localeQuery(locale)}`,
   );
+}
+
+async function handleSpeakerCredentialGrantAdd(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  speakerId: string,
+  credentialId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const principal = sessionAccountPrincipal(session);
+  // Resolve the owned speaker before parsing the body, so a foreign or unknown
+  // speaker/malformed body is the uniform 404 or form-expired path. The service
+  // re-checks ownership, credential state, membership, and account read access
+  // inside the write transaction.
+  const inventory = await listOwnedSpeakerCredentials(deps, principal, speakerId);
+  const form = await readForm(request);
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return renderCredentialsPage(locale, url, {
+      inventory,
+      csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+      status: 400,
+      errorKey: "formExpired",
+    });
+  }
+  const projectId = singleFormParam(form, "project_id") ?? "";
+  const changed = await grantOwnedSpeakerCredentialProject(
+    deps,
+    principal,
+    speakerId,
+    credentialId,
+    projectId,
+  );
+  return redirect(303, credentialsRedirect(locale, speakerId, changed ? "added" : "exists"));
+}
+
+async function handleSpeakerCredentialGrantRemove(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  speakerId: string,
+  credentialId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const principal = sessionAccountPrincipal(session);
+  const inventory = await listOwnedSpeakerCredentials(deps, principal, speakerId);
+  const form = await readForm(request);
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return renderCredentialsPage(locale, url, {
+      inventory,
+      csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+      status: 400,
+      errorKey: "formExpired",
+    });
+  }
+  const projectId = singleFormParam(form, "project_id") ?? "";
+  // The same 303 is returned whether a row was deleted or none existed, so the
+  // response never reveals grant existence. Only a real deletion is audited.
+  await revokeOwnedSpeakerCredentialProject(
+    deps,
+    principal,
+    speakerId,
+    credentialId,
+    projectId,
+  );
+  return redirect(303, credentialsRedirect(locale, speakerId, "removed"));
 }
 
 async function handleSpeakerKeyForm(
@@ -2523,6 +2676,23 @@ export function isWebPath(segments: readonly string[]): boolean {
   ) {
     return true;
   }
+  if (
+    segments.length === 5 &&
+    segments[0] === "speakers" &&
+    segments[2] === "credentials" &&
+    segments[4] === "grants"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 6 &&
+    segments[0] === "speakers" &&
+    segments[2] === "credentials" &&
+    segments[4] === "grants" &&
+    segments[5] === "remove"
+  ) {
+    return true;
+  }
   if (segments.length === 2 && segments[0] === "projects") return true;
   if (
     segments.length === 3 &&
@@ -2624,6 +2794,39 @@ export async function handleWebRoute(
     ) {
       if (method !== "POST") return methodNotAllowed(locale, url, "POST");
       return await handleSpeakerCredentialRevoke(
+        deps,
+        request,
+        url,
+        locale,
+        segments[1] ?? "",
+        segments[3] ?? "",
+      );
+    }
+    if (
+      segments.length === 5 &&
+      segments[0] === "speakers" &&
+      segments[2] === "credentials" &&
+      segments[4] === "grants"
+    ) {
+      if (method !== "POST") return methodNotAllowed(locale, url, "POST");
+      return await handleSpeakerCredentialGrantAdd(
+        deps,
+        request,
+        url,
+        locale,
+        segments[1] ?? "",
+        segments[3] ?? "",
+      );
+    }
+    if (
+      segments.length === 6 &&
+      segments[0] === "speakers" &&
+      segments[2] === "credentials" &&
+      segments[4] === "grants" &&
+      segments[5] === "remove"
+    ) {
+      if (method !== "POST") return methodNotAllowed(locale, url, "POST");
+      return await handleSpeakerCredentialGrantRemove(
         deps,
         request,
         url,

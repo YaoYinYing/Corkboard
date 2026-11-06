@@ -141,7 +141,7 @@ a real TLS deployment remain absent or untested.
 | CSP, CSRF, XSS, stored injection | **Verified locally** | Integration/security tests; CSP header observed in smoke. |
 | Message-expiry management UI | **Not implemented** | Only the compose form's optional `body_expires_at` field exists. |
 | Receipts UI | **Not implemented** | Receipts are API-only. |
-| Credential rotation / grant editing | **Not implemented** | Revoke-then-issue is the documented replacement; grants are CLI-only. |
+| Credential rotation | **Not implemented** | Revoke-then-issue is the documented replacement; there is no atomic rotate. Per-credential grant add/remove is implemented locally and covered by `npm run check`; no browser capture is claimed for it. |
 
 ## External acceptance and deferred work
 
@@ -153,7 +153,7 @@ a real TLS deployment remain absent or untested.
 | ChatGPT write-tool support by plan/workspace | **Untested external acceptance** | Must be tested on the intended subscription/workspace; a read-only or manual fallback would have to be documented if unavailable. |
 | Attachments (≤10 MiB, upload/scan/preview) | **Not implemented** | Blocked on Issue #5; text bodies only. The backup 16 KiB blob cap is sized for the 8 KiB text body. |
 | Key rotation (root key / pepper) | **Not implemented** | One root-key version `v1`; rotation requires re-encryption. Pepper rotation invalidates existing verifiers. |
-| Credential rotation / grant editing | **Not implemented** | Soft revocation and revoke-then-issue; `grant-key-project`/`revoke-key-project` are CLI-only. |
+| Credential rotation | **Not implemented** | Soft revocation and revoke-then-issue; there is no atomic rotate. Dashboard grant add/remove for active credentials of active speakers is implemented (see `web-ui.md`); rotation is not. |
 | Load/soak | **Verified locally (implemented scope)** | `npm run soak -- --profile quick` exit 0 on the dirty candidate tree based on `a530693` (see [`soak.md`](./soak.md)): 319 requests, 261 messages, 0 integrity/5xx/network failures. Slow uploads, 10 MiB attachments, quotas, D1/R2, TLS and multi-process remain uncovered; see [`soak.md`](./soak.md). |
 | Disaster rehearsal | **Untested** | No run; procedure documented in the runbook. |
 | TLS deployment | **Untested** | Reverse-proxy example only; no certificate or proxy was exercised. |
@@ -201,6 +201,6 @@ this report does not cite one.
   multi-process/D1 deployments (the bounded `quick` scope is in [`soak.md`](./soak.md));
   a disaster rehearsal with recreated keys and backups; and a real TLS reverse-proxy
   deployment.
-- Key rotation and credential rotation/grant editing, if implemented.
+- Key rotation and credential rotation, if implemented.
 - Browser re-capture of the dashboard after any future UI change. Until then, the
   `2a17a75` artifact is the last browser evidence; `7812505` is behavior-only.

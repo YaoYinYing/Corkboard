@@ -1159,3 +1159,55 @@ prevented regression; when to remove the advice.
   handler masking the runner's failure exit code.
 - **Remove when:** Soak config has no separate parse/apply boundary, or the server stops
   installing process-wide signal handlers.
+
+## 2026-11-05 — a CLI eligibility rule is not automatically a dashboard rule
+
+- **Failure:** The CLI `grant-key-project` requires only an active speaker
+  membership for the grant. Mirroring that rule alone in the dashboard would offer
+  and allow a project the session account cannot read: a speaker can be an active
+  member of a project while no speaker owned by that account has `project.read`
+  there (for example a membership carrying only `message.read` or `message.send`).
+  The form would advertise a project the human cannot inspect, and the write would
+  succeed without any account-read authority behind it.
+- **Reproducer:** project P, speaker S owned by account A is an active member with
+  only `message.read`, and no other A-owned speaker is a member. The CLI predicate
+  passes, but `resolveSessionViewer(A, P, "project.read")` is `NOT_FOUND`. The slice
+  test `credential grant routes deny foreign, unreadable, and ineligible targets
+  uniformly` covers this (proj_c) and the inverse case (proj_e: account-readable via
+  another speaker, but the target speaker is not a member).
+- **Fix:** The dashboard candidate set is the speaker's active memberships
+  intersected with the account-readable project set; the write transaction re-reads
+  both predicates, and every ineligible target is the uniform `404`. The UI hint and
+  `docs/web-ui.md` state the rule.
+- **Prevents:** A grant form that reveals or grants into a project the account cannot
+  read, and a hidden authorization widening behind a UI convenience.
+- **Remove when:** one exported authorization helper serves both the CLI and the
+  dashboard and its predicate is documented as the grant rule.
+
+## 2026-11-05 — "CLI-only" is a false claim when no CLI path exists
+
+- **Failure:** the grant-UI candidate said rotation and expiry selection "remain
+  CLI-only" while the CLI has no rotate command or service path. It also implied
+  that grant add and remove re-check the same predicates: removal deliberately
+  checks only speaker ownership/status and credential state so a stale grant stays
+  removable after membership loss. The D1 read-then-write debt list omitted the two
+  grant callbacks and the add route's `?grant=added|exists` outcome, which depends
+  on an in-transaction `changes` count a batch-emulated D1 result cannot supply.
+- **Reproducer:** `grep -n "rotate" scripts/corkboard.ts` and the CLI usage
+  string list no rotate command; the acceptance report and runbook already
+  stated rotation is unimplemented; `tests/integration/speakers-web.test.ts`
+  test "a stale grant remains removable after the speaker loses the project
+  membership" seeds a grant, removes the speaker's membership, asserts add is
+  the uniform `404`, then asserts remove returns `303`, deletes the grant row,
+  and writes a `credential.project.revoke` audit.
+- **Fix:** say rotation is unimplemented in every surface (revoke-then-issue is the
+  replacement), name per-credential expiry selection as CLI-only at issuance, and
+  state dashboard message-expiry management as unimplemented (body expiry on send
+  is the only expiry UI). Restrict the membership/read re-check claim to add and
+  state the remove rule explicitly. List grant add/remove in every current D1 debt
+  enumeration with the `changes`-count caveat.
+- **Prevents:** documentation that promises an operator action that would fail, and
+  a security review that assumes symmetric authorization where asymmetry is the
+  intended behavior.
+- **Remove when:** an atomic rotate path exists, and a D1 adapter documents how it
+  supplies snapshot reads and affected-row counts for read-then-write callbacks.

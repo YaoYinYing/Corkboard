@@ -84,8 +84,11 @@ survive a changed pepper.
   an active membership **and** that credential has an explicit grant row. Issuing a key
   for one project does not authorize another project the same speaker belongs to, even
   with identical scopes. Adding a membership never widens an existing credential.
-- `grant-key-project` and `revoke-key-project` are CLI-only in this slice. Both require
-  an existing credential; granting also requires an active membership. Deleted grants
+- `grant-key-project` and `revoke-key-project` are available in the CLI and, for an
+  active credential of an active account-owned speaker, through the dashboard
+  credential inventory (one project per form). Both require
+  an existing credential; granting also requires an active membership plus account
+  read access in the dashboard. Deleted grants
   take effect on the next request. Removing a membership also deletes that speaker's
   grants for the project, so re-adding the membership requires an explicit re-grant.
 - Migration 002 does not backfill grants. Credentials issued before the migration lose
@@ -114,8 +117,12 @@ operator-facing rules are:
   `credentials.revoked_at` once, keeps the credential row and its grants, and is
   idempotent. **Rotation is not implemented:** to replace a dashboard-issued
   credential, revoke it and issue a new one through the normal issuance form (or
-  `issue-key`), selecting the projects and scopes again. Grant changes and expiry
-  selection remain CLI-only (`grant-key-project`, `revoke-key-project`).
+  `issue-key`), selecting the projects and scopes again. Per-credential expiry
+  selection remains CLI-only. The dashboard may also add or remove one explicit
+  project grant at a time on an **active** credential of an **active** owned speaker,
+  using the CLI grant predicates plus account read access; every ineligible target is
+  a uniform `404`, and an existing grant is an idempotent no-op. Rotation is not
+  implemented.
 - The credential inventory is account-owner-only and shows only non-secret metadata:
   credential ID, created time, expiry, revoked state, and project grants. It never
   selects or renders the token, public prefix, verifier, or scope column. The revoke
@@ -218,7 +225,9 @@ written) is not prevented; no stronger guarantee is claimed. See
   membership. It grants no access while the membership is removed (authorization still
   requires an active membership), but it would make that credential usable again if
   the membership is later reactivated, because removal's grant deletion already ran.
-  The command is operator-only. A future fix should use the `SqlDatabase.transaction`
+  The command is operator-only. The dashboard grant-add route re-reads the membership
+  and inserts inside one `SqlDatabase.transaction`, so it does not share this race; the
+  CLI still does. A future fix should use the `SqlDatabase.transaction`
   port (writes in the transaction, audit after commit).
 
 ## Human account sessions
@@ -351,8 +360,10 @@ or as authority to act as a speaker.
   HTML form routes require the
   session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
   `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message-expiry
-  management, receipts, credential rotation, grant editing, registration,
-  recovery, and administrative capability remain absent.
+  management, receipts, credential rotation, registration,
+  recovery, and administrative capability remain absent. Per-credential grant
+  add/remove is present on the credential inventory for active credentials of active
+  speakers.
 
 ## OAuth 2.1 authorization server
 
@@ -462,9 +473,12 @@ or as authority to act as a speaker.
   the shipped server. A crash before commit is rolled back by the WAL. Only project
   creation (two inserts) and session message-send publication (one conditional
   `UPDATE` carrying its authorization predicate) are write-only, result-independent
-  callbacks. Credential issuance, credential revocation, and membership add/remove
-  are read-then-write callbacks; D1 cannot emulate them without a documented
-  read-snapshot strategy, recorded as pre-existing debt. A future D1 adapter must
+  callbacks. Credential issuance, credential revocation, membership add/remove, and
+  the credential grant add/remove callbacks are read-then-write callbacks; D1 cannot
+  emulate them without a documented read-snapshot strategy, recorded as pre-existing
+  debt. The grant add callback's `?grant=added|exists` outcome depends on the
+  in-transaction `changes` count from `INSERT OR IGNORE`, which a batch-emulated D1
+  result cannot supply. A future D1 adapter must
   execute a write-only callback as one `batch()` with no callback-visible results and
   must pass the shared storage contract. No D1 adapter ships or is verified here.
 - **Production mode verifies these modes instead of assuming them.** Production is
@@ -941,8 +955,12 @@ shows no traffic or error summary, because there is no per-tenant source. See
   the service-overview slice adds the authorized read-only `GET /overview` (counts,
   stored-byte totals, credential states, and 20 sanitized audit rows), and the
   compose slice adds dashboard message send as a selected owned speaker.
-  Message-expiry management (the compose form's optional body-expiry timestamp is
-  the only expiry UI), credential rotation, and per-credential grant editing remain
-  CLI/API-only. Registration, email
+  Message-expiry management is unimplemented (the compose form's optional
+  body-expiry timestamp is the only expiry UI), and credential rotation is
+  unimplemented in every surface: revoke-then-issue is the replacement, with no
+  atomic rotate. Per-credential expiry selection exists only as the CLI
+  `issue-key --expires-at` option at issuance; there is no dashboard expiry editor.
+  Per-credential grant add/remove is available in the dashboard credential
+  inventory for active credentials of active speakers. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not
   perfectly timing-equivalent across PBKDF2 and the Node-only legacy scrypt path.

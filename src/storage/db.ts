@@ -46,10 +46,13 @@ export interface SqlDatabase extends SqlTransaction {
    * Only project creation (two inserts) and session message-send publication
    * (one conditional UPDATE carrying its authorization predicate) are
    * write-only, result-independent callers today. Credential issuance,
-   * credential revocation, and membership add/remove are read-then-write
-   * callbacks; a D1 adapter cannot emulate them without a documented
-   * read-snapshot strategy, which remains pre-existing debt. No batch-emulated
-   * result may depend on an in-transaction read or affected-row count.
+   * credential revocation, membership add/remove, and the credential grant
+   * add/remove callbacks are read-then-write callbacks; a D1 adapter cannot
+   * emulate them without a documented read-snapshot strategy, which remains
+   * pre-existing debt. The grant add callback's `?grant=added|exists` outcome
+   * also depends on the in-transaction `changes` count from `INSERT OR IGNORE`,
+   * which a batch-emulated D1 result cannot supply. No batch-emulated result may
+   * depend on an in-transaction read or affected-row count.
    */
   transaction<T>(fn: (tx: SqlTransaction) => Promise<T>): Promise<T>;
 }

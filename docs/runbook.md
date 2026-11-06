@@ -159,7 +159,8 @@ every request. Grant removal also takes effect on the next request.
 
 **Rotation is not implemented.** Replace a credential by revoking it and issuing a new
 one with the same projects and scopes. The dashboard inventory supports the same
-revoke-then-issue flow; grant editing and per-credential expiry selection are CLI-only.
+revoke-then-issue flow and the same one-project-at-a-time grant add/remove for active
+credentials of active speakers; per-credential expiry selection remains CLI-only.
 
 ## 3. Start, stop, and health
 
@@ -253,7 +254,7 @@ Sign in at `/login` over HTTPS. The dashboard provides:
 
 Dashboard authority is account ownership for speakers/credentials and project
 ownership for membership/project edits; a uniform `404` covers foreign and unknown
-objects. There is no credential rotation, grant editor, expiry management, project
+objects. There is no credential rotation, expiry management, project
 deletion, or admin action in the UI.
 
 ## 5. Messages
@@ -471,8 +472,10 @@ database write access.
 - **Rate limiting and login limiting are process-local;** per-IP and volumetric limits
   are the reverse proxy's job.
 - **Not end-to-end encrypted.** The server holds keys and can decrypt.
-- **No credential rotation/grant editing UI, message-expiry management UI, receipt UI,
+- **No credential rotation UI, message-expiry management UI, receipt UI,
   project deletion/status change, registration, email verification, or password reset.**
+  Per-project grant add/remove is available in the credential inventory for active
+  credentials of active speakers; rotation remains unimplemented.
 - **Health has no readiness probe** and no dependency checks.
 - **A subagent sharing its parent's credential can impersonate the parent.** There is no
   cryptographic attestation of model/process identity.

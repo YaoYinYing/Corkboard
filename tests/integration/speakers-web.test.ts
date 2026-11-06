@@ -12,9 +12,11 @@ import { SCOPES } from "../../src/domain/authz.ts";
 import { AppError } from "../../src/domain/errors.ts";
 import { authorizeProject, sessionAccountPrincipal } from "../../src/service/auth.ts";
 import {
+  grantOwnedSpeakerCredentialProject,
   issueProjectCredential,
   listOwnedSpeakerCredentials,
   revokeOwnedSpeakerCredential,
+  revokeOwnedSpeakerCredentialProject,
 } from "../../src/service/speakers.ts";
 import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "../../src/service/sessions.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
@@ -1488,7 +1490,7 @@ test("credential inventory and revocation are localized", async (t) => {
   }
 });
 
-test("the Node adapter buffers the credential revocation POST body over HTTP", async (t) => {
+test("the Node adapter buffers credential POST bodies over HTTP", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "corkboard-credentials-http-"));
   const dataDir = join(root, "data");
   mkdirSync(dataDir, { recursive: true });
@@ -1511,6 +1513,21 @@ test("the Node adapter buffers the credential revocation POST body over HTTP", a
     `INSERT INTO projects (id, owner_account_id, title, status, created_at)
      VALUES (?, ?, ?, 'active', ?)`,
     ["proj_http", "acct_http", "HTTP Project", now],
+  );
+  await db.run(
+    `INSERT INTO projects (id, owner_account_id, title, status, created_at)
+     VALUES (?, ?, ?, 'active', ?)`,
+    ["proj_http2", "acct_http", "HTTP Grant Project", now],
+  );
+  await db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    ["proj_http", "spk_http", JSON.stringify(SCOPES), now],
+  );
+  await db.run(
+    `INSERT INTO project_memberships (project_id, speaker_id, capabilities, joined_at)
+     VALUES (?, ?, ?, ?)`,
+    ["proj_http2", "spk_http", JSON.stringify(SCOPES), now],
   );
   await db.run(
     `INSERT INTO credentials
@@ -1579,6 +1596,44 @@ test("the Node adapter buffers the credential revocation POST body over HTTP", a
   });
   assert.equal(inventory.status, 200);
   assert.ok((await inventory.text()).includes("cred_http"));
+
+  // The grant add/remove forms have the same buffering requirement; before the
+  // adapter buffered web POSTs they arrived body-less and returned the 400
+  // expired-form page.
+  const granted = await fetch(
+    `${base}/speakers/spk_http/credentials/cred_http/grants`,
+    {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": formType, cookie, connection: "close" },
+      body: new URLSearchParams({
+        csrf_token: csrf,
+        project_id: "proj_http2",
+      }).toString(),
+    },
+  );
+  assert.equal(granted.status, 303, "the adapter must buffer the grant add POST body");
+  assert.equal(
+    granted.headers.get("location"),
+    "/speakers/spk_http/credentials?grant=added",
+  );
+  const grantRemoved = await fetch(
+    `${base}/speakers/spk_http/credentials/cred_http/grants/remove`,
+    {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": formType, cookie, connection: "close" },
+      body: new URLSearchParams({
+        csrf_token: csrf,
+        project_id: "proj_http2",
+      }).toString(),
+    },
+  );
+  assert.equal(grantRemoved.status, 303, "the adapter must buffer the grant remove POST body");
+  assert.equal(
+    grantRemoved.headers.get("location"),
+    "/speakers/spk_http/credentials?grant=removed",
+  );
 
   // Before the adapter buffered this route the form would arrive body-less and
   // the CSRF check would return the 400 expired-form page.
@@ -1720,9 +1775,35 @@ test("inactive owning accounts are denied and inactive owned speakers remain man
   await fx.db.run("UPDATE accounts SET status = 'active' WHERE id = ?", ["acct_a"]);
   await fx.addSpeaker("spk_off", "acct_a", "inactive");
   const inactiveCredential = await fx.addCredential({ speakerId: "spk_off" });
+  await fx.grantProject(inactiveCredential.credentialId, "proj_a");
   const page = await getPage(app, "/speakers/spk_off/credentials", cookie);
   assert.equal(page.status, 200);
   assert.ok(page.html.includes(inactiveCredential.credentialId));
+  // An inactive speaker's credentials are read-only for grant editing even when
+  // the credential row itself is not revoked or expired.
+  assert.equal(
+    page.html.includes(`/credentials/${inactiveCredential.credentialId}/grants`),
+    false,
+  );
+  for (const path of [
+    `/speakers/spk_off/credentials/${inactiveCredential.credentialId}/grants`,
+    `/speakers/spk_off/credentials/${inactiveCredential.credentialId}/grants/remove`,
+  ]) {
+    const denied = await postFormMulti(app, path, cookie, [
+      ["csrf_token", csrf],
+      ["project_id", "proj_a"],
+    ]);
+    assert.equal(denied.status, 404, path);
+  }
+  assert.equal(
+    (
+      await fx.db.all<{ credential_id: string }>(
+        "SELECT credential_id FROM credential_project_grants WHERE credential_id = ?",
+        [inactiveCredential.credentialId],
+      )
+    ).length,
+    1,
+  );
   const revoked = await postFormMulti(
     app,
     `/speakers/spk_off/credentials/${inactiveCredential.credentialId}/revoke`,
@@ -1736,4 +1817,650 @@ test("inactive owning accounts are denied and inactive owned speakers remain man
   );
   assert.ok(inactiveRow !== undefined, "the inactive speaker's credential row must exist");
   assert.equal(typeof inactiveRow.revoked_at, "string");
+});
+
+test("credential project grants can be added and removed by the owner", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read", "message.read"],
+    autoGrantMemberships: false,
+  });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const base = `/speakers/spk_a/credentials/${credential.credentialId}`;
+
+  const before = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.equal(before.status, 200);
+  assertHardened(before.response);
+  // The add form lists the speaker's active, account-readable projects only.
+  assert.ok(before.html.includes(`action="${base}/grants"`));
+  assert.ok(before.html.includes('<option value="proj_a">Alpha project (proj_a)</option>'));
+  assert.ok(before.html.includes('<option value="proj_b">Beta project (proj_b)</option>'));
+  assert.equal(before.html.includes('value="proj_d"'), false);
+  assert.equal(before.html.includes(`action="${base}/grants/remove"`), false);
+  assert.equal(before.html.includes("No project grants."), true);
+
+  const added = await postFormMulti(app, `${base}/grants`, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(added.status, 303);
+  assert.equal(added.headers.get("location"), "/speakers/spk_a/credentials?grant=added");
+  const grants = await fx.db.all<{ project_id: string }>(
+    "SELECT project_id FROM credential_project_grants WHERE credential_id = ?",
+    [credential.credentialId],
+  );
+  assert.deepEqual(grants.map((row) => row.project_id), ["proj_a"]);
+
+  const grantAudits = await fx.db.all<{
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+    project_id: string | null;
+    detail: string | null;
+  }>(
+    "SELECT actor_account_id, actor_speaker_id, project_id, detail FROM audit_events WHERE operation = 'credential.project.grant'",
+  );
+  assert.equal(grantAudits.length, 1);
+  assert.equal(grantAudits[0]?.actor_account_id, "acct_a");
+  assert.equal(grantAudits[0]?.actor_speaker_id, "spk_a");
+  assert.equal(grantAudits[0]?.project_id, "proj_a");
+  assert.deepEqual(JSON.parse(grantAudits[0]?.detail ?? "{}"), {
+    credential_id: credential.credentialId,
+    projects: ["proj_a"],
+    source: "dashboard",
+  });
+
+  const afterAdd = await getPage(
+    app,
+    "/speakers/spk_a/credentials?grant=added",
+    cookie,
+  );
+  assert.ok(afterAdd.html.includes(`action="${base}/grants/remove"`));
+  assert.ok(afterAdd.html.includes('name="project_id" value="proj_a"'));
+  assert.ok(afterAdd.html.includes("Alpha project"));
+  assert.ok(afterAdd.html.includes("Project grant added."));
+
+  // Adding an existing grant is an idempotent no-op with a clear response and
+  // no duplicate audit row.
+  const again = await postFormMulti(app, `${base}/grants`, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(again.status, 303);
+  assert.equal(
+    again.headers.get("location"),
+    "/speakers/spk_a/credentials?grant=exists",
+  );
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT credential_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).length,
+    1,
+  );
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT id FROM audit_events WHERE operation = 'credential.project.grant'",
+      )
+    ).length,
+    1,
+  );
+
+  // Removing a grant that does not exist returns the same 303 as a real
+  // removal, changes nothing, and writes no audit row.
+  const missing = await postFormMulti(app, `${base}/grants/remove`, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_b"],
+  ]);
+  assert.equal(missing.status, 303);
+  assert.equal(
+    missing.headers.get("location"),
+    "/speakers/spk_a/credentials?grant=removed",
+  );
+  assert.deepEqual(
+    (
+      await fx.db.all<{ project_id: string }>(
+        "SELECT project_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).map((row) => row.project_id),
+    ["proj_a"],
+  );
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT id FROM audit_events WHERE operation = 'credential.project.revoke'",
+      )
+    ).length,
+    0,
+  );
+
+  const removed = await postFormMulti(app, `${base}/grants/remove`, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(removed.status, 303);
+  assert.equal(
+    removed.headers.get("location"),
+    "/speakers/spk_a/credentials?grant=removed",
+  );
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT credential_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).length,
+    0,
+  );
+  const revokeAudits = await fx.db.all<{
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+    project_id: string | null;
+    detail: string | null;
+  }>(
+    "SELECT actor_account_id, actor_speaker_id, project_id, detail FROM audit_events WHERE operation = 'credential.project.revoke'",
+  );
+  assert.equal(revokeAudits.length, 1);
+  assert.equal(revokeAudits[0]?.actor_account_id, "acct_a");
+  assert.equal(revokeAudits[0]?.actor_speaker_id, "spk_a");
+  assert.equal(revokeAudits[0]?.project_id, "proj_a");
+  assert.deepEqual(JSON.parse(revokeAudits[0]?.detail ?? "{}"), {
+    credential_id: credential.credentialId,
+    projects: ["proj_a"],
+    source: "dashboard",
+  });
+
+  // Re-rendering after removal restores the add form and drops the remove form.
+  const afterRemove = await getPage(
+    app,
+    "/speakers/spk_a/credentials?grant=removed",
+    cookie,
+  );
+  assert.ok(afterRemove.html.includes(`action="${base}/grants"`));
+  assert.equal(afterRemove.html.includes(`action="${base}/grants/remove"`), false);
+  assert.ok(afterRemove.html.includes("Project grant removed."));
+});
+
+test("a stale grant remains removable after the speaker loses the project membership", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read", "message.read"],
+    autoGrantMemberships: false,
+    grantProjects: ["proj_a"],
+  });
+  // The membership removal leaves the existing grant behind.
+  await fx.db.run(
+    "UPDATE project_memberships SET removed_at = ? WHERE project_id = ? AND speaker_id = ?",
+    ["2026-11-03T12:30:00.000Z", "proj_a", "spk_a"],
+  );
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const base = `/speakers/spk_a/credentials/${credential.credentialId}/grants`;
+
+  // Add still requires a current membership, so the same owner gets the uniform
+  // 404 even though proj_a remains account-readable through spk_b.
+  const added = await postFormMulti(app, base, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(added.status, 404);
+  assert.ok((await added.text()).includes("The requested page is not available."));
+  assert.deepEqual(
+    (
+      await fx.db.all<{ project_id: string }>(
+        "SELECT project_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).map((row) => row.project_id),
+    ["proj_a"],
+  );
+
+  // Remove deliberately does not re-check membership or read access, so the
+  // stale grant stays removable by the speaker's owner.
+  const removed = await postFormMulti(app, `${base}/remove`, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(removed.status, 303);
+  assert.equal(
+    removed.headers.get("location"),
+    "/speakers/spk_a/credentials?grant=removed",
+  );
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT credential_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).length,
+    0,
+  );
+  const revokeAudits = await fx.db.all<{
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+    project_id: string | null;
+  }>(
+    "SELECT actor_account_id, actor_speaker_id, project_id FROM audit_events WHERE operation = 'credential.project.revoke'",
+  );
+  assert.equal(revokeAudits.length, 1);
+  assert.equal(revokeAudits[0]?.actor_account_id, "acct_a");
+  assert.equal(revokeAudits[0]?.actor_speaker_id, "spk_a");
+  assert.equal(revokeAudits[0]?.project_id, "proj_a");
+});
+
+test("credential grant routes deny foreign, unreadable, and ineligible targets uniformly", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  // proj_c: the speaker is an active member, but the account cannot read it
+  // (no owned speaker has project.read there).
+  await fx.addProject("proj_c", "acct_a");
+  await fx.db.run("UPDATE projects SET title = ? WHERE id = ?", ["No-read project", "proj_c"]);
+  await fx.addMembership("proj_c", "spk_a", ["message.read"], {
+    grantExistingCredentials: false,
+  });
+  // proj_e: the account can read it through spk_b, but spk_a is not a member.
+  await fx.addProject("proj_e", "acct_a");
+  await fx.db.run("UPDATE projects SET title = ? WHERE id = ?", ["Not spk_a project", "proj_e"]);
+  await fx.addMembership("proj_e", "spk_b", ["project.read"], {
+    grantExistingCredentials: false,
+  });
+
+  const credential = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read", "message.read"],
+    autoGrantMemberships: false,
+  });
+  const otherSpeakerCredential = await fx.addCredential({
+    speakerId: "spk_b",
+    scopes: ["project.read"],
+    autoGrantMemberships: false,
+  });
+  const foreignCredential = await fx.addCredential({
+    speakerId: "spk_d",
+    scopes: ["project.read"],
+    autoGrantMemberships: false,
+  });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const base = `/speakers/spk_a/credentials/${credential.credentialId}`;
+
+  const page = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.equal(page.status, 200);
+  assert.ok(page.html.includes('value="proj_a"'));
+  assert.ok(page.html.includes('value="proj_b"'));
+  assert.equal(page.html.includes('value="proj_c"'), false);
+  assert.equal(page.html.includes('value="proj_e"'), false);
+
+  // Ineligible project: no active membership, account cannot read, or both.
+  for (const projectId of ["proj_c", "proj_e", "proj_d"]) {
+    const response = await postFormMulti(app, `${base}/grants`, cookie, [
+      ["csrf_token", csrf],
+      ["project_id", projectId],
+    ]);
+    assert.equal(response.status, 404, projectId);
+    const html = await response.text();
+    assert.ok(html.includes("The requested page is not available."), projectId);
+  }
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT credential_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).length,
+    0,
+  );
+
+  // A speaker owned by another account is the same 404 before any write.
+  const other = await loginAsWithCsrf(app, "d@example.test", "account d secret");
+  const foreignSpeaker = await postFormMulti(app, `${base}/grants`, other.cookie, [
+    ["csrf_token", other.csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(foreignSpeaker.status, 404);
+  assert.ok((await foreignSpeaker.text()).includes("The requested page is not available."));
+
+  // A credential belonging to another speaker (same account or foreign account)
+  // is NOT_FOUND for both add and remove.
+  for (const credentialId of [
+    otherSpeakerCredential.credentialId,
+    foreignCredential.credentialId,
+  ]) {
+    for (const path of [
+      `/speakers/spk_a/credentials/${credentialId}/grants`,
+      `/speakers/spk_a/credentials/${credentialId}/grants/remove`,
+    ]) {
+      const response = await postFormMulti(app, path, cookie, [
+        ["csrf_token", csrf],
+        ["project_id", "proj_a"],
+      ]);
+      assert.equal(response.status, 404, path);
+      assert.ok((await response.text()).includes("The requested page is not available."));
+    }
+  }
+  assert.equal(
+    (
+      await fx.db.all("SELECT credential_id FROM credential_project_grants")
+    ).length,
+    0,
+  );
+});
+
+test("revoked, expired, and unknown-expiry credentials are read-only for grant editing", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const revoked = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+    revokedAt: new Date("2026-11-01T00:00:00.000Z"),
+  });
+  const expired = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+    expiresAt: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  const unknown = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+  });
+  await fx.db.run("UPDATE credentials SET expires_at = ? WHERE id = ?", [
+    "not-a-date",
+    unknown.credentialId,
+  ]);
+  const active = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+    grantProjects: ["proj_a"],
+  });
+  for (const credentialId of [revoked.credentialId, expired.credentialId, unknown.credentialId]) {
+    await fx.grantProject(credentialId, "proj_a");
+  }
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+
+  const page = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.equal(page.status, 200);
+  for (const credentialId of [
+    revoked.credentialId,
+    expired.credentialId,
+    unknown.credentialId,
+  ]) {
+    assert.equal(
+      page.html.includes(`/credentials/${credentialId}/grants`),
+      false,
+      credentialId,
+    );
+  }
+  assert.ok(page.html.includes(`/speakers/spk_a/credentials/${active.credentialId}/grants"`));
+  assert.ok(
+    page.html.includes(
+      `/speakers/spk_a/credentials/${active.credentialId}/grants/remove`,
+    ),
+  );
+  assert.equal(
+    page.html.match(/Grant editing is available only for active credentials of active speakers\./g)?.length,
+    3,
+  );
+
+  for (const credentialId of [
+    revoked.credentialId,
+    expired.credentialId,
+    unknown.credentialId,
+  ]) {
+    const add = await postFormMulti(
+      app,
+      `/speakers/spk_a/credentials/${credentialId}/grants`,
+      cookie,
+      [
+        ["csrf_token", csrf],
+        ["project_id", "proj_b"],
+      ],
+    );
+    assert.equal(add.status, 404, credentialId);
+    const remove = await postFormMulti(
+      app,
+      `/speakers/spk_a/credentials/${credentialId}/grants/remove`,
+      cookie,
+      [
+        ["csrf_token", csrf],
+        ["project_id", "proj_a"],
+      ],
+    );
+    assert.equal(remove.status, 404, credentialId);
+    assert.deepEqual(
+      (
+        await fx.db.all<{ project_id: string }>(
+          "SELECT project_id FROM credential_project_grants WHERE credential_id = ?",
+          [credentialId],
+        )
+      ).map((row) => row.project_id),
+      ["proj_a"],
+    );
+  }
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT id FROM audit_events WHERE operation IN ('credential.project.grant', 'credential.project.revoke')",
+      )
+    ).length,
+    0,
+  );
+});
+
+test("grant edits require session CSRF, reject bearers, and enforce body and method limits", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+  });
+  const bearerCredential = await fx.addCredential({ speakerId: "spk_b" });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const addPath = `/speakers/spk_a/credentials/${credential.credentialId}/grants`;
+  const removePath = `${addPath}/remove`;
+
+  // Service boundary: a bearer principal cannot administer grants.
+  const bearerPrincipal = await fx.authenticate(bearerCredential.token);
+  await assert.rejects(
+    grantOwnedSpeakerCredentialProject(
+      fx.deps,
+      bearerPrincipal,
+      "spk_a",
+      credential.credentialId,
+      "proj_a",
+    ),
+    (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+  );
+  await assert.rejects(
+    revokeOwnedSpeakerCredentialProject(
+      fx.deps,
+      bearerPrincipal,
+      "spk_a",
+      credential.credentialId,
+      "proj_a",
+    ),
+    (error: unknown) => error instanceof AppError && error.code === "FORBIDDEN",
+  );
+
+  // A wrong or missing hidden CSRF value re-renders the inventory with 400 and
+  // performs no write.
+  for (const fields of [
+    [["csrf_token", "wrong"], ["project_id", "proj_a"]] as const,
+    [["project_id", "proj_a"]] as const,
+  ]) {
+    const response = await postFormMulti(app, addPath, cookie, fields);
+    assert.equal(response.status, 400);
+    assert.ok((await response.text()).includes("The form expired. Please try again."));
+  }
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT credential_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).length,
+    0,
+  );
+
+  // The dashboard never reads an Authorization header: bearer-only requests are
+  // an unauthenticated session and are redirected to login.
+  const bearerResponse = await call(app, addPath, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${bearerCredential.token}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: `csrf_token=ignored&project_id=proj_a`,
+  });
+  assert.equal(bearerResponse.status, 303);
+  assert.ok(bearerResponse.headers.get("location")?.startsWith("/login?return_to="));
+
+  // Declared/observed bodies over 64 KiB are rejected before any write.
+  const tooLarge = await call(app, addPath, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie },
+    body: `csrf_token=${"A".repeat(70_000)}`,
+  });
+  assert.equal(tooLarge.status, 413);
+
+  // Unknown speakers are uniform 404 even for an oversized body because the
+  // owned inventory is resolved before body parsing.
+  const foreignOversized = await call(
+    app,
+    "/speakers/spk_missing/credentials/cred_x/grants",
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie },
+      body: `csrf_token=${"A".repeat(70_000)}`,
+    },
+  );
+  assert.equal(foreignOversized.status, 404);
+
+  // Method, media type, and duplicate-field boundaries.
+  for (const path of [addPath, removePath]) {
+    const get = await call(app, path, { headers: { cookie } });
+    assert.equal(get.status, 405);
+    assert.equal(get.headers.get("allow"), "POST");
+  }
+  const json = await call(app, addPath, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: "{}",
+  });
+  assert.equal(json.status, 400);
+  const duplicate = await postFormMulti(app, addPath, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+    ["project_id", "proj_b"],
+  ]);
+  assert.equal(duplicate.status, 400);
+
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT credential_id FROM credential_project_grants WHERE credential_id = ?",
+        [credential.credentialId],
+      )
+    ).length,
+    0,
+  );
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT id FROM audit_events WHERE operation IN ('credential.project.grant', 'credential.project.revoke')",
+      )
+    ).length,
+    0,
+  );
+});
+
+test("grant removal requires session CSRF and leaves the grant intact", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+  });
+  await fx.db.run(
+    `INSERT INTO credential_project_grants (credential_id, project_id, granted_at)
+     VALUES (?, ?, ?)`,
+    [credential.credentialId, "proj_a", "2026-01-01T00:00:00.000Z"],
+  );
+  const { cookie } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const removePath = `/speakers/spk_a/credentials/${credential.credentialId}/grants/remove`;
+
+  // A wrong or missing hidden CSRF value re-renders the inventory with 400 and
+  // performs no removal, so the seeded grant survives.
+  for (const fields of [
+    [["csrf_token", "wrong"], ["project_id", "proj_a"]] as const,
+    [["project_id", "proj_a"]] as const,
+  ]) {
+    const response = await postFormMulti(app, removePath, cookie, fields);
+    assert.equal(response.status, 400);
+    assert.ok((await response.text()).includes("The form expired. Please try again."));
+  }
+  const grants = await fx.db.all<{ project_id: string }>(
+    "SELECT project_id FROM credential_project_grants WHERE credential_id = ?",
+    [credential.credentialId],
+  );
+  assert.deepEqual(grants.map((row) => row.project_id), ["proj_a"]);
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT id FROM audit_events WHERE operation = 'credential.project.revoke'",
+      )
+    ).length,
+    0,
+  );
+});
+
+test("credential project grant routes are localized", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+  });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const base = `/speakers/spk_a/credentials/${credential.credentialId}/grants`;
+
+  const added = await postFormMulti(app, `${base}?lang=zh`, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(added.status, 303);
+  assert.equal(
+    added.headers.get("location"),
+    "/speakers/spk_a/credentials?lang=zh&grant=added",
+  );
+  const page = await getPage(
+    app,
+    "/speakers/spk_a/credentials?lang=zh&grant=added",
+    cookie,
+  );
+  assert.equal(page.status, 200);
+  assert.ok(page.html.includes("已添加项目授权。"));
+  assert.ok(page.html.includes("授权项目"));
+  assert.ok(page.html.includes('action="/speakers/spk_a/credentials/'));
+  assert.ok(page.html.includes("/grants/remove?lang=zh"));
+
+  const removed = await postFormMulti(app, `${base}/remove?lang=zh`, cookie, [
+    ["csrf_token", csrf],
+    ["project_id", "proj_a"],
+  ]);
+  assert.equal(removed.status, 303);
+  assert.equal(
+    removed.headers.get("location"),
+    "/speakers/spk_a/credentials?lang=zh&grant=removed",
+  );
+  const after = await getPage(
+    app,
+    "/speakers/spk_a/credentials?lang=zh&grant=removed",
+    cookie,
+  );
+  assert.ok(after.html.includes("已移除项目授权。"));
 });

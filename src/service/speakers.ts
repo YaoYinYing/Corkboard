@@ -7,6 +7,7 @@ import { SCOPES, type Scope } from "../domain/authz.ts";
 import { AppError } from "../domain/errors.ts";
 import { writeAudit } from "./audit.ts";
 import { parseScopeJson, type Principal, type ServiceDeps } from "./auth.ts";
+import type { SqlTransaction } from "../storage/db.ts";
 
 const MAX_SPEAKER_ID_CHARS = 128;
 const MAX_PROJECT_ID_CHARS = 128;
@@ -71,6 +72,12 @@ export interface OwnedCredential {
 export interface OwnedSpeakerCredentials {
   speaker: { id: string; display_name: string | null; status: string };
   credentials: OwnedCredential[];
+  /**
+   * Projects this speaker may be granted: an active speaker membership and the
+   * session account can read the project. Already-granted projects are included;
+   * adding an existing grant is an idempotent no-op.
+   */
+  grantableProjects: CredentialGrant[];
 }
 
 // Only a human session may read the directory or mint a credential. A bearer
@@ -117,6 +124,31 @@ async function loadSpeakerProjects(
     title: row.title,
     capabilities: SCOPES.filter((scope) => parseScopeJson(row.capabilities).has(scope)),
   }));
+}
+
+// Mirrors `resolveSessionViewer`'s `project.read` query: the account can read a
+// project when at least one of its active owned speakers holds an active
+// membership carrying `project.read`. A grant is never inferred from this; it
+// only bounds which projects the dashboard may offer.
+async function loadAccountReadableProjectIds(
+  deps: ServiceDeps,
+  accountId: string,
+): Promise<Set<string>> {
+  const rows = await deps.db.all<{ project_id: string; capabilities: string }>(
+    `SELECT m.project_id, m.capabilities
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+       JOIN projects p ON p.id = m.project_id
+      WHERE s.owner_account_id = ? AND m.removed_at IS NULL
+        AND s.status = 'active' AND a.status = 'active' AND p.status = 'active'`,
+    [accountId],
+  );
+  const readable = new Set<string>();
+  for (const row of rows) {
+    if (parseScopeJson(row.capabilities).has("project.read")) readable.add(row.project_id);
+  }
+  return readable;
 }
 
 // The directory lists every speaker owned by the account, including inactive
@@ -321,6 +353,34 @@ function requireCredentialId(credentialId: string): void {
   }
 }
 
+function requireProjectId(projectId: string): void {
+  if (projectId === "" || projectId.length > MAX_PROJECT_ID_CHARS) {
+    throw new AppError("NOT_FOUND");
+  }
+}
+
+// The account-readable check repeated inside the write transaction, mirroring
+// `loadAccountReadableProjectIds`/`resolveSessionViewer`. A project the account
+// cannot read is the same NOT_FOUND as a missing one.
+async function accountCanReadProject(
+  db: Pick<SqlTransaction, "all">,
+  accountId: string,
+  projectId: string,
+): Promise<boolean> {
+  const rows = await db.all<{ capabilities: string }>(
+    `SELECT m.capabilities
+       FROM project_memberships m
+       JOIN speakers s ON s.id = m.speaker_id
+       JOIN accounts a ON a.id = s.owner_account_id
+       JOIN projects p ON p.id = m.project_id
+      WHERE m.project_id = ? AND s.owner_account_id = ?
+        AND m.removed_at IS NULL AND s.status = 'active'
+        AND a.status = 'active' AND p.status = 'active'`,
+    [projectId, accountId],
+  );
+  return rows.some((row) => parseScopeJson(row.capabilities).has("project.read"));
+}
+
 // Account ownership is the authority for credential administration. The owning
 // account must be active; the speaker status is deliberately not required so an
 // operator can still revoke a credential of an inactive speaker. A foreign or
@@ -401,6 +461,10 @@ export async function listOwnedSpeakerCredentials(
     if (list === undefined) grants.set(row.credential_id, [grant]);
     else list.push(grant);
   }
+  const [speakerProjects, readableProjectIds] = await Promise.all([
+    loadSpeakerProjects(deps, accountId, speakerId),
+    loadAccountReadableProjectIds(deps, accountId),
+  ]);
   return {
     speaker,
     credentials: rows.map((row) => ({
@@ -411,6 +475,9 @@ export async function listOwnedSpeakerCredentials(
       state: credentialState(row.revoked_at, row.expires_at, nowMs),
       projects: grants.get(row.id) ?? [],
     })),
+    grantableProjects: speakerProjects
+      .filter((project) => readableProjectIds.has(project.id))
+      .map((project) => ({ id: project.id, title: project.title })),
   };
 }
 
@@ -464,6 +531,150 @@ export async function revokeOwnedSpeakerCredential(
       actorSpeakerId: speakerId,
       projectId: null,
       detail: { credential_id: credentialId, source: "dashboard" },
+    });
+  }
+  return changed;
+}
+
+// Adds one explicit project grant to an owned speaker's active credential. The
+// speaker must be owned by the session account, the credential must belong to
+// that speaker and be active, and the project needs the same active membership
+// the CLI requires plus account read access. A project that fails any of these
+// is NOT_FOUND, never a distinguishable error, and no write occurs. Adding an
+// existing grant is an idempotent no-op (`false`) and writes no duplicate audit.
+// Ownership, credential state, membership, and readability are re-read inside
+// the transaction so a change between the route's check and this write aborts.
+export async function grantOwnedSpeakerCredentialProject(
+  deps: ServiceDeps,
+  principal: Principal,
+  speakerId: string,
+  credentialId: string,
+  projectId: string,
+): Promise<boolean> {
+  const accountId = requireSessionAccount(principal);
+  requireOwnedSpeakerId(speakerId);
+  requireCredentialId(credentialId);
+  requireProjectId(projectId);
+  const now = deps.now();
+  const nowMs = now.getTime();
+  let changed = false;
+  await deps.db.transaction(async (tx) => {
+    const speaker = await tx.first<{ id: string }>(
+      `SELECT s.id
+         FROM speakers s
+         JOIN accounts a ON a.id = s.owner_account_id
+        WHERE s.id = ? AND s.owner_account_id = ?
+          AND s.status = 'active' AND a.status = 'active'`,
+      [speakerId, accountId],
+    );
+    if (speaker === undefined) throw new AppError("NOT_FOUND");
+    const credential = await tx.first<{ revoked_at: string | null; expires_at: string | null }>(
+      "SELECT revoked_at, expires_at FROM credentials WHERE id = ? AND speaker_id = ?",
+      [credentialId, speakerId],
+    );
+    if (credential === undefined) throw new AppError("NOT_FOUND");
+    // Grant editing is an active-credential operation; revoked, expired, and
+    // unparseable-expiry credentials are read-only.
+    if (credentialState(credential.revoked_at, credential.expires_at, nowMs) !== "active") {
+      throw new AppError("NOT_FOUND");
+    }
+    // Same active-membership predicate as the CLI `grant-key-project`.
+    const membership = await tx.first<{ present: number }>(
+      `SELECT 1 AS present
+         FROM project_memberships m
+         JOIN projects p ON p.id = m.project_id
+         JOIN speakers s ON s.id = m.speaker_id
+         JOIN accounts a ON a.id = s.owner_account_id
+        WHERE m.project_id = ? AND m.speaker_id = ? AND m.removed_at IS NULL
+          AND p.status = 'active' AND s.status = 'active' AND a.status = 'active'`,
+      [projectId, speakerId],
+    );
+    if (membership === undefined) throw new AppError("NOT_FOUND");
+    if (!(await accountCanReadProject(tx, accountId, projectId))) {
+      throw new AppError("NOT_FOUND");
+    }
+    const result = await tx.run(
+      `INSERT OR IGNORE INTO credential_project_grants
+         (credential_id, project_id, granted_at)
+       VALUES (?, ?, ?)`,
+      [credentialId, projectId, now.toISOString()],
+    );
+    changed = result.changes > 0;
+  });
+  if (changed) {
+    await writeAudit(deps, {
+      operation: "credential.project.grant",
+      outcome: "success",
+      actorAccountId: accountId,
+      actorSpeakerId: speakerId,
+      projectId,
+      detail: {
+        credential_id: credentialId,
+        projects: [projectId],
+        source: "dashboard",
+      },
+    });
+  }
+  return changed;
+}
+
+// Removes one explicit project grant from an owned speaker's active credential
+// with the CLI `revoke-key-project` SQL. It is speaker-scoped, so a credential
+// from another speaker is NOT_FOUND. Unlike granting, removal does not require
+// a current membership or account read access: a stale grant must remain
+// removable by the speaker's owner even after the membership or project access
+// is gone. A missing grant is a no-op (`false`) with the same response and no
+// audit row, so the route does not reveal whether the row existed.
+export async function revokeOwnedSpeakerCredentialProject(
+  deps: ServiceDeps,
+  principal: Principal,
+  speakerId: string,
+  credentialId: string,
+  projectId: string,
+): Promise<boolean> {
+  const accountId = requireSessionAccount(principal);
+  requireOwnedSpeakerId(speakerId);
+  requireCredentialId(credentialId);
+  requireProjectId(projectId);
+  const nowMs = deps.now().getTime();
+  let changed = false;
+  await deps.db.transaction(async (tx) => {
+    const speaker = await tx.first<{ id: string }>(
+      `SELECT s.id
+         FROM speakers s
+         JOIN accounts a ON a.id = s.owner_account_id
+        WHERE s.id = ? AND s.owner_account_id = ?
+          AND s.status = 'active' AND a.status = 'active'`,
+      [speakerId, accountId],
+    );
+    if (speaker === undefined) throw new AppError("NOT_FOUND");
+    const credential = await tx.first<{ revoked_at: string | null; expires_at: string | null }>(
+      "SELECT revoked_at, expires_at FROM credentials WHERE id = ? AND speaker_id = ?",
+      [credentialId, speakerId],
+    );
+    if (credential === undefined) throw new AppError("NOT_FOUND");
+    if (credentialState(credential.revoked_at, credential.expires_at, nowMs) !== "active") {
+      throw new AppError("NOT_FOUND");
+    }
+    const result = await tx.run(
+      `DELETE FROM credential_project_grants
+        WHERE credential_id = ? AND project_id = ?`,
+      [credentialId, projectId],
+    );
+    changed = result.changes > 0;
+  });
+  if (changed) {
+    await writeAudit(deps, {
+      operation: "credential.project.revoke",
+      outcome: "success",
+      actorAccountId: accountId,
+      actorSpeakerId: speakerId,
+      projectId,
+      detail: {
+        credential_id: credentialId,
+        projects: [projectId],
+        source: "dashboard",
+      },
     });
   }
   return changed;

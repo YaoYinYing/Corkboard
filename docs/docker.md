@@ -317,8 +317,9 @@ is lost. The full procedure is in [`runbook.md`](./runbook.md#9-upgrade-and-roll
 - **ChatGPT Web installation/linking:** not implemented or verified.
 - **TLS, per-IP rate limiting, and volumetric limits:** host reverse-proxy
   responsibility; the application only has process-local per-credential limits.
-- **Credential rotation, grant editing, message-expiry management, registration,
-  email verification, and password reset:** no UI. Grant editing and
-  per-credential expiry selection are CLI-only; rotation, registration, email
-  verification, and password reset are unimplemented. See
+- **Credential rotation, message-expiry management, registration,
+  email verification, and password reset:** no UI. Per-credential expiry selection
+  is CLI-only; the dashboard credential inventory supports one-project-at-a-time
+  grant add/remove for active credentials of active speakers. Rotation, registration,
+  email verification, and password reset are unimplemented. See
   [`runbook.md`](./runbook.md#8-known-limits).

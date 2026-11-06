@@ -105,11 +105,14 @@ server never invokes retention. A crash before commit is rolled back by SQLite's
 no interactive transaction. A future adapter must execute a write-only callback — two
 inserts for project creation, or one conditional `UPDATE` for session message-send
 publication — as one `batch()` with no callback-visible results, and must pass the
-shared storage contract. Credential issuance, credential revocation, and membership
-add/remove are read-then-write callbacks (`tx.first` before writes); they are
-**pre-existing debt** for D1 because they require a documented read-snapshot strategy
-that does not yet exist. No batch-emulated result may depend on an in-transaction
-read or affected-row count. No D1 adapter exists or is exercised here.
+shared storage contract. Credential issuance, credential revocation, membership
+add/remove, and the credential grant add/remove callbacks are read-then-write
+callbacks (`tx.first` before writes); they are **pre-existing debt** for D1 because
+they require a documented read-snapshot strategy that does not yet exist. The grant
+add callback's `?grant=added|exists` outcome depends on the in-transaction `changes`
+count from `INSERT OR IGNORE`, which a batch-emulated D1 result cannot supply. No
+batch-emulated result may depend on an in-transaction read or affected-row count. No
+D1 adapter exists or is exercised here.
 
 Sequence allocation happens at **finalization**, not at acceptance. Provisional rows
 carry `seq = NULL` and are invisible. One UPDATE assigns the next sequence and publishes
@@ -472,8 +475,14 @@ with the existing service functions.
   atomic finalization) under the dedicated session-send authority; the compose
   route itself writes no message row. No dashboard route writes a receipt.
   Credential writes are the explicit issuance
-  transaction and the single `credentials.revoked_at` soft-revocation transition
-  (the credential row and its grants are retained). Grant writes occur through
+  transaction, the single `credentials.revoked_at` soft-revocation transition
+  (the credential row and its grants are retained), and one grant insert or delete
+  per explicit `POST /speakers/:speakerId/credentials/:credentialId/grants[/remove]`
+  request. Grant adds re-read ownership, credential state, membership, and account
+  read access inside the write transaction; grant removals re-read only ownership
+  and credential state, not current membership or read access, so a stale grant
+  remains removable after membership loss. Revoked, expired, and inactive-speaker
+  credentials are read-only in either direction. Grant writes also occur through
   explicit issuance, and dashboard membership removal also deletes that speaker's
   `credential_project_grants` rows for the project.
   `POST /login` inserts the session row and authenticated page requests refresh
