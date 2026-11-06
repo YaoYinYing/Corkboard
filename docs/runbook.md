@@ -245,56 +245,221 @@ OAuth-base-URL values stop startup before the data directory is touched.
 
 ### 3.1 Reverse-proxy TLS termination
 
-Terminate TLS at the proxy and keep the application on loopback or a private network.
-The application does not read `X-Forwarded-For` or other forwarding headers, so per-IP
-controls and volumetric limits belong at the proxy. Preserve the `Authorization` header
-(and cookies for the dashboard), do not cache authenticated responses, and set a body
-limit at or above the application's 64 KiB cap.
+**The application does not terminate TLS.** The Node.js adapter is `node:http` only;
+`HOST`/`PORT` are the only listener settings, and the default bind is
+`127.0.0.1:8787`. There is no certificate, key, or TLS option in the service. Terminate
+TLS at a reverse proxy (the nginx example below is the authoritative reference; Caddy
+or the hosting platform is equivalent) and keep the application on loopback or a
+trusted private network. Never set `HOST=0.0.0.0` without such a proxy.
+
+The session cookie is `__Host-` prefixed and `Secure`, and the CSRF cookies are
+`Secure`. A conforming browser will not send them over plaintext HTTP, so the public
+origin must be HTTPS. Do not rewrite or strip `Set-Cookie` at the proxy, and do not
+proxy the application over an untrusted network.
+
+The application does not read `X-Forwarded-For`, `Forwarded`, or other forwarding
+headers, and stores no client IP itself. Per-IP connection/request limits and
+volumetric abuse controls therefore belong at the proxy. Preserve the `Authorization`
+header (and cookies for the dashboard), do not cache authenticated responses, and set a
+body limit at or above the application's 64 KiB cap.
 
 ```nginx
-# Example only; replace names and certificate paths. No credentials belong here.
-limit_req_zone $binary_remote_addr zone=corkboard_ip:10m rate=10r/s;
+# Example only; replace names, addresses, and certificate paths. No credentials
+# belong here. This is the authoritative TLS/abuse-control reference.
+# `http2 on;` requires nginx >= 1.25.1; on older versions use
+# `listen 443 ssl http2;` instead.
+limit_req_zone  $binary_remote_addr zone=corkboard_ip:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=corkboard_conn:10m;
+
+# Unknown Host on :80: close the connection instead of redirecting it.
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 80;
+    server_name corkboard.example;
+
+    # Keep HTTP-01 issuance/renewal working despite the redirect below.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://corkboard.example$request_uri;
+    }
+}
+
+# Unknown SNI/Host on :443: close the connection rather than letting it fall
+# through to the canonical vhost. A certificate is still needed to complete the
+# TLS handshake before the 444.
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_certificate     /etc/letsencrypt/live/corkboard.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/corkboard.example/privkey.pem;
+    # Sibling vhosts do not inherit these; keep the catch-all at TLS 1.2+ too.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    return 444;
+}
 
 server {
     listen 443 ssl;
+    http2 on;
     server_name corkboard.example;
+
     ssl_certificate     /etc/letsencrypt/live/corkboard.example/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/corkboard.example/privkey.pem;
 
-    client_max_body_size 1m;
+    # TLS 1.2+ with AEAD-only ciphers. The application never negotiates TLS.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache shared:corkboard_tls:10m;
+    ssl_session_timeout 1d;
+
+    # HSTS is sent only on this HTTPS vhost. See the warning below before
+    # enabling includeSubDomains or submitting to the preload list.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    server_tokens off;
+
+    client_max_body_size 1m;          # at or above the application's 64 KiB cap
     limit_req zone=corkboard_ip burst=30 nodelay;
+    limit_conn corkboard_conn 20;
 
     location / {
         proxy_pass http://127.0.0.1:8787;
-        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        # Canonical Host: the app's same-origin checks compare Host, so never
+        # forward a client-supplied value; server_name above rejects others.
+        proxy_set_header Host corkboard.example;
         proxy_set_header Authorization $http_authorization;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # The application ignores forwarding headers; drop untrusted client values.
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Real-IP "";
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_buffering off;          # /mcp Streamable HTTP framing
     }
 }
 ```
 
+The example enables HSTS with `includeSubDomains`. Use a shorter `max-age`
+**without** `includeSubDomains` until every subdomain of `corkboard.example` is
+HTTPS-only, then add it. Do **not** submit the domain to the HSTS preload list
+unless you intend permanent HTTPS for the domain and every subdomain; preload is
+effectively irreversible on a browser-release timescale. HSTS is sent only from
+the 443 vhost. Also terminate TLS for any separate `CORKBOARD_PUBLIC_BASE_URL`
+origin; OAuth redirects must stay on the registered HTTPS origin.
+
 For OAuth, set `CORKBOARD_PUBLIC_BASE_URL` to the public HTTPS origin (origin only: no
 path, query, fragment, or userinfo). Leaving it unset disables OAuth routes with `503`.
 
-### 3.2 Headers, cookie policy, and limits as implemented
+### 3.2 Headers, CSP, CORS, cookies, rate limits, and quotas as implemented
 
-- Dashboard pages set
-  `Content-Security-Policy: default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
-  plus `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and
-  `Referrer-Policy: no-referrer`. Styles are a same-origin constant stylesheet; there is
-  no inline script, inline style, third-party resource, external font, or `url()`.
-- Session and CSRF cookies are `Secure`. The session cookie is `HttpOnly` and uses the
-  `__Host-` prefix; the CSRF cookie is deliberately readable for double-submit form
-  protection. The CSRF header is `X-CSRF-Token`.
-- Sessions expire after 30 idle minutes and 12 hours absolute. The sign-in limiter is
-  per hashed email (10/minute, burst 5) and process-local; there is no application-level
-  per-IP limit.
-- Authenticated REST and MCP requests are limited per credential
-  (`CORKBOARD_RATE_LIMIT_PER_MINUTE`, default 120; `CORKBOARD_RATE_LIMIT_BURST`, default
-  30; `0` disables). Limits are process-local, reset on restart, and return
-  `429 RATE_LIMITED` with `Retry-After`. REST and MCP share the bucket.
-- `GET /metrics` is disabled unless `CORKBOARD_METRICS_TOKEN` is at least 32 characters;
-  it requires `Authorization: Bearer <token>` and is process-local.
+These are application behavior, not proxy configuration. The source is
+`src/app/responses.ts`, `src/app/html.ts`, `src/app/cookies.ts`,
+`src/app/rate-limit.ts`, and `src/domain/validation.ts`.
+
+**Response headers.** Core responses built by `src/app/responses.ts` (`json()` and
+`noContent()`, used by REST, health, readiness, metrics, and session routes) carry
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
+`Referrer-Policy: no-referrer`; JSON also carries
+`Content-Type: application/json; charset=utf-8`. OAuth JSON responses set the same three
+headers from `src/app/oauth.ts`. MCP responses (`src/mcp/http.ts`) carry only
+`Cache-Control: no-store` and `X-Content-Type-Options: nosniff`; they do not carry
+`Referrer-Policy`. Dashboard HTML pages (`src/app/html.ts`) carry the same
+`no-store`/`nosniff`/`no-referrer` set plus:
+
+```text
+Content-Security-Policy: default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+X-Frame-Options: DENY
+```
+
+The dashboard CSP forbids scripts entirely, inline or external; styling comes from the
+fixed same-origin `static/app.css`. There is no third-party resource, external font, or
+`url()`. OAuth sign-in/consent HTML pages (`src/app/oauth.ts`) carry the same
+`no-store`/`nosniff`/`no-referrer` set and their own strict CSP (`default-src 'none';
+script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none';
+frame-ancestors 'none'`) but no `X-Frame-Options`; `frame-ancestors 'none'` prevents
+framing. They allow only the constant same-origin `oauth/client.js`. See
+[`oauth.md`](./oauth.md).
+
+**CORS is disabled.** The application emits no `Access-Control-Allow-Origin`,
+`Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`,
+`Access-Control-Allow-Credentials`, `Access-Control-Expose-Headers`, or
+`Access-Control-Max-Age` on any route, including errors and `OPTIONS` requests. There
+is no preflight handler: an unsupported `OPTIONS` request receives the ordinary `405`
+(or `404` for an unknown path) with no CORS headers. Browser scripts on another origin
+therefore cannot read responses. Do not add permissive CORS at the proxy.
+`tests/integration/cors.test.ts` asserts this on public, authenticated, HTML, login,
+unknown, and MCP-preflight cases.
+
+**Cookie policy.** Values are server-generated base64url tokens; no user text is
+interpolated. No cookie sets a `Domain` attribute.
+
+| Cookie | Flags | Path | Lifetime |
+| --- | --- | --- | --- |
+| `__Host-corkboard_session` (account session) | `HttpOnly; Secure; SameSite=Strict` | `/` | `Max-Age=43200` (12 h absolute; also 30 min server-side idle) |
+| `corkboard_csrf` (double-submit value) | `Secure; SameSite=Strict` (not `HttpOnly`) | `/` | `Max-Age=43200` |
+| `corkboard_web_login` (login-form CSRF) | `HttpOnly; Secure; SameSite=Lax` | `/login` | `Max-Age=600` |
+| `corkboard_oauth_login` (OAuth login CSRF) | `HttpOnly; Secure; SameSite=Lax` | `/oauth` | `Max-Age=600` |
+
+The `__Host-corkboard_session` name is `__Host-` prefixed, so a conforming browser requires
+`Secure`, `Path=/`, and no `Domain`. The CSRF cookie pairs with the `X-CSRF-Token`
+header for session-authenticated state changes; the login-form cookies pair with a
+hidden form field. Sign-out and login clearing use `Max-Age=0` plus an epoch `Expires`.
+Cookie flags are asserted in `tests/security/session.test.ts`. Because the cookies are
+`Secure`, they work only over HTTPS (or localhost in development).
+
+**Abuse rate limits.** All buckets are process-local, in memory, bounded to 10,000 keys
+with a 2-minute idle sweep, reset on restart, and are additional denial only (they
+never change authentication or authorization).
+
+| Bucket | Key | Default | Knob |
+| --- | --- | --- | --- |
+| Authenticated REST + MCP | credential id (shared) | 120/min, burst 30 | `CORKBOARD_RATE_LIMIT_PER_MINUTE` (`0` disables), `CORKBOARD_RATE_LIMIT_BURST` (1–1000) |
+| Account login | SHA-256 of normalized email | 10/min, burst 5 | fixed |
+| OAuth registration | global | 10/min, burst 5 | fixed |
+| OAuth token exchange | `client_id`, plus global | 60/min burst 20; global 300/min burst 60 | fixed |
+| OAuth revocation | global | 60/min, burst 20 | fixed |
+
+An over-limit request returns `429` with code `RATE_LIMITED`, a `request_id`, and
+`Retry-After` in whole seconds (≥1); it contains no token, summary, or body. For
+authenticated routes the check runs after authentication and before body parsing. Never
+key unauthenticated traffic by token value in the application; put per-IP
+request/connection limits and timeouts at the proxy (see §3.1). With multiple processes,
+the aggregate limit is roughly the per-process limit times the process count.
+
+**Resource quotas.** These bound a single request or field, not total project storage:
+
+| Limit | Value |
+| --- | --- |
+| Request body (REST JSON, web forms, OAuth) | 64 KiB; over-limit is HTTP `413 REQUEST_TOO_LARGE` before handler work |
+| MCP request body | 64 KiB. Through the Node adapter, an oversized body is rejected before routing with the standard HTTP `413 REQUEST_TOO_LARGE` Corkboard envelope. When a Web `Request` reaches the core directly, the MCP SDK returns HTTP `413` with a JSON-RPC error `-32000` "Payload Too Large". Neither is the MCP tool-error shape. |
+| Message `text` | 1–2000 graphemes and ≤8192 UTF-8 bytes |
+| Message `summary` | 1–140 graphemes and ≤1024 UTF-8 bytes |
+| `type` / `language` / `body_digest` | 1–32-char identifier (`^[a-z][a-z0-9_.-]{0,31}$`) / canonical BCP 47 / `sha256:` + 64 hex |
+| `Idempotency-Key` | 1–128 printable non-space ASCII |
+| List/page `limit` | 1–100 |
+| `body_expires_at` | after `received_at`, at most 366 days ahead |
+| Attachments | **not implemented** (Issue #5); text bodies only, no upload route |
+
+There is no per-project message-count or byte quota and no automatic message deletion;
+storage is bounded by the operator's disk, backup policy, and SQLite's single-writer
+behavior. Receipts are one row per `(message, speaker)`. Expiry leaves a metadata
+tombstone (see §5.4 and [`privacy.md`](./privacy.md)).
+
+**Metrics token.** `GET /metrics` is disabled unless `CORKBOARD_METRICS_TOKEN` is at
+least 32 characters; it requires `Authorization: Bearer <token>` and is process-local
+(see [`security-operations.md`](./security-operations.md#operator-metrics-endpoint)).
 
 ## 4. Credentials and the dashboard
 
@@ -490,6 +655,10 @@ it. Size and archive it out of band. It is not tamper-evident against an operato
 database write access.
 
 ### 7.2 Credential compromise
+
+The full severity, notification, containment, evidence-preservation, recovery, and
+post-incident procedure is [`incident-response.md`](./incident-response.md). There is no
+live on-call rotation. This section is the short credential path:
 
 1. If the intended projects and scopes are unchanged, rotate atomically:
    `rotate-key --credential <id>`. This revokes the old token and prints its replacement

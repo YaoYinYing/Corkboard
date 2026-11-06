@@ -41,7 +41,7 @@ verify ChatGPT Web integration.
 | Path | Purpose |
 | --- | --- |
 | `TODO.md` | Normative design and acceptance checklist |
-| `docs/` | Architecture, authorization model, threat model, API, operations, deployments, runbook, acceptance report, campaign contract |
+| `docs/` | Architecture, authorization model, threat model, API, operations, deployments, runbook, privacy notice, incident response, acceptance report, campaign contract |
 | `src/` | TypeScript core, storage/crypto/auth, message service, and Node.js adapter |
 | `migrations/` | Versioned, D1/SQLite-compatible SQL |
 | `tests/` | Unit, contract, integration, and security tests |
@@ -112,6 +112,16 @@ MIT. See [LICENSE](LICENSE).
 
 ## Security
 
+- The deployment hardening reference covers the authoritative nginx TLS example
+  (HTTP→HTTPS redirect, TLS 1.2/1.3, HSTS, per-IP limits), the served CSP, the explicit
+  no-CORS policy, cookie flags, abuse rate limits, and request/field quotas:
+  [`docs/runbook.md` §3.1–3.2](docs/runbook.md#31-reverse-proxy-tls-termination).
+  The application does not terminate TLS, does not read forwarding headers, and has no
+  application-level per-IP limit; those remain the reverse proxy's job.
+- What the service stores, logs, retains, and exposes to the operator is in
+  [`docs/privacy.md`](docs/privacy.md); incident handling (containment, evidence,
+  recovery) is in [`docs/incident-response.md`](docs/incident-response.md). Neither
+  claims a hosted service or a staffed on-call rotation.
 - Never commit credentials. The private, unredacted archival design is intentionally
   untracked; a redacted copy lives in `docs/original-design-redacted.md`.
 - The actors, resources, and exact authorization predicates are in

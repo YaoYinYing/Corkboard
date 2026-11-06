@@ -204,6 +204,23 @@ denial only; per-IP volumetric limits belong at the reverse proxy. An attacker w
 an email can consume that address's login attempts; the window is small and the bucket
 refills continuously.
 
+### CORS
+
+CORS is **disabled**. The service emits no `Access-Control-Allow-Origin`,
+`Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`,
+`Access-Control-Allow-Credentials`, `Access-Control-Expose-Headers`, or
+`Access-Control-Max-Age` on any route, including error and `OPTIONS` responses. There is
+no preflight handler: an `OPTIONS` request receives the ordinary `405 NOT_FOUND`
+method response or a `404` for an unknown path, without CORS headers. Cross-origin
+browser scripts therefore cannot read responses or replay credentialed requests. The
+dashboard and OAuth pages are same-origin; do not add permissive CORS at a proxy.
+`tests/integration/cors.test.ts` covers public, authenticated, HTML, login, unknown, and
+MCP-preflight routes. Operational guidance is in
+[`runbook.md`](./runbook.md#32-headers-csp-cors-cookies-rate-limits-and-quotas-as-implemented).
+Incident handling, including containment and evidence preservation, is in
+[`incident-response.md`](./incident-response.md). What data is stored and retained is
+in [`privacy.md`](./privacy.md).
+
 ## Human web dashboard
 
 Server-rendered HTML beside the JSON API. It is not part of `/api/v1`, and is

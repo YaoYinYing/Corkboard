@@ -3,6 +3,65 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-06 — document the shipped adapter's error shape, not just the core's
+
+- **Failure avoided:** The runbook said an oversized `POST /mcp` returns JSON-RPC
+  `-32000` "Payload Too Large". The shipped Node adapter buffers the body under the
+  64 KiB cap and returns the standard Corkboard `413 REQUEST_TOO_LARGE` envelope before
+  the core (and its MCP SDK transport) sees the request.
+- **Rule:** When an adapter pre-processes a request (body caps, auth, routing), document
+  and cite the shipped path; state the core-direct behavior separately.
+- **Prevents:** Client authors coding to an error shape the deployment never emits.
+- **Remove when:** Adapters share one request/limit layer with the core.
+
+## 2026-11-06 — a reverse-proxy example is code and needs the same review
+
+- **Failure avoided:** The first nginx example redirected with `$host` (an open redirect
+  and attacker-controlled Host), forwarded `$host` into the application's same-origin
+  check, blocked HTTP-01 ACME under a blanket 301, and enabled `includeSubDomains` in
+  the example while the prose said not to.
+- **Rule:** Pin the canonical host in the redirect and `proxy_set_header Host`, reject
+  unknown Hosts with a default-server block, keep the ACME challenge route, send HSTS
+  only from the 443 vhost, and state tool-version prerequisites (`http2 on;` needs
+  nginx >= 1.25.1).
+- **Prevents:** Copy-pasted "hardening" that enables host-header abuse or breaks
+  certificate renewal.
+- **Remove when:** Proxy configuration is generated and validated by a tested tool.
+
+## 2026-11-06 — a header claim is per response helper, and a cross-link claim is a test
+
+- **Failure avoided:** Documentation said "HTML pages carry `X-Frame-Options`", but the
+  dashboard helper (`src/app/html.ts`) and the OAuth helper (`src/app/oauth.ts`) are
+  separate constructors; only the dashboard sets XFO. It also claimed incident-response
+  links from files that had none, and a status row kept naming the previous remote head.
+- **Rule:** Scope shared-sounding security claims to the exact helper and page set, and
+  treat every "linked from X" statement as a grep check against X. Prefer citing the
+  source constant and the test that asserts it. Re-verify remote/base SHAs before
+  recording them.
+- **Test:** `grep -n "X-Frame-Options" src/app/*.ts docs/*.md` and
+  `grep -n "incident-response.md" docs/*.md README.md`; the contract audit found both
+  gaps.
+- **Prevents:** A security property credited to pages that do not implement it, and
+  navigation claims that silently rot.
+- **Remove when:** Response construction is centralized and docs lint links/claims.
+
+## 2026-11-06 — "configured" hardening must name the layer that provides it
+
+- **Failure avoided:** A hardening checklist can be ticked by documenting only what the
+  app serves, leaving readers to assume the app terminates TLS, limits IPs, or offers
+  CORS. Those are proxy responsibilities here, and an unstated boundary becomes a
+  deployment gap.
+- **Rule:** For each clause (TLS, HSTS, per-IP limits, CORS, privacy contact), state
+  whether it is application behavior, an authoritative proxy configuration, or
+  operator-defined, and test only what the app owns. Keep the negative claim explicit
+  ("no `Access-Control-*` headers", "no TLS listener", "no client IP stored").
+- **Test:** `tests/integration/cors.test.ts` asserts the negative CORS claim on
+  representative routes; the TLS/per-IP/contact clauses cite the runbook and privacy
+  docs rather than pretending to be code.
+- **Prevents:** A checkbox that implies protection the deployed system does not have.
+- **Remove when:** Deployment validation can observe proxy and application behavior
+  together.
+
 ## 2026-11-06 — a readiness probe must not borrow a lazily repairing accessor
 
 - **Failure avoided:** `LocalBlobStore.get`, `put`, and `delete` call `#ensureDir`,

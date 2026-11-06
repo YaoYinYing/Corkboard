@@ -268,6 +268,13 @@ only) and other optional settings. The secrets file is sourced by the entrypoint
 append assignments there (`0600`), for example `CORKBOARD_PUBLIC_BASE_URL` or
 `CORKBOARD_METRICS_TOKEN`, and restart. Do not put them in `compose.yaml`.
 
+CSP, CORS (disabled), cookie flags, rate limits, and quotas are application behavior:
+see [`runbook.md` §3.1](./runbook.md#31-reverse-proxy-tls-termination) and
+[§3.2](./runbook.md#32-headers-csp-cors-cookies-rate-limits-and-quotas-as-implemented).
+Storage,
+retention, and privacy are in [`privacy.md`](./privacy.md); incident handling is in
+[`incident-response.md`](./incident-response.md).
+
 ## 5. Scheduled maintenance
 
 There is no in-process timer. Run `expire-bodies`, `prune`, `doctor`, `backup`, and

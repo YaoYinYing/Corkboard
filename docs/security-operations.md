@@ -333,7 +333,7 @@ or as authority to act as a speaker.
 - **TLS and cookies.** The dashboard uses the same `Secure`, `HttpOnly`, `__Host-`
   session cookie and `corkboard_csrf` cookie. Serve it only through the TLS reverse
   proxy; do not terminate TLS and expose the origin over plain HTTP.
-- **Caching.** Every HTML page is `Cache-Control: no-store`, `Referrer-Policy:
+- **Caching.** Every dashboard HTML page is `Cache-Control: no-store`, `Referrer-Policy:
   no-referrer`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
   sends the strict CSP `default-src 'none'; style-src 'self'; form-action 'self';
   base-uri 'none'; frame-ancestors 'none'`. Do not add a shared cache or strip these
@@ -426,7 +426,8 @@ or as authority to act as a speaker.
   token revokes the credential and its families. A normal speaker token is ignored.
   Take effect on the next request; there is no authorization cache. To revoke every
   session of a client, revoke each refresh token or the underlying credential by id,
-  or disable the account/speaker/membership.
+  or remove the speaker's memberships (`remove-member`); there is no supported
+  account-disable or speaker-disable action.
 - **Rate limits.** Registration is 10/minute (burst 5, global process-local key),
   token exchange 60/minute (burst 20, keyed by `client_id`), and revocation 60/minute
   (burst 20, global process-local key, checked after body parsing). These are
@@ -843,16 +844,47 @@ path would need a platform adapter. A backup is a point-in-time copy; it does no
 or expire previously backed-up plaintext-adjacent metadata, and expiry is a tombstone
 rather than comprehensive erasure.
 
+## Browser security headers and CORS
+
+- Dashboard HTML pages carry
+  `Content-Security-Policy: default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`
+  and `X-Frame-Options: DENY`; there is no inline script, inline style, third-party
+  resource, external font, or `url()`. OAuth sign-in/consent HTML pages carry the same
+  `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
+  `Referrer-Policy: no-referrer` set and a strict CSP
+  (`default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`)
+  but no `X-Frame-Options`; `frame-ancestors 'none'` covers framing. Core JSON and
+  `204` responses carry `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+  and `Referrer-Policy: no-referrer`; MCP responses carry only `Cache-Control:
+  no-store` and `X-Content-Type-Options: nosniff` (no `Referrer-Policy`).
+- **CORS is disabled.** No route emits any `Access-Control-*` header, including error
+  and `OPTIONS` responses; there is no preflight handler, so an unsupported method gets
+  the ordinary `405` (or `404`) without CORS headers. Cross-origin browser scripts
+  cannot read responses. `tests/integration/cors.test.ts` asserts this. Do not enable
+  permissive CORS at the proxy.
+- Session cookies are `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`, with the
+  session cookie carrying the `__Host-` prefix; the CSRF cookie is `Secure` and
+  `SameSite=Strict` but not `HttpOnly` so it can be paired with `X-CSRF-Token`. Exact
+  flags and lifetimes are in [`runbook.md` §3.2](./runbook.md#32-headers-csp-cors-cookies-rate-limits-and-quotas-as-implemented).
+
 ## Incident response
 
-1. Revoke the affected credential(s) and disable the speaker membership if needed.
+The full severity, notification, containment, evidence, recovery, and post-incident
+procedure is [`incident-response.md`](./incident-response.md). This is a documented
+runbook, not a live on-call rotation; each operator must publish a contact channel.
+What data is stored, logged, and retained is in [`privacy.md`](./privacy.md).
+
+1. Revoke the affected credential(s) (`revoke-key`/dashboard revoke) and remove the
+   speaker membership or one project grant if needed.
 2. Rotate the credential pepper only with a plan: existing verifiers become invalid
    unless dual-read migration is implemented. Prefer revoke/reissue.
 3. Rotate the root key by re-encrypting bodies; do not delete the old key until the
-   migration is verified.
-4. Preserve audit records and request logs without copying bodies or secrets.
+   migration is verified. This is not implemented, so stop and preserve evidence
+   instead of regenerating the secrets file.
+4. Preserve audit records, request logs, and a verified backup without copying bodies,
+   secrets, tokens, or full IPs.
 5. Notify affected users honestly, including that server-readable encryption does not
-   protect previously read plaintext.
+   protect previously read plaintext and that expiry does not rewrite backups.
 
 ## Rate limiting and abuse controls
 

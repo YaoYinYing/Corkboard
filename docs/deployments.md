@@ -102,6 +102,8 @@ CORKBOARD_RATE_LIMIT_PER_MINUTE=120 CORKBOARD_RATE_LIMIT_BURST=30 \
   NODE_ENV=production node dist/scripts/corkboard.js serve
 ```
 
+### Operator metrics
+
 Metrics are optional and operator-only. Set `CORKBOARD_METRICS_TOKEN` to a random value
 of **at least 32 characters** to enable `GET /metrics`. Unset, empty, and
 whitespace-only values disable the route with `404`. Any non-empty token shorter than 32
@@ -133,6 +135,30 @@ curl -sS -H "Authorization: Bearer $CORKBOARD_METRICS_TOKEN" http://127.0.0.1:87
 Do not paste a real token into shell history or documentation. The placeholder above is
 not a value to use. See [`api.md`](./api.md#get-metrics-operator-only) for the exact JSON
 shape and limitations.
+
+### TLS, browser security, quotas, privacy, and incidents
+
+The application has **no TLS listener** and does not read forwarding headers. The
+authoritative reverse-proxy example (HTTP→HTTPS redirect, TLS 1.2/1.3, HSTS, per-IP
+request/connection limits, body-size limit) is
+[`runbook.md` §3.1](./runbook.md#31-reverse-proxy-tls-termination).
+
+Browser behavior is fixed in the application, not the proxy: dashboard HTML pages carry
+the strict CSP plus `X-Frame-Options: DENY`; OAuth HTML pages carry a strict CSP with
+`frame-ancestors 'none'` but no `X-Frame-Options`; core JSON and HTML responses carry
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
+`Referrer-Policy: no-referrer` (MCP JSON carries only the first two); **CORS is
+disabled** (no `Access-Control-*` headers and
+no preflight handler); session and CSRF cookies are `Secure`, with the session cookie
+`HttpOnly` and `__Host-` prefixed. Request bodies are capped at 64 KiB, message text at
+2000 graphemes / 8192 bytes, and summaries at 140 graphemes / 1024 bytes. Attachments
+are not implemented. Exact flags, limits, and 429 behavior are in
+[`runbook.md` §3.2](./runbook.md#32-headers-csp-cors-cookies-rate-limits-and-quotas-as-implemented)
+and [`api.md`](./api.md#cors).
+
+What data exists and how long it is kept is in [`privacy.md`](./privacy.md); incident
+handling is in [`incident-response.md`](./incident-response.md). Neither claims a
+staffed on-call rotation or a hosted deployment.
 
 ### Retention and pruning
 
