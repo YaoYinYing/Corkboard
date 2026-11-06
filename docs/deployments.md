@@ -15,7 +15,9 @@ claims a production or staging deployment.
 ## Docker Compose (local)
 
 A multi-stage image and a one-service [`compose.yaml`](../compose.yaml) provide a
-reproducible local installation of the same Node.js 24 + SQLite build. See
+local Docker Compose installation of the same Node.js 24 + SQLite build. The base
+image tag is unpinned and the recorded evidence used a locally assembled stand-in
+base; see the reproducibility caveat in [`docker.md`](./docker.md). See
 [`docker.md`](./docker.md) for the quickstart, non-destructive `init`, first-owner
 bootstrap, fixed non-root UID and volume ownership, read-only secrets file, persistence
 proof, upgrade/rollback, and the explicit Workers/D1/R2 gap. Docker steps are not run in

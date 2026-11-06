@@ -8,6 +8,14 @@ services:
     # host secrets file must be readable/writable by this UID.
     user: "1000:1000"
     restart: unless-stopped
+    # The root filesystem is immutable; only /data and the /tmp tmpfs are writable.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     ports:
       # Loopback only. TLS and any public exposure belong to a host reverse proxy.
       - "127.0.0.1:8787:8787"

@@ -1796,14 +1796,19 @@ pushed.
   `0700` (an empty named volume inherits that ownership and mode on first use), exposes
   `8787`, checks `GET /healthz`, and uses `STOPSIGNAL SIGTERM`. No secrets or
   repository data are copied. `.dockerignore` excludes git metadata, dependencies,
-  build output, reports, tests/docs, local data, and secret patterns.
+  build output, reports, tests/docs, local data, and secret patterns. The base tag
+  `node:24` is unpinned (see **Claim narrowing**).
 - **Compose.** `compose.yaml` defines one `corkboard` service with the named
   `corkboard-data` volume at `/data`, a read-only bind of the operator's
   `CORKBOARD_SECRETS_DIR` at `/run/secrets`, loopback-only publication of `8787`,
   `restart: unless-stopped`, the same healthcheck, and only non-secret environment
-  values. `scripts/docker-entrypoint.sh` sources `/run/secrets/corkboard.env` when it
-  exists and then execs the requested command, so provisioning commands receive the
-  keys and `CORKBOARD_DATA_DIR` without `env_file` or secrets in `Config.Env`.
+  values. The service also runs with `read_only: true`, `cap_drop: [ALL]`,
+  `no-new-privileges:true`, and a bounded `/tmp` tmpfs, so only `/data` and `/tmp` are
+  writable. `scripts/docker-entrypoint.sh` sources `/run/secrets/corkboard.env` only
+  when it exists as a readable regular file with mode exactly `0600`; any other mode
+  fails closed with an error that never prints file contents, and then execs the
+  requested command, so provisioning commands receive the keys and
+  `CORKBOARD_DATA_DIR` without `env_file` or secrets in `Config.Env`.
 - **Init and bootstrap.** The one-shot `init` uses the service plus a second
   read-write mount of the same host directory:
   `docker compose run --rm -v "$CORKBOARD_SECRETS_DIR:/run/secrets-rw" corkboard node
@@ -1817,12 +1822,20 @@ pushed.
   backup/restore, ports/TLS, process-local limits, upgrade/rollback, and the explicit
   Workers/D1/R2 gap. `docs/deployments.md`, `docs/runbook.md`, and `README.md` link to
   it.
-- **Verification caveat.** The real `node:24-bookworm-slim` base could not be pulled
-  from any registry in this environment (Docker Hub and mirrors timed out; the Docker
-  daemon is configured with a local SOCKS proxy). The verified build used a locally
-  assembled stand-in base from the available `node:22-bookworm-slim` plus the host's
-  Node 24.22.1 binary and the image's npm 10.9.9; the Dockerfile still references the
-  real tag. The base digest is not pinned because digest resolution failed.
+- **Verification caveat.** The real `node:24` base could not be pulled from any
+  registry in this environment (Docker Hub and mirrors timed out; the Docker daemon is
+  configured with a local SOCKS proxy). The verified build used a locally assembled
+  stand-in base from the available `node:22-bookworm-slim` plus the host's Node 24.22.1
+  binary and the image's npm 10.9.9; the Dockerfile still references the real tag. The
+  base digest is not pinned because digest resolution failed. The npm bundled with the
+  real base (likely 11.x) is untested, and the stand-in results cover Dockerfile/Compose
+  mechanics plus the Node 24 runtime, not the referenced Debian/npm layer.
+- **Claim narrowing (2026-11-05 follow-up).** Because the referenced base was never
+  pulled and its tag is unpinned, the deliverable is documented as a **local Docker
+  Compose installation**, not a reproducible one. `docs/docker.md` carries a
+  reproducibility caveat at the top; `README.md` and `docs/deployments.md` link to it
+  and state the limitation. Recorded outputs must not be read as real-base results.
+  TODO item 368 stays unchecked.
 - **Evidence.** `npm ci --ignore-scripts` exit 0; `npm run check` exit 0 (509 tests:
   508 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0;
   `CORKBOARD_SECRETS_DIR=... docker compose config` exit 0; `docker compose build`
@@ -1835,6 +1848,21 @@ pushed.
   `docker compose config`, and the image layers; a restart preserved the bootstrapped
   account and project rows; `docker compose down -v` removed the container, volume,
   and network; the stand-in image, secrets directory, and temporary files were removed.
+- **Hardening re-verification (2026-11-05 follow-up, same stand-in base).** Rebuilt
+  image `sha256:86678252bf58a612b90f0b43bbf00546a46fbf1a9c6914e40ff87f84626d7809`.
+  `docker compose config` exit 0 and shows `read_only: true`, `cap_drop: [ALL]`,
+  `no-new-privileges:true`, `/tmp` tmpfs, `user: 1000:1000`, and loopback
+  `127.0.0.1:8787:8787`. BuildKit still timed out resolving the unpinned remote tag, so
+  the build used `DOCKER_BUILDKIT=0 docker compose build` (legacy builder, local
+  stand-in) exit 0; that builder difference is part of the unverified real-base gap.
+  Secrets mode `0644` was rejected by the entrypoint (exit `1`, no key material in the
+  error) and `0600` accepted. `up -d` was healthy with `ReadonlyRootfs=true`,
+  `CapDrop=["ALL"]`, `SecurityOpt=["no-new-privileges:true"]`; `id` =
+  `uid=1000(node) gid=1000(node) groups=1000(node)`; `/data` `700`, DB `600`,
+  `/data/blobs` `700`; the secrets bind was `RW=false` and writes to it and to `/app`
+  failed `Read-only file system`; `/tmp` was writable; a bootstrapped owner and project
+  row survived restart (`[Object: null prototype] { n: 1 }`); `down -v` removed the
+  stack.
 - **Not implemented.** The Cloudflare Worker/D1/R2 deployment half has no adapter and
   was not attempted; TODO item 368 remains unchecked. Docker steps are not in CI.
 

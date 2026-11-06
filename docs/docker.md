@@ -1,7 +1,17 @@
-# Docker Compose installation
+# Local Docker Compose installation
 
-**Scope:** reproducible local installation of the shipped self-hosted Node.js 24 +
+**Scope:** local Docker Compose installation of the shipped self-hosted Node.js 24 +
 SQLite + local-blob service. This is the local half of `TODO.md` Phase 4 item 368.
+
+> **Reproducibility caveat.** The real `node:24` base image was never pulled in the
+> environment that produced the recorded evidence (registry pulls timed out). The
+> Dockerfile still targets the unpinned `node:24` tag. The recorded
+> build/UID/mode/health/persistence/restart outputs therefore come from a locally
+> assembled stand-in (`node:22-bookworm-slim` + host Node 24.22.1 + npm 10.9.9), not
+> from the referenced image. Pin a digest and re-verify when registry access exists.
+> The npm bundled with the real base (likely 11.x) is untested, and the stand-in
+> results cover Dockerfile/Compose mechanics and the Node 24 runtime, not the
+> referenced Debian/npm layer. Do not read the recorded outputs as real-base results.
 
 This document does **not** provide or claim a Cloudflare Workers/D1/R2 deployment.
 There is no D1/R2 adapter and no Cloudflare access or test has been performed. That
@@ -21,18 +31,19 @@ reverse proxy (see [`runbook.md`](./runbook.md#31-reverse-proxy-tls-termination)
 No host Node.js or npm is required. The image builds the application and installs only
 production dependencies at runtime.
 
-The Dockerfile references `node:24-bookworm-slim` by tag. No digest is pinned in this
-checkpoint because the registry could not be resolved from the build environment; pin a
-digest for a reproducible production build. Docker checks are documented commands, not
-CI steps.
+The Dockerfile references `node:24-bookworm-slim` by tag and **no digest is pinned**:
+pulls of the real base timed out in the build environment, so the tag was never
+resolved here. Pin a digest for a production build and re-run the checks once registry
+access exists. Docker checks are documented commands, not CI steps.
 
 ## 2. Quick start
 
 From the repository root:
 
 ```sh
-# The secrets directory must be outside the repository and owned by UID/GID 1000
-# (the fixed non-root container identity). If your account is not UID 1000:
+# CORKBOARD_SECRETS_DIR must be an absolute host path outside this repository,
+# owned by the operator, with a 0600 corkboard.env readable by container UID/GID
+# 1000 (the fixed non-root identity). If your account is not UID 1000:
 #   sudo install -d -m 0700 -o 1000 -g 1000 "$CORKBOARD_SECRETS_DIR"
 export CORKBOARD_SECRETS_DIR="$HOME/.config/corkboard"
 install -d -m 0700 "$CORKBOARD_SECRETS_DIR"
@@ -75,6 +86,12 @@ curl -fsS http://127.0.0.1:8787/healthz
 # {"status":"ok"}
 ```
 
+On every container start the entrypoint requires `/run/secrets/corkboard.env`, when
+present, to be a readable regular file with mode exactly `0600`; any other mode (for
+example `0644`) fails closed. The error names the file and its octal mode, never its
+contents. Keep the mount source an absolute path outside the repository, owned by the
+operator.
+
 The entrypoint sources `/run/secrets/corkboard.env` in the server process at startup.
 It is not baked into the image, is not present in `compose.yaml` (`environment` /
 `env_file`), and does not appear in `docker inspect` `Config.Env`. Never paste its
@@ -87,9 +104,10 @@ created by `bootstrap-owner`; project authority comes from account ownership, an
 `add-member --owner` gives a speaker the owner capability set. The dashboard signs in
 with that account's email and password.
 
-Set the owner password in the **environment**, never in argv:
+Set the owner password in the **environment**, never in argv. This block uses
+bash for the silent `read -rsp` prompt:
 
-```sh
+```bash
 read -rsp 'Owner password: ' CORKBOARD_BOOTSTRAP_PASSWORD; echo
 export CORKBOARD_BOOTSTRAP_PASSWORD
 
@@ -99,6 +117,10 @@ ACCOUNT=$(docker compose run --rm -T \
     --email owner@example.com)
 echo "$ACCOUNT"                         # acct_...
 ```
+
+If you omit `CORKBOARD_BOOTSTRAP_PASSWORD`, `bootstrap-owner` still creates the
+owner but without a password hash. That account cannot sign in (login fails
+closed), and there is no password reset, so set it on a fresh installation.
 
 Then provision a project, speaker, and credential. The entrypoint already sourced
 `CORKBOARD_DATA_DIR=/data`, so the in-database provisioning commands do not need
@@ -140,8 +162,11 @@ only, because session and CSRF cookies are `Secure`.
   and `/data/blobs/`.
 - The container runs as fixed non-root UID/GID `1000:1000`. Directories are `0700`,
   database/sidecar/blob files `0600`. `NODE_ENV=production` makes startup verify these
-  modes and reject symlinked paths before listening.
-- The secrets file must be readable by UID 1000 and should be `0600`; it is not part of
+  modes and reject symlinked paths before listening. Compose also runs the container
+  with a read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, and a
+  bounded `/tmp` tmpfs; only `/data` and `/tmp` are writable.
+- The secrets file must be readable by UID 1000 and must be `0600`; the entrypoint
+  refuses any other mode. It is not part of
   the data volume and must be backed up separately. **Key loss means ciphertext loss.**
   Key rotation is not implemented.
 
@@ -149,7 +174,7 @@ Inspect the runtime identity and modes:
 
 ```sh
 docker compose exec -T corkboard id
-# uid=1000 gid=1000 groups=1000
+# uid=1000(node) gid=1000(node) groups=1000(node)
 docker compose exec -T corkboard stat -c '%a %u:%g %n' \
   /data /data/corkboard.sqlite /data/blobs
 # 700 1000:1000 /data
@@ -170,7 +195,7 @@ docker compose exec -T corkboard node --input-type=module -e \
    const db = new DatabaseSync("/data/corkboard.sqlite", {readOnly: true});
    console.log(db.prepare("SELECT COUNT(*) AS n FROM projects WHERE id = ?").get(process.argv[1]));
    db.close();' "$PROJECT_ID"
-# { n: 1 } (the project survived the restart)
+# [Object: null prototype] { n: 1 } (the project survived the restart)
 ```
 
 `docker compose down` stops the container but keeps the named volume and the secrets
@@ -183,7 +208,9 @@ Backups contain ciphertext and metadata, not keys. Run the existing commands in 
 one-shot container with a host directory mounted for the backup output:
 
 ```sh
-mkdir -p /srv/backups   # choose a private host location
+# The one-shot container runs as UID/GID 1000, so the host output directory must be
+# writable by that identity. Choose a private host location outside the repository:
+sudo install -d -m 0700 -o 1000 -g 1000 /srv/backups
 docker compose run --rm \
   -v /srv/backups:/backups \
   corkboard node dist/scripts/corkboard.js backup \
@@ -267,5 +294,7 @@ is lost. The full procedure is in [`runbook.md`](./runbook.md#9-upgrade-and-roll
 - **TLS, per-IP rate limiting, and volumetric limits:** host reverse-proxy
   responsibility; the application only has process-local per-credential limits.
 - **Credential rotation, grant editing, message-expiry management, registration,
-  email verification, and password reset:** unimplemented. See
+  email verification, and password reset:** no UI. Grant editing and
+  per-credential expiry selection are CLI-only; rotation, registration, email
+  verification, and password reset are unimplemented. See
   [`runbook.md`](./runbook.md#8-known-limits).

@@ -3,6 +3,36 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-05 — an unverified base image cannot back a "reproducible" claim
+
+- **Failure:** A Docker checkpoint was described as a "reproducible" installation while
+  the `node:24` base had never been pulled (registry timeouts), the tag was unpinned,
+  and every recorded output came from a locally assembled stand-in
+  (`node:22-bookworm-slim` + host Node 24.22.1 + npm 10.9.9). The state section was
+  accurate, but docs, README, deployments, and the commit trailer overclaimed.
+- **Reproducer:** `docker compose build` fails to resolve `node:24` metadata; the same
+  commands still "pass" because a local `node:24` tag was made by `docker commit`.
+- **Fix:** Call the deliverable a local Docker Compose installation, put the
+  reproducibility caveat at the top of `docs/docker.md`, and state that recorded outputs
+  are not real-base results. Pin a digest and re-verify when registry access exists.
+- **Prevents:** Shipping a reproducibility claim whose base image, npm version, and
+  Debian layer were never exercised.
+- **Remove when:** A digest-pinned base is pulled and the full check sequence is rerun
+  against it.
+
+## 2026-11-05 — evidence must name its actual base
+
+- **Failure:** The checkpoint evidence said only that a "stand-in" was used, without
+  naming its ingredients or the fact that its npm and Debian layers differed from the
+  referenced image. An auditor could not tell which claims the evidence supported.
+- **Fix:** Record the exact stand-in (`node:22-bookworm-slim`, host Node 24.22.1, npm
+  10.9.9), say what it covers (Dockerfile/Compose mechanics, Node 24 runtime) and what
+  it does not (the referenced Debian/npm layer, likely npm 11.x), and repeat the
+  limitation wherever the evidence is linked.
+- **Prevents:** Evidence that silently changes meaning between the run and the reader.
+- **Remove when:** Docker checks run against the pinned real base and no stand-in is
+  referenced.
+
 ## 2026-11-05 — `docker compose run -v` cannot relax a service's read-only bind
 
 - **Failure avoided:** The one-shot `init` needs to create the secrets file in the same
