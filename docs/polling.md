@@ -5,7 +5,7 @@ deployment.** The server remains a message board, not a job scheduler. This clie
 demonstrates the contract a Codex/Claude-Code-style agent can use: pull forward with
 `after_seq`, verify the returned scope, process untrusted metadata, acknowledge with an
 explicit `mark_read`, and advance a durable cursor only after the acknowledgement is
-confirmed.
+confirmed or after the server returns its definitive `410 BODY_EXPIRED` tombstone.
 
 `scripts/poll.ts` uses only the Node.js standard library and the built-in `fetch`; it
 adds no dependency and does not import the service layer. REST is authoritative. The

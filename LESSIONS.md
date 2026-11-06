@@ -1497,8 +1497,8 @@ prevented regression; when to remove the advice.
 - **Failure:** An at-least-once poller that refuses to advance on `410 BODY_EXPIRED`
   wedges forever: the server can never create a receipt for an expired body, so every
   restart retries the same message and re-invokes the consumer.
-- **Reproducer:** `tests/unit/poll.test.ts` "BODY_EXPIRED advances without a receipt
-  while other failures do not" returns `410 BODY_EXPIRED` and asserts the cursor
+- **Reproducer:** `tests/unit/poll.test.ts` "BODY_EXPIRED advances while other
+  definitive and transient failures do not" returns `410 BODY_EXPIRED` and asserts the cursor
   advances; the same test asserts `401`/`403`/`404` and exhausted `5xx` retries do
   not advance.
 - **Fix:** Treat only the server's definitive `410` + `BODY_EXPIRED` as a consumed
