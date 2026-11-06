@@ -123,7 +123,7 @@ a real TLS deployment remain absent or untested.
 | Metrics endpoint | **Verified locally** | `npm run check`; disabled unless `CORKBOARD_METRICS_TOKEN` (≥32 chars), process-local. |
 | OAuth 2.1 authorization server | **Verified locally** | `npm run check`; discovery, DCR, PKCE, consent, rotating refresh, revocation tests. |
 | MCP Streamable HTTP (bearer) | **Verified locally** | `npm run check`; official SDK client integration tests for the six tools. |
-| Health and readiness | **Partially verified** | `GET /healthz` returns `{"status":"ok"}` (observed in smoke). **No readiness endpoint exists** and no dependency probe is implemented. |
+| Health and readiness | **Verified locally (self-hosted Node adapter); Docker and Worker behavior as documented** | `GET /healthz` returns `{"status":"ok"}` (observed in smoke). `npm run check` covers public `GET /readyz`: `200 {"status":"ready"}` only when SQLite answers `SELECT 1` and the blob store check passes; closed SQLite, a missing local blob directory, and a non-directory blob path each yield `503 {"status":"unavailable"}` with no paths or driver details; the in-memory backend is always ready; `HEAD` is `405` like `/healthz`; the probe creates no session or audit row; metrics label `/readyz` separately. Docker/Worker readiness is not separately probed (the container healthcheck still uses `/healthz`). |
 | Upgrade / migration behavior | **Verified locally** | `npm run check` covers fresh install, v1→v2→v3→v4, v2→v3, v3→v4, crash rollback, concurrent upgraders, and refusal of a newer schema. Production-sized upgrade and rollback not executed. |
 
 ## Dashboard, localization, and browser evidence

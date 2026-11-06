@@ -101,8 +101,13 @@ must not modify the installation. The running service is started separately:
 docker compose up -d
 docker compose ps                      # corkboard ... (healthy)
 curl -fsS http://127.0.0.1:8787/healthz
-# {"status":"ok"}
+# {"status":"ok"}   (process liveness)
+curl -fsS http://127.0.0.1:8787/readyz
+# {"status":"ready"} (SQLite and the local blob directory are usable)
 ```
+
+The container healthcheck still uses `/healthz`; use `/readyz` yourself when deciding
+whether to route traffic to the service.
 
 The entrypoint tolerates an absent `/run/secrets/corkboard.env` so `init` can
 create it. When present, it must be a readable regular file, not a symlink

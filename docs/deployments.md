@@ -373,7 +373,10 @@ Reverse proxy must preserve the `Authorization` header, strip untrusted forwardi
 headers, set body-size limits, and provide TLS. The application must not be exposed
 directly over plain HTTP beyond localhost.
 
-Health: `GET /healthz`. Backups: see `security-operations.md`.
+Health: `GET /healthz` (process liveness). Readiness: `GET /readyz` (bounded SQLite
+query plus a non-mutating local-blob-directory or in-memory check). It returns
+`200 {"status":"ready"}` or `503 {"status":"unavailable"}` with `no-store` and no
+details. Backups: see `security-operations.md`.
 
 ### OAuth (remote MCP linking)
 

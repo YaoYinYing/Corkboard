@@ -3,6 +3,22 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-06 — a readiness probe must not borrow a lazily repairing accessor
+
+- **Failure avoided:** `LocalBlobStore.get`, `put`, and `delete` call `#ensureDir`,
+  which creates the blob directory. A readiness check implemented by reusing one of
+  those would heal the very failure it is meant to report, so a missing directory
+  would return `200 ready` after the probe silently recreated it.
+- **Rule:** Readiness uses a separate non-mutating check (`stat` + `access`, no
+  `mkdir`) and treats perfect absence as unavailable.
+- **Test:** `tests/integration/readiness.test.ts` removes the directory and asserts
+  `503 {"status":"unavailable"}` and that the probe did not recreate it (an existing
+  directory is the separate `200` case).
+- **Prevents:** A false "ready" from a probe whose own side effect repairs the
+  dependency.
+- **Remove when:** The blob port exposes an accessor whose documented contract is
+  explicitly mutation-free and every backend implements it.
+
 ## 2026-11-06 — a checkbox is a claim; cite the evidence or leave it open
 
 - **Failure avoided:** A reconciliation pass is tempted to tick a TODO box whose

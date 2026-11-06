@@ -56,6 +56,7 @@ export type RouteLabel =
   | "/projects/:projectId"
   | "/projects/:projectId/messages/:messageId/body"
   | "/healthz"
+  | "/readyz"
   | "/mcp"
   | "/metrics"
   | "/.well-known/oauth-protected-resource"
@@ -89,6 +90,7 @@ export function routeLabelFor(pathname: string): RouteLabel {
   if (segments.length === 1) {
     if (segments[0] === "login") return "/login";
     if (segments[0] === "healthz") return "/healthz";
+    if (segments[0] === "readyz") return "/readyz";
     if (segments[0] === "mcp") return "/mcp";
     if (segments[0] === "metrics") return "/metrics";
     return "unknown";

@@ -6,6 +6,10 @@ import { isValidBlobKey } from "../blobs.ts";
 export class MemoryBlobStore implements BlobStore {
   readonly #blobs = new Map<string, Uint8Array>();
 
+  async checkReady(): Promise<void> {
+    // An in-memory map has no external dependency to probe.
+  }
+
   async put(key: string, bytes: Uint8Array): Promise<void> {
     if (!isValidBlobKey(key)) throw new TypeError("invalid blob key");
     this.#blobs.set(key, bytes.slice());

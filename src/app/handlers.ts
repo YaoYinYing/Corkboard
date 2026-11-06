@@ -175,6 +175,19 @@ function methodNotAllowed(allow: string, requestId: string): Response {
   return json(405, errorBody("NOT_FOUND", "Method not allowed", requestId), { allow });
 }
 
+// Readiness probes the real dependencies on every request: one cheap SQLite
+// statement and the configured blob store's non-mutating check. Failures are
+// swallowed here so the response can never carry a driver message or path.
+async function dependenciesReady(deps: ServiceDeps): Promise<boolean> {
+  try {
+    await deps.db.first("SELECT 1 AS ready");
+    await deps.blobs.checkReady?.();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Records the authenticated principal for sanitized request logging.
 async function authenticate(
   deps: ServiceDeps,
@@ -524,6 +537,13 @@ async function route(
   if (segments.length === 1 && segments[0] === "healthz") {
     if (method !== "GET") return methodNotAllowed("GET", requestId);
     return json(200, { status: "ok" });
+  }
+
+  if (segments.length === 1 && segments[0] === "readyz") {
+    if (method !== "GET") return methodNotAllowed("GET", requestId);
+    return (await dependenciesReady(deps))
+      ? json(200, { status: "ready" })
+      : json(503, { status: "unavailable" });
   }
 
   if (segments.length === 1 && segments[0] === "metrics") {

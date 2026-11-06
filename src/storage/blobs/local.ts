@@ -2,7 +2,17 @@
 // There is deliberately no listing API.
 
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  access,
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import type { BlobStore } from "../blobs.ts";
 import { isValidBlobKey } from "../blobs.ts";
@@ -31,6 +41,14 @@ export class LocalBlobStore implements BlobStore {
   #path(key: string): string {
     if (!isValidBlobKey(key)) throw new TypeError("invalid blob key");
     return join(this.#dir, key);
+  }
+
+  // Deliberately does not use #ensureDir: a readiness probe must report a
+  // missing directory, not create it and then report healthy.
+  async checkReady(): Promise<void> {
+    const entry = await stat(this.#dir);
+    if (!entry.isDirectory()) throw new TypeError("blob path is not a directory");
+    await access(this.#dir, constants.R_OK | constants.W_OK | constants.X_OK);
   }
 
   async put(key: string, bytes: Uint8Array): Promise<void> {

@@ -216,9 +216,30 @@ OAuth-base-URL values stop startup before the data directory is touched.
 
 - Stop with `SIGTERM` or `SIGINT` (the service manager's normal stop). The adapter
   stops accepting connections, closes the server, and closes the database.
-- **Health:** `GET /healthz` is the only health route. It returns `{"status":"ok"}` and
-  no private data. There is **no readiness endpoint** and no dependency probe; readiness
-  is "the process is listening", checked with `curl -fsS http://127.0.0.1:8787/healthz`.
+- **Health:** `GET /healthz` reports that the process is listening. It returns
+  `{"status":"ok"}` and no private data, and does not probe dependencies. Use it as a
+  liveness check:
+
+  ```sh
+  curl -fsS http://127.0.0.1:8787/healthz
+  # {"status":"ok"}
+  ```
+
+- **Readiness:** `GET /readyz` is public and unauthenticated. On every request it runs
+  one bounded SQLite statement (`SELECT 1`) and a non-mutating blob-store check (the
+  local directory must exist, be a directory, and be readable, writable, and
+  searchable; the in-memory backend is always ready). It returns `200
+  {"status":"ready"}` only when both pass, otherwise `503
+  {"status":"unavailable"}` with no error details, paths, or versions. Responses are
+  `Cache-Control: no-store`. Use it as a readiness check after startup and before
+  routing traffic:
+
+  ```sh
+  curl -fsS http://127.0.0.1:8787/readyz
+  # {"status":"ready"}
+  ```
+
+  The probe is cheap but runs real I/O each time; do not poll it at a high frequency.
 - **Persistence:** SQLite WAL plus foreign keys; a restart preserves committed messages
   and blobs. Replay resumes from a client cursor (`after_seq`).
 
@@ -519,7 +540,9 @@ database write access.
   non-OAuth credentials; there is no dashboard view and OAuth-issued access
   credentials use their OAuth flow. Per-project grant add/remove is available in the credential inventory
   for active credentials of active speakers.
-- **Health has no readiness probe** and no dependency checks.
+- **Readiness is shallow:** `/readyz` checks that SQLite answers `SELECT 1` and the
+  configured blob store is accessible. It does not verify schema migrations, WAL
+  integrity, encryption keys, blob contents, or that a write can commit.
 - **A subagent sharing its parent's credential can impersonate the parent.** There is no
   cryptographic attestation of model/process identity.
 

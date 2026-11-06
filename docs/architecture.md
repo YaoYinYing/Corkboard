@@ -715,8 +715,8 @@ resumability, and cross-process session storage are not implemented or verified.
 Web-standard APIs only. The HTTP router checks it inside `authenticate()`: after the
 bearer credential resolves to a `Principal` and before any request body is parsed or
 handler/MCP work begins. Every authenticated `/api/v1` and `/mcp` request therefore uses
-one bucket keyed by `credentialId`; REST and MCP share it. `GET /healthz` and
-unauthenticated requests are never keyed.
+one bucket keyed by `credentialId`; REST and MCP share it. `GET /healthz`,
+`GET /readyz`, and unauthenticated requests are never keyed.
 
 - Defaults are 120 requests/minute with burst 30, overridable by
   `CORKBOARD_RATE_LIMIT_PER_MINUTE` (`0` disables) and `CORKBOARD_RATE_LIMIT_BURST`
@@ -747,8 +747,8 @@ long queue delay. The service returns the delay only when the request performed 
 finalization; REST and MCP send paths feed it to the same registry.
 
 Cardinality is fixed. `routeLabelFor` maps path shape to one of a small set of
-templates (`/healthz`, `/mcp`, `/metrics`, the `/api/v1` routes with `:projectId` and
-`:messageId` placeholders, or `unknown`); it never retains a raw pathname, query, or
+templates (`/healthz`, `/readyz`, `/mcp`, `/metrics`, the `/api/v1` routes with
+`:projectId` and `:messageId` placeholders, or `unknown`); it never retains a raw pathname, query, or
 object ID. `/mcp` counts initialize, tool, and other transport HTTP requests under one
 label; tool names and arguments are not read. Error codes come from the server-authored
 response envelope, not from client input. No bodies, summaries, tokens, IDs, or IPs are

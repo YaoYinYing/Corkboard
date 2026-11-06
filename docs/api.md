@@ -182,10 +182,10 @@ authorization semantics.
   The body contains no token, message content, or summary. An over-limit `/mcp`
   request returns this HTTP envelope before any MCP protocol handling or session
   creation, and no `mcp-session-id`.
-- `GET /healthz`, `GET /metrics`, and unauthenticated requests are **not keyed**. Bearer
-  tokens are 256-bit random values, so guessing one is not a practical attack; per-IP
-  limiting for unauthenticated traffic and volumetric abuse is deferred to the reverse
-  proxy. The operator-only `GET /metrics` never reads or consumes a credential bucket.
+- `GET /healthz`, `GET /readyz`, `GET /metrics`, and unauthenticated requests are
+  **not keyed**. Bearer tokens are 256-bit random values, so guessing one is not a
+  practical attack; per-IP limiting for unauthenticated traffic and volumetric abuse is
+  deferred to the reverse proxy. The operator-only `GET /metrics` never reads or consumes a credential bucket.
 - Limits are **process-local**: buckets live in memory, are not shared across
   processes or Workers isolates, and reset on restart. The key map is bounded to 10,000
   credentials, with entries idle for 2 minutes evicted. This is not distributed or
@@ -414,6 +414,26 @@ with no body. Reusing the old cookie afterwards returns `401`.
 ### `GET /healthz`
 
 Public. Returns `{ "status": "ok" }`. No configuration, credentials, or private data.
+It reports only that the process is serving requests; it does not probe dependencies.
+
+### `GET /readyz`
+
+Public and unauthenticated, like `/healthz`, with the same `GET`-only method behavior
+and the same `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`, and `Content-Type: application/json; charset=utf-8`
+headers. It probes the real dependencies on every request (never memoized):
+
+- SQLite answers one bounded statement (`SELECT 1`).
+- The configured blob store answers a non-mutating check: for the local backend the
+  directory exists, is a directory, and is readable, writable, and searchable; the
+  in-memory backend is always ready. The check does not create the directory, scan
+  contents, or run an integrity check.
+
+Success is `200` with `{ "status": "ready" }`. If either probe throws or the database is
+closed, the response is `503` with `{ "status": "unavailable" }`. Neither body carries
+error details, paths, versions, credentials, or private data. `no-store` keeps a proxy
+from serving a stale readiness result. `HEAD` is `405` (with `Allow: GET`) exactly as
+for `/healthz`; other methods are unchanged.
 
 ### `GET /metrics` (operator-only)
 
@@ -503,7 +523,7 @@ Counters cover every response produced by the app, including errors and `429`
 `RATE_LIMITED`, with error codes extracted from the standard Corkboard envelope. `/mcp`
 is one route label; each initialize, tool call, and other `/mcp` HTTP request increments
 it. No tool name or tool-argument content is read. Route labels are fixed templates:
-`/healthz`, `/mcp`, `/metrics`, `/api/v1/me`, `/api/v1/session`,
+`/healthz`, `/readyz`, `/mcp`, `/metrics`, `/api/v1/me`, `/api/v1/session`,
 `/api/v1/projects`,
 `/api/v1/projects/:projectId`, `/api/v1/projects/:projectId/stats`,
 `/api/v1/projects/:projectId/messages`,

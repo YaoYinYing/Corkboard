@@ -247,6 +247,7 @@ the action. Auth is required for every row unless stated.
 | REST/MCP message and project APIs | — | Yes | Bearer predicate; MCP exposes six tools over the same service |
 | `/metrics` | — | — | Operator shared token `CORKBOARD_METRICS_TOKEN`; otherwise indistinguishable `404` |
 | `/healthz` | Public | Public | No authentication; minimal body |
+| `/readyz` | Public | Public | No authentication; probes SQLite and the configured blob store; minimal status body |
 
 ## Non-goals and limits
 
