@@ -36,6 +36,9 @@ export const STATE_DIR_NAME = "corkboard-issue-sync";
 export const MAX_ISSUES = 50;
 export const COMMENT_PAGE_SIZE = 100;
 export const MAX_COMMENT_PAGES = 5;
+// Re-read a small window before the stored cursor so a one-second-resolution
+// updated_at cannot skip an edit; the digest key makes the overlap idempotent.
+export const COMMENT_SINCE_OVERLAP_MS = 5_000;
 export const MAX_GH_BUFFER = 32 << 20;
 export const LOG_MAX_BYTES = 1 << 20;
 
@@ -547,10 +550,24 @@ export function verifyAccount(ghBin: string, expected: string): string {
 interface FetchResult {
   issues: SyncIssue[];
   comments: CommentRecord[];
-  truncatedIssues: number[];
+  incompleteIssues: number[];
 }
 
-function fetchAll(ghBin: string, repo: string): FetchResult {
+// GitHub documents only since/per_page/page for issue comments and returns
+// ascending comment-id order; sort/direction are unsupported and must not be sent.
+function commentSince(previous: IssueCursor | undefined): string | null {
+  const last = previous?.lastCommentUpdatedAt;
+  if (!last) return null;
+  const since = new Date(Date.parse(last) - COMMENT_SINCE_OVERLAP_MS);
+  return since.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function fetchAll(
+  ghBin: string,
+  repo: string,
+  cursors: Record<string, IssueCursor>,
+  cursoredIssues: ReadonlySet<number>,
+): FetchResult {
   // Discovery uses the REST issues endpoint so ordering is explicitly
   // updated-desc. It returns a numeric comment count, not comment bodies:
   // requesting bodies here would materialize every comment inside the gh buffer.
@@ -559,21 +576,30 @@ function fetchAll(ghBin: string, repo: string): FetchResult {
     `?state=all&sort=updated&direction=desc&per_page=${MAX_ISSUES}`;
   const issues = parseIssuesPayload(runGh(ghBin, ["api", discovery]));
   const comments: CommentRecord[] = [];
-  const truncatedIssues: number[] = [];
+  const incompleteIssues: number[] = [];
   for (const issue of issues) {
     if (issue.commentCount === 0) continue;
-    let page = 1;
-    for (; page <= MAX_COMMENT_PAGES; page += 1) {
+    // Only an issue backed by digest records may use its cursor as a read bound.
+    const since = cursoredIssues.has(issue.number)
+      ? commentSince(cursors[String(issue.number)])
+      : null;
+    let covered = false;
+    for (let page = 1; page <= MAX_COMMENT_PAGES; page += 1) {
       const query =
         `repos/${repo}/issues/${issue.number}/comments` +
-        `?per_page=${COMMENT_PAGE_SIZE}&page=${page}&sort=updated&direction=desc`;
+        `?per_page=${COMMENT_PAGE_SIZE}&page=${page}` +
+        (since === null ? "" : `&since=${encodeURIComponent(since)}`);
       const batch = parseCommentsPayload(runGh(ghBin, ["api", query]), issue.number);
       comments.push(...batch);
-      if (batch.length < COMMENT_PAGE_SIZE) break;
+      if (batch.length < COMMENT_PAGE_SIZE) {
+        covered = true;
+        break;
+      }
     }
-    if (page > MAX_COMMENT_PAGES) truncatedIssues.push(issue.number);
+    // A full final page at the cap cannot prove the range was covered.
+    if (!covered) incompleteIssues.push(issue.number);
   }
-  return { issues, comments, truncatedIssues };
+  return { issues, comments, incompleteIssues };
 }
 
 export interface SyncSummary {
@@ -583,7 +609,6 @@ export interface SyncSummary {
   ingested: number;
   duplicates: number;
   totalIngested: number;
-  truncatedIssues: number[];
 }
 
 function stateFailure(logPath: string, message: string): number {
@@ -653,9 +678,25 @@ export function main(env: Record<string, string | undefined> = process.env): num
     }
     const digest = loadDigest(paths.digest);
 
-    const fetched = fetchAll(ghBin, repo);
-    const plan = selectNewRecords(digest.keys, fetched.comments);
+    // The digest is the dedupe source of truth. Only an issue with at least one
+    // digest record may be bounded by its cursor `since`; every other issue is
+    // first sight, so deleting a corrupt digest (or an issue that had no records)
+    // re-queues history instead of skipping it behind a stale window.
+    const cursoredIssues = new Set(digest.records.map((record) => record.issue));
+    const fetched = fetchAll(ghBin, repo, state.issues, cursoredIssues);
+    // A partial page-cap read must not seed the digest: those records would make
+    // the next pass trust a cursor for a range that was never fully covered.
+    const incomplete = new Set(fetched.incompleteIssues);
+    const covered = fetched.comments.filter((record) => !incomplete.has(record.issue));
+    const plan = selectNewRecords(digest.keys, covered);
     appendDigest(paths.digest, digest.text, plan.records);
+
+    // Keep complete issues' records, but do not advance the cursor or report
+    // success while any issue's range is unproven.
+    if (fetched.incompleteIssues.length > 0) {
+      appendLog(paths.log, `status=incomplete issues=${fetched.incompleteIssues.join(",")}`);
+      return 6;
+    }
 
     const allRecords = [...digest.records, ...plan.records];
     const ingestedByIssue = new Map<number, number>();
@@ -695,23 +736,13 @@ export function main(env: Record<string, string | undefined> = process.env): num
       ingested: plan.records.length,
       duplicates: plan.duplicates,
       totalIngested: allRecords.length,
-      truncatedIssues: fetched.truncatedIssues,
     };
     appendLog(
       paths.log,
       `status=ok repo=${summary.repo} issues=${summary.issues} comments=${summary.comments}` +
         ` ingested=${summary.ingested} duplicates=${summary.duplicates}` +
-        ` total=${summary.totalIngested}` +
-        (summary.truncatedIssues.length > 0
-          ? ` truncated_issues=${summary.truncatedIssues.join(",")}`
-          : ""),
+        ` total=${summary.totalIngested}`,
     );
-    if (summary.truncatedIssues.length > 0) {
-      appendLog(
-        paths.log,
-        `status=warning comment history truncated at ${MAX_COMMENT_PAGES * COMMENT_PAGE_SIZE} per issue`,
-      );
-    }
     return 0;
   } catch (error) {
     if (error instanceof GhError) {

@@ -38,6 +38,49 @@ actionable and prune stale ones.
 - **Remove when:** GitHub offers a monotonic per-comment version that can be trusted
   as the sole cursor without a local digest.
 
+## 2026-11-06 — send only documented query parameters, and tie incremental reads to the durable dedupe store
+
+- **Failure (query shape):** the pass sent `sort=updated&direction=desc` to the
+  issue-comments endpoint, which documents only `since`/`per_page`/`page`. GitHub
+  ignored the unsupported parameters and returned ascending comment-id order, so an
+  issue with more than 500 comments kept returning its oldest 500 and a newly appended
+  comment was never ingested while the pass still exited `0`.
+- **Failure (read window):** Issue-comment `since` paging was derived from
+  `cursor.json`'s `lastCommentUpdatedAt`, but the digest is the dedupe source of
+  truth. Deleting a corrupt digest therefore left a stale cursor bounding the request:
+  only comments newer than `lastCommentUpdatedAt - 5s` were re-queued, older history
+  was silently skipped, and the pass still exited `0` while the recovery docs promised
+  a full re-ingest. A global "digest is empty" check was also insufficient: an issue
+  with no digest record inherited a stale `since` whenever another issue still had
+  records. Separately, a page-cap partial read appended its records, so the next pass
+  trusted a cursor for a range that had never been covered and exited `0`.
+- **Reproducer:** point a fake `gh` at the pass and assert the comment query shape; it
+  must contain only `per_page`/`page` (plus `since` when a real digest backs that
+  issue) and no `sort`/`direction`. For the read window, seed a cursor with
+  `lastCommentUpdatedAt` and either no `digest.jsonl` or a 0-byte one; the request
+  carried `since` and only newer comments were ingested. For the partial read, give a
+  first-sight issue 501 comments and observe its 500 fetched records in the digest.
+- **Fix:** use documented parameters only (`since`/`per_page`/`page`). Choose the read
+  window per issue from the durable store: only an issue with at least one digest
+  record may use its cursor as a `since` bound; an issue with no digest record is read
+  from the beginning even when other issues have records. The post-pass cursor write
+  rebuilds timestamps from what was actually ingested. A bounded pass that reaches the
+  page cap with a full final page does not append that issue's fetched records (they
+  would make the next pass trust an incompletely covered range), still appends
+  complete issues' records, writes no cursor, and exits `6`.
+- **Test:** `tests/unit/issue-sync.test.ts` covers the exact comment query shape (no
+  `sort`/`direction`), a 501-comment issue with a cursor, an edited older comment,
+  a first-sight incomplete issue (its records stay out of the digest while a complete
+  issue's records are appended), absent and 0-byte digests with a stale cursor (no
+  `since`, all comments ingested, exit `0`, rewritten cursor), and per-issue first
+  sight when another issue has digest records.
+- **Prevents:** undocumented parameters silently producing a truncated descending
+  window, recovery paths that report success while permanently skipping history, and
+  a partial page-cap read seeding a cursor that hides the uncovered range.
+- **Remove when:** the comments endpoint documents a reliable sort/order parameter, or
+  the cursor no longer bounds a network read and the read window and the dedupe store
+  are the same durable artifact.
+
 ## 2026-11-06 — discovery ordering and bodies are separate from ingestion
 
 - **Failure avoided:** `gh issue list --state all --limit 50` does not state its

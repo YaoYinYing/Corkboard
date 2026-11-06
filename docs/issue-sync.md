@@ -15,9 +15,18 @@ literal Commander restart, so Issue #9 remains open.
   than 50 issues. Discovery reads a **numeric** comment count and never comment bodies;
   the REST response may include issue bodies, which the script does not read or store.
   Each issue's comments are then read via
-  `gh api repos/<owner>/<repo>/issues/<n>/comments` (bounded paging).
-- Appends each **new or edited** comment exactly once to
-  `digest.jsonl`, keyed by `(comment databaseId, updatedAt)`.
+  `gh api "repos/<owner>/<repo>/issues/<n>/comments?per_page=100&page=N[&since=<ISO 8601>]"`
+  in GitHub's default ascending comment-id order. The endpoint documents only
+  `since`, `per_page` and `page`; `sort`/`direction` are not sent. When the issue
+  has at least one digest record **and** the cursor holds a per-issue
+  `lastCommentUpdatedAt`, the request adds `since` set to that timestamp minus a
+  5-second overlap (so second-resolution timestamps cannot skip an edit); an issue
+  with no digest record (first sight, or after digest deletion) is read from the
+  beginning without `since`. The `(commentId, updatedAt)` digest key makes the
+  overlap idempotent.
+- Appends each **new or edited** comment from a completely read issue exactly once
+  to `digest.jsonl`, keyed by `(comment databaseId, updatedAt)`; records from an
+  issue whose read hit the page cap are not appended (see Bounds).
 - **Does not post, reply, or acknowledge anything.** There is no write path to
   GitHub in the sync script. The interactive Commander posts replies under its own
   audit protocol; this scheduler only makes sure comments are durably queued first.
@@ -104,10 +113,26 @@ the journal only.
 
 - At most 50 issues per pass, selected by GitHub's `updated_at` descending. An older
   issue outside that window is not read until GitHub changes its `updated_at`.
-- At most 5 pages x 100 comments per issue. If more comments changed than that
-  between passes, the pass logs `status=warning comment history truncated` and those
-  older changes can be missed. Increase `MAX_COMMENT_PAGES` if that limit is ever
-  approached.
+- At most 5 pages x 100 comments per issue. A bounded pass is complete only when a
+  page returns fewer than 100 comments. If page 5 is full, the script cannot prove it
+  covered the range: it does **not** append that issue's fetched records to the digest
+  (so a later cursor cannot trust a partially covered range), still appends complete
+  issues' records, writes **no** cursor for the whole pass, logs
+  `status=incomplete issues=<n,...>`, and exits `6`. The next timer elapse retries the
+  same range. A first-sight issue with 500 or more comments (a full final page at the
+  cap) fails closed this way until `MAX_COMMENT_PAGES` is raised; exactly 500 comments
+  is conservatively treated as possibly having more.
+- On an existing cursor, only comments updated after
+  `lastCommentUpdatedAt - 5 seconds` are read, so a newly appended comment on an issue
+  with more than 500 total comments is still ingested **when that `since` window holds
+  at most 500 updated comments**. If the window itself exceeds the 5 x 100 cap, the
+  pass exits `6` without advancing and retries the same window until
+  `MAX_COMMENT_PAGES` is raised. Only an issue with at least one digest record uses
+  its cursor as a `since` bound; an issue with no digest record is read from the
+  beginning even when other issues have records. The 5-second overlap re-reads recent
+  comments; the `(commentId, updatedAt)` digest key deduplicates them. If GitHub's
+  comment visibility lags beyond that overlap and another comment already advanced
+  `lastCommentUpdatedAt`, the next pass can skip a late-arriving edit.
 - Comment edits are captured when GitHub updates `updated_at`; a silent body rewrite
   without an updated timestamp cannot be detected.
 - `updated_at` has one-second resolution. Two edits of the same comment within the
@@ -123,7 +148,8 @@ The service is a pure `Type=oneshot` with no auto-restart: a nonzero exit is vis
 in `systemctl --user status` and the journal, and the next hourly timer elapse (or a
 `Persistent=true` catch-up after downtime) retries. A success exits `0`. Exit codes
 are `1` (unexpected error), `2` (auth/`gh`), `3` (payload parse), `4` (state/digest/
-symlinked state path), and `5` (lock).
+symlinked state path), `5` (lock), and `6` (incomplete scan: a bounded pass could not
+prove full comment coverage; the cursor was not advanced).
 
 Manual run and inspection:
 
@@ -141,10 +167,17 @@ Recovery:
   the lock is malformed, confirm no `issue-sync.ts` process is running, then
   `rm "$HOME/.local/state/corkboard-issue-sync/lock"`.
 - **Corrupt/unreadable cursor:** delete `cursor.json`. The digest still determines
-  what was ingested, so the next pass rebuilds the cursor without duplicates.
-- **Corrupt digest:** the script fails closed by design. Restoring from backup is
-  preferred; deleting the digest re-ingests all comments once (the live GitHub
-  history is the source), which is safe but loses the prior dedupe history.
+  what was ingested, so the next pass rebuilds the cursor without duplicates. Without
+  cursor timestamps every issue is first sight, so an issue with 500 or more comments
+  exits `6` until `MAX_COMMENT_PAGES` is raised (see Bounds).
+- **Corrupt digest:** the script fails closed by design (a malformed line is a state
+  error). Restoring from backup is preferred; deleting the digest re-ingests the
+  comments it can read completely once (the live GitHub history is the source), which
+  is safe but loses the prior dedupe history. An absent or empty digest is treated as
+  first sight, so the surviving cursor's `lastCommentUpdatedAt` is not used as a
+  `since` window. The exception is a first-sight issue whose read hits the page cap:
+  its records are not ingested and the pass keeps exiting `6` (no silent success)
+  until `MAX_COMMENT_PAGES` is raised.
 - **Symlinked state path:** replace the link with a real directory/file inside the
   state directory. The pass refuses to follow it.
 - **Start-rate limit after many manual starts:** `systemctl --user reset-failed
@@ -171,4 +204,15 @@ Recovery:
   Commander process/session recovery. After the reexec the timer remained
   `active`/`enabled` with `Persistent=yes`, and one additional manual service run
   again ingested `0` with the probe still appearing exactly once.
+- The issue-comment paging fix is covered by hermetic unit tests in
+  `tests/unit/issue-sync.test.ts` using a fake `gh` that ignores `sort`/`direction`,
+  honors `since`, returns ascending comment-id order, and applies `per_page`/`page`:
+  a new comment on a 501-comment issue with a cursor is ingested once; an edited older
+  comment is ingested once and not again on the next run; a first-sight 501-comment
+  issue exits `6` with no cursor written and `status=incomplete`; an absent digest
+  with a stale cursor is read without `since` and re-ingests all comments; an empty
+  digest file behaves the same; an issue with no digest record is read without `since`
+  even when another issue has records; and an incomplete issue's fetched records are
+  kept out of the digest while a complete issue's records in the same pass are
+  appended.
 - The scheduler only reads and queues comments; it never posts replies.

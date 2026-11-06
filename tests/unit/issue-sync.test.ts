@@ -168,8 +168,13 @@ if (args[0] === "api" && typeof args[1] === "string" && args[1].startsWith(prefi
   const query = new URLSearchParams(rest.split("?")[1]);
   const perPage = Number(query.get("per_page"));
   const page = Number(query.get("page") ?? "1");
+  const since = query.get("since");
+  const sinceMs = since === null ? null : Date.parse(since);
   const all = comments[issue] ?? [];
-  out(JSON.stringify(all.slice((page - 1) * perPage, page * perPage)));
+  const selected = (sinceMs === null ? all : all.filter((comment) => Date.parse(comment.updated_at) > sinceMs))
+    .slice()
+    .sort((a, b) => a.id - b.id);
+  out(JSON.stringify(selected.slice((page - 1) * perPage, page * perPage)));
   process.exit(0);
 }
 process.stderr.write("unexpected gh invocation\\n");
@@ -263,9 +268,14 @@ test("a full pass uses updated-desc REST discovery, skips pull requests, and doe
   ]);
   assert.deepEqual(calls[3], [
     "api",
-    "repos/owner/repo/issues/9/comments?per_page=100&page=1&sort=updated&direction=desc",
+    "repos/owner/repo/issues/9/comments?per_page=100&page=1",
   ]);
   assert.equal(calls.length, 4);
+  // The issue-comments endpoint documents only since/per_page/page.
+  for (const call of calls.filter((entry) => (entry[1] ?? "").includes("/comments?"))) {
+    assert.equal(call.join(" ").includes("sort="), false);
+    assert.equal(call.join(" ").includes("direction="), false);
+  }
   // The discovery call must not request or materialize comment bodies.
   assert.equal(calls[2].includes("comments"), false);
   assert.equal(calls[2].includes("--json"), false);
@@ -292,6 +302,356 @@ test("a full pass uses updated-desc REST discovery, skips pull requests, and doe
   assert.equal(main(env), 0);
   assert.match(readFileSync(runLog, "utf8"), /ingested=0 duplicates=1 total=1/);
   assert.equal(readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n").length, 1);
+});
+
+function restComment(id: number, updatedAt: string, body = "synthetic non-secret body") {
+  return {
+    id,
+    user: { login: "maintainer" },
+    created_at: updatedAt,
+    updated_at: updatedAt,
+    body,
+  };
+}
+
+function digestLine(issue: number, comment: ReturnType<typeof restComment>): string {
+  return JSON.stringify({
+    issue,
+    commentId: comment.id,
+    author: comment.user.login,
+    createdAt: comment.created_at,
+    updatedAt: comment.updated_at,
+    body: comment.body,
+  });
+}
+
+function commentQueries(log: string): string[] {
+  return readGhLog(log)
+    .filter((call) => call[0] === "api" && (call[1] ?? "").includes("/comments?"))
+    .map((call) => call[1] as string);
+}
+
+function assertNoUnsupportedCommentParams(log: string): void {
+  for (const query of commentQueries(log)) {
+    assert.equal(query.includes("sort="), false, query);
+    assert.equal(query.includes("direction="), false, query);
+  }
+}
+
+function seedState(
+  home: string,
+  comments: ReturnType<typeof restComment>[],
+  lastCommentUpdatedAt: string,
+): string {
+  const stateDir = join(home, ".local", "state", "corkboard-issue-sync");
+  mkdirSync(stateDir, { recursive: true });
+  writeCursor(join(stateDir, "cursor.json"), {
+    ...initialSyncState("maintainer", "owner/repo"),
+    lastRunAt: "2026-01-01T00:00:00Z",
+    totalIngested: comments.length,
+    issues: {
+      "9": {
+        issueUpdatedAt: lastCommentUpdatedAt,
+        lastCommentUpdatedAt,
+        ingested: comments.length,
+      },
+    },
+  });
+  writeFileSync(
+    join(stateDir, "digest.jsonl"),
+    `${comments.map((comment) => digestLine(9, comment)).join("\n")}\n`,
+  );
+  return stateDir;
+}
+
+test("a new comment on a 501-comment issue is ingested once via the since window", () => {
+  const existing = Array.from({ length: 501 }, (_, index) =>
+    restComment(
+      1000 + index,
+      `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}Z`,
+    ),
+  );
+  const appended = restComment(2000, "2026-01-01T01:00:00Z");
+  const lastExisting = existing[existing.length - 1]?.updated_at;
+  assert.ok(lastExisting !== undefined);
+
+  const fake = installFakeGh({
+    issues: [{ number: 9, title: "issue nine", updated_at: "2026-01-02T00:00:00Z", comments: 502 }],
+    comments: { 9: [...existing, appended] },
+  });
+  const home = join(root, "since-home");
+  const stateDir = seedState(home, existing, lastExisting);
+  const env = {
+    HOME: home,
+    CORKBOARD_GH_BIN: fake.bin,
+    CORKBOARD_ISSUE_SYNC_ACCOUNT: "maintainer",
+  };
+
+  assert.equal(main(env), 0);
+  const firstQueries = commentQueries(fake.log);
+  assert.equal(firstQueries.length, 1);
+  assert.equal(firstQueries[0]?.includes("since="), true);
+  assert.equal(firstQueries[0]?.includes("page=1"), true);
+  assertNoUnsupportedCommentParams(fake.log);
+
+  const digest = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n");
+  assert.equal(digest.length, 502);
+  assert.equal(digest.filter((line) => JSON.parse(line).commentId === 2000).length, 1);
+  const cursor = JSON.parse(readFileSync(join(stateDir, "cursor.json"), "utf8"));
+  assert.equal(cursor.issues["9"].lastCommentUpdatedAt, appended.updated_at);
+
+  assert.equal(main(env), 0);
+  const digestAfterRetry = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n");
+  assert.equal(digestAfterRetry.length, 502);
+  assert.equal(digestAfterRetry.filter((line) => JSON.parse(line).commentId === 2000).length, 1);
+  assert.match(
+    readFileSync(join(stateDir, "issue-sync.log"), "utf8"),
+    /ingested=0 duplicates=1 total=502/,
+  );
+  assertNoUnsupportedCommentParams(fake.log);
+});
+
+test("an edited older comment is ingested once and not duplicated on the next run", () => {
+  const original = restComment(1001, "2026-01-01T00:00:00Z", "original body");
+  const untouched = restComment(1002, "2026-01-09T00:00:00Z");
+  const edited = { ...original, updated_at: "2026-01-11T00:00:00Z", body: "edited body" };
+
+  const fake = installFakeGh({
+    issues: [{ number: 9, title: "issue nine", updated_at: "2026-01-11T00:00:00Z", comments: 2 }],
+    comments: { 9: [edited, untouched] },
+  });
+  const home = join(root, "edit-home");
+  const stateDir = seedState(home, [original, untouched], "2026-01-10T00:00:00Z");
+  const env = {
+    HOME: home,
+    CORKBOARD_GH_BIN: fake.bin,
+    CORKBOARD_ISSUE_SYNC_ACCOUNT: "maintainer",
+  };
+
+  assert.equal(main(env), 0);
+  const firstDigest = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n");
+  assert.equal(firstDigest.length, 3);
+  assert.equal(
+    firstDigest.filter((line) => {
+      const record = JSON.parse(line);
+      return record.commentId === 1001 && record.updatedAt === edited.updated_at;
+    }).length,
+    1,
+  );
+  assertNoUnsupportedCommentParams(fake.log);
+
+  assert.equal(main(env), 0);
+  const secondDigest = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n");
+  assert.equal(secondDigest.length, 3);
+  assert.equal(
+    secondDigest.filter((line) => {
+      const record = JSON.parse(line);
+      return record.commentId === 1001 && record.updatedAt === edited.updated_at;
+    }).length,
+    1,
+  );
+  assert.match(
+    readFileSync(join(stateDir, "issue-sync.log"), "utf8"),
+    /ingested=0 duplicates=1 total=3/,
+  );
+  assertNoUnsupportedCommentParams(fake.log);
+});
+
+test("a first-sight issue that hits the page cap exits 6 without a cursor", () => {
+  const existing = Array.from({ length: 501 }, (_, index) =>
+    restComment(
+      1000 + index,
+      `2026-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}Z`,
+    ),
+  );
+  const complete = [restComment(2001, "2026-01-01T00:00:00Z"), restComment(2002, "2026-01-01T00:00:01Z")];
+  const fake = installFakeGh({
+    issues: [
+      { number: 9, title: "issue nine", updated_at: "2026-01-02T00:00:00Z", comments: 501 },
+      { number: 10, title: "issue ten", updated_at: "2026-01-02T00:00:00Z", comments: 2 },
+    ],
+    comments: { 9: existing, 10: complete },
+  });
+  const home = join(root, "incomplete-home");
+  const stateDir = join(home, ".local", "state", "corkboard-issue-sync");
+  const env = {
+    HOME: home,
+    CORKBOARD_GH_BIN: fake.bin,
+    CORKBOARD_ISSUE_SYNC_ACCOUNT: "maintainer",
+  };
+
+  assert.equal(main(env), 6);
+  assert.equal(existsSync(join(stateDir, "cursor.json")), false);
+  const log = readFileSync(join(stateDir, "issue-sync.log"), "utf8");
+  assert.match(log, /status=incomplete issues=9/);
+  assert.equal(log.includes("status=ok"), false);
+
+  // The incomplete issue's fetched pages must not seed the digest; the complete
+  // issue's records in the same pass still do.
+  const digest = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n").map(
+    (line) => JSON.parse(line) as { issue: number },
+  );
+  assert.deepEqual(digest.map((record) => record.issue), [10, 10]);
+
+  const queries = commentQueries(fake.log);
+  const issue9 = queries.filter((query) => query.startsWith("repos/owner/repo/issues/9/comments?"));
+  const issue10 = queries.filter((query) => query.startsWith("repos/owner/repo/issues/10/comments?"));
+  assert.deepEqual(
+    issue9.map((query) => new URLSearchParams(query.split("?")[1]).get("page")),
+    ["1", "2", "3", "4", "5"],
+  );
+  assert.deepEqual(
+    issue10.map((query) => new URLSearchParams(query.split("?")[1]).get("page")),
+    ["1"],
+  );
+  assert.equal(issue9[0]?.includes("since="), false);
+  assert.equal(issue10[0]?.includes("since="), false);
+  assertNoUnsupportedCommentParams(fake.log);
+});
+
+test("an absent digest ignores a stale cursor since and re-ingests history", () => {
+  const comments = [
+    restComment(1001, "2026-01-01T00:00:00Z"),
+    restComment(1002, "2026-01-02T00:00:00Z"),
+  ];
+  const fake = installFakeGh({
+    issues: [{ number: 9, title: "issue nine", updated_at: "2026-01-10T00:00:00Z", comments: 2 }],
+    comments: { 9: comments },
+  });
+  const home = join(root, "no-digest-home");
+  const stateDir = join(home, ".local", "state", "corkboard-issue-sync");
+  mkdirSync(stateDir, { recursive: true });
+  writeCursor(join(stateDir, "cursor.json"), {
+    ...initialSyncState("maintainer", "owner/repo"),
+    lastRunAt: "2026-01-09T00:00:00Z",
+    totalIngested: 2,
+    issues: {
+      "9": {
+        issueUpdatedAt: "2026-01-09T00:00:00Z",
+        lastCommentUpdatedAt: "2026-01-10T00:00:00Z",
+        ingested: 2,
+      },
+    },
+  });
+  assert.equal(existsSync(join(stateDir, "digest.jsonl")), false);
+  const env = {
+    HOME: home,
+    CORKBOARD_GH_BIN: fake.bin,
+    CORKBOARD_ISSUE_SYNC_ACCOUNT: "maintainer",
+  };
+
+  assert.equal(main(env), 0);
+  const queries = commentQueries(fake.log);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0]?.includes("since="), false);
+  assertNoUnsupportedCommentParams(fake.log);
+
+  const digest = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n");
+  assert.equal(digest.length, 2);
+  const cursor = JSON.parse(readFileSync(join(stateDir, "cursor.json"), "utf8"));
+  assert.equal(cursor.issues["9"].ingested, 2);
+  assert.equal(cursor.issues["9"].lastCommentUpdatedAt, "2026-01-02T00:00:00Z");
+});
+
+test("an empty digest file ignores a stale cursor since and re-ingests history", () => {
+  const comments = [
+    restComment(1001, "2026-01-01T00:00:00Z"),
+    restComment(1002, "2026-01-02T00:00:00Z"),
+  ];
+  const fake = installFakeGh({
+    issues: [{ number: 9, title: "issue nine", updated_at: "2026-01-10T00:00:00Z", comments: 2 }],
+    comments: { 9: comments },
+  });
+  const home = join(root, "empty-digest-home");
+  const stateDir = join(home, ".local", "state", "corkboard-issue-sync");
+  mkdirSync(stateDir, { recursive: true });
+  writeCursor(join(stateDir, "cursor.json"), {
+    ...initialSyncState("maintainer", "owner/repo"),
+    lastRunAt: "2026-01-09T00:00:00Z",
+    totalIngested: 2,
+    issues: {
+      "9": {
+        issueUpdatedAt: "2026-01-09T00:00:00Z",
+        lastCommentUpdatedAt: "2026-01-10T00:00:00Z",
+        ingested: 2,
+      },
+    },
+  });
+  writeFileSync(join(stateDir, "digest.jsonl"), "");
+  const env = {
+    HOME: home,
+    CORKBOARD_GH_BIN: fake.bin,
+    CORKBOARD_ISSUE_SYNC_ACCOUNT: "maintainer",
+  };
+
+  assert.equal(main(env), 0);
+  const queries = commentQueries(fake.log);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0]?.includes("since="), false);
+  assertNoUnsupportedCommentParams(fake.log);
+
+  const digest = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n");
+  assert.equal(digest.length, 2);
+  const cursor = JSON.parse(readFileSync(join(stateDir, "cursor.json"), "utf8"));
+  assert.equal(cursor.issues["9"].ingested, 2);
+  assert.equal(cursor.issues["9"].lastCommentUpdatedAt, "2026-01-02T00:00:00Z");
+});
+
+test("an issue with no digest record is first sight even when another issue has records", () => {
+  const nineComment = restComment(1001, "2026-01-02T00:00:00Z");
+  const tenComment = restComment(2001, "2026-01-01T00:00:00Z");
+  const fake = installFakeGh({
+    issues: [
+      { number: 9, title: "issue nine", updated_at: "2026-01-10T00:00:00Z", comments: 1 },
+      { number: 10, title: "issue ten", updated_at: "2026-01-10T00:00:00Z", comments: 1 },
+    ],
+    comments: { 9: [nineComment], 10: [tenComment] },
+  });
+  const home = join(root, "per-issue-first-sight-home");
+  const stateDir = join(home, ".local", "state", "corkboard-issue-sync");
+  mkdirSync(stateDir, { recursive: true });
+  writeCursor(join(stateDir, "cursor.json"), {
+    ...initialSyncState("maintainer", "owner/repo"),
+    lastRunAt: "2026-01-09T00:00:00Z",
+    totalIngested: 1,
+    issues: {
+      "9": {
+        issueUpdatedAt: "2026-01-09T00:00:00Z",
+        lastCommentUpdatedAt: "2026-01-10T00:00:00Z",
+        ingested: 1,
+      },
+      "10": {
+        issueUpdatedAt: "2026-01-09T00:00:00Z",
+        lastCommentUpdatedAt: "2026-01-10T00:00:00Z",
+        ingested: 1,
+      },
+    },
+  });
+  writeFileSync(join(stateDir, "digest.jsonl"), `${digestLine(9, nineComment)}\n`);
+  const env = {
+    HOME: home,
+    CORKBOARD_GH_BIN: fake.bin,
+    CORKBOARD_ISSUE_SYNC_ACCOUNT: "maintainer",
+  };
+
+  assert.equal(main(env), 0);
+  const queries = commentQueries(fake.log);
+  const issue9 = queries.find((query) =>
+    query.startsWith("repos/owner/repo/issues/9/comments?"),
+  );
+  const issue10 = queries.find((query) =>
+    query.startsWith("repos/owner/repo/issues/10/comments?"),
+  );
+  assert.ok(issue9 !== undefined && issue10 !== undefined);
+  assert.equal(issue9.includes("since="), true);
+  assert.equal(issue10.includes("since="), false);
+  assertNoUnsupportedCommentParams(fake.log);
+
+  const digest = readFileSync(join(stateDir, "digest.jsonl"), "utf8").trim().split("\n").map(
+    (line) => JSON.parse(line) as { issue: number; commentId: number },
+  );
+  assert.deepEqual(digest.map((record) => record.issue), [9, 10]);
+  assert.equal(digest.some((record) => record.commentId === 2001), true);
 });
 
 test("state failures are logged to the operational log", () => {
