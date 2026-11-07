@@ -316,9 +316,10 @@ SQLite; commit only after both inserts), so a failure or crash before commit lea
 neither row. That guarantee is scoped to this dashboard `POST /projects` path, not to
 all project rows: the operator CLI `create-project` inserts a project with no
 membership (invisible and denied until a member is added), and `remove-member` can
-remove the last membership. A future
-D1 adapter must implement the same port with `batch` semantics and pass the shared
-storage contract; D1 is not exercised in this environment. Every page is `no-store` with a strict
+remove the last membership. The D1 adapter
+(`src/storage/d1.ts`) implements the same port with `batch` semantics and passes the
+shared storage contract against a D1-shaped SQLite test double; live Cloudflare D1 is
+not exercised in this environment (TODO 325/362). Every page is `no-store` with a strict
 CSP and no inline script or style. `?lang=zh` selects Simplified Chinese; unknown
 locales fall back to English and `lang` is preserved across filters, pager links,
 and project forms. Filter, search, replay, project form, CSRF, and authorization

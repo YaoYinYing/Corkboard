@@ -14,23 +14,16 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
+import { createD1ContractStorage } from "../helpers/d1-double.ts";
 import {
   createSqliteContractStorage,
   runStorageContract,
 } from "../helpers/temp-db.ts";
 
 runStorageContract("sqlite", createSqliteContractStorage);
-
-test(
-  "d1: shared storage contract",
-  {
-    skip: "External gap: no D1 adapter, Cloudflare runtime, or credentials in this environment",
-  },
-  () => {
-    // Once a D1 adapter exists, run:
-    // runStorageContract("d1", createD1ContractStorage);
-  },
-);
+// D1-shaped double over a SQLite file. This exercises the D1 adapter and the
+// same scenarios, but is not live Cloudflare D1 execution (TODO 325/362).
+runStorageContract("d1", createD1ContractStorage);
 
 test(
   "sqlite database, sidecars and directory permissions are private",

@@ -517,9 +517,13 @@ or as authority to act as a speaker.
   emulate them without a documented read-snapshot strategy, recorded as pre-existing
   debt. The grant add callback's `?grant=added|exists` outcome depends on the
   in-transaction `changes` count from `INSERT OR IGNORE`, which a batch-emulated D1
-  result cannot supply. A future D1 adapter must
-  execute a write-only callback as one `batch()` with no callback-visible results and
-  must pass the shared storage contract. No D1 adapter ships or is verified here.
+  result cannot supply. The D1 adapter
+  (`src/storage/d1.ts`) executes a write-only callback as one `batch()`; a buffered
+  `run` resolves the documented `{ changes: 0 }` sentinel because the affected-row
+  count does not exist before the batch runs, callers must never branch on an
+  in-transaction `changes` value, and read-then-write callbacks remain debt. It passes
+  the shared storage contract against a D1-shaped SQLite test double. Live Cloudflare
+  D1 is unexecuted (TODO 325/362).
 - **Production mode verifies these modes instead of assuming them.** Production is
   selected by `NODE_ENV=production` or by the explicit `CORKBOARD_REQUIRE_PRIVATE_FS=1`.
   Paths are normalized (`resolve`, so trailing separators, `.` and `..` cannot disguise

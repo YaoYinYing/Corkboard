@@ -16,9 +16,13 @@ validation, ordering, or encryption behavior.
 
 **Scoped exception (vertical slice A):** the first persistence implementation ships the
 `SqlDatabase` port and the SQLite adapter. SQLite/D1 portability is enforced by keeping
-all SQL free of Node-only syntax and by adapter-agnostic contract tests. A live D1
-adapter and staging run are required before Phase 1/vertical slice B can be called
-complete; they are not claimed by slice A.
+all SQL free of Node-only syntax and by adapter-agnostic contract tests. A D1 adapter
+(`src/storage/d1.ts`) now implements the same port with `batch()` semantics, and the
+shared contract runs against it over a D1-shaped SQLite test double
+(`tests/helpers/d1-double.ts`). Real Cloudflare D1, R2, and Workers execution and
+wrangler migration application are still unexecuted (TODO 325/362), so a live staging
+run is required before Phase 1/vertical slice B can be called complete; it is not
+claimed by slice A.
 
 ## Trust boundaries
 
@@ -104,17 +108,23 @@ path (`src/service/retention.ts`, CLI-only) opens a manual `BEGIN IMMEDIATE` thr
 same connection while that manual transaction is open therefore fails with `cannot
 start a transaction within a transaction`; it neither joins nor waits. The shipped
 server never invokes retention. A crash before commit is rolled back by SQLite's WAL. D1 exposes
-no interactive transaction. A future adapter must execute a write-only callback — two
+no interactive transaction. The D1 adapter executes a write-only callback — two
 inserts for project creation, or one conditional `UPDATE` for session message-send
-publication — as one `batch()` with no callback-visible results, and must pass the
-shared storage contract. Credential issuance, credential rotation, credential
+publication — as one `batch()`; a buffered `run` resolves the documented
+`{ changes: 0 }` sentinel rather than a real affected-row count, and callers must
+never branch on an in-transaction `changes` value. It passes the shared storage
+contract against a D1-shaped SQLite double (live D1 is unexecuted, TODO 325/362).
+Credential issuance, credential rotation, credential
 revocation, membership add/remove, and the credential grant add/remove callbacks
 are read-then-write callbacks (`tx.first` before writes); they are **pre-existing debt** for D1 because
 they require a documented read-snapshot strategy that does not yet exist. The grant
 add callback's `?grant=added|exists` outcome depends on the in-transaction `changes`
 count from `INSERT OR IGNORE`, which a batch-emulated D1 result cannot supply. No
-batch-emulated result may depend on an in-transaction read or affected-row count. No
-D1 adapter exists or is exercised here.
+batch-emulated result may depend on an in-transaction read or affected-row count. The
+D1 adapter enforces this by rejecting reads inside a transaction, buffering writes,
+submitting one `batch()` on resolve and none on throw, and rejecting a non-undefined
+callback result. It passes the shared storage contract against a D1-shaped test double
+over SQLite; live Cloudflare D1 execution remains unexecuted (TODO 325/362).
 
 Sequence allocation happens at **finalization**, not at acceptance. Provisional rows
 carry `seq = NULL` and are invisible. One UPDATE assigns the next sequence and publishes
@@ -609,7 +619,9 @@ metadata only — never bodies, summaries, tokens, or key material. Values that 
 measured are `null`; reconciliation internally reads all referenced storage keys and
 `integrity_check` scans the database. A clean database with no WAL sidecars is opened `immutable` so the
 diagnostic cannot create `-wal`/`-shm` files; with both sidecars present it reads the live
-WAL. There is no repair mode and no D1/Workers implementation yet.
+WAL. There is no repair mode; the D1 adapter exists and is contract-tested against a
+D1-shaped SQLite double, but there is no Workers implementation yet and live D1 is
+unexecuted.
 
 ## Backup, verification, and restore
 

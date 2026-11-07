@@ -246,10 +246,10 @@ SQLite adapter runs `BEGIN IMMEDIATE` and commits only after both inserts
 succeed; any error, or a crash before commit, rolls both rows back. A created
 project therefore always has the owner membership that makes it reachable and
 editable, and an interrupted create leaves no invisible orphan project. A D1
-adapter would have to implement the same `transaction` port (D1 has no
-interactive transactions, so it must submit the buffered writes as one
-`batch`) and pass the shared storage contract; no D1 adapter ships or has been
-exercised in this environment.
+adapter implements the same `transaction` port (D1 has no interactive
+transactions, so it submits the buffered writes as one `batch`) and passes the
+shared storage contract against a D1-shaped SQLite test double; live Cloudflare D1
+has not been exercised in this environment (TODO 325/362).
 
 Edit and update require the owner role as the service layer defines it for
 project administration: `project.edit` in the active membership, the same

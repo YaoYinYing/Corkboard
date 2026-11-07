@@ -120,7 +120,7 @@ remain absent or untested.
 | Committed messages replay after restart | **Verified locally** | Persistence and replay tests, including four independent Node processes writing contiguous `seq`. |
 | Encrypted body decrypts for authorized members and fails closed on tampering | **Verified locally** | AES-256-GCM roundtrip and tamper tests in `npm run check`. |
 | Admin can revoke/expire and audit | **Verified locally** | `revoke-key`, `expire-bodies`, dashboard soft revocation, and sanitized audit rows are implemented and tested. Audit insert is fail-open. |
-| Exact run verified on both hosting targets | **Not implemented** | Only Node/SQLite exists. D1/Workers/R2 is an external gap (see below). |
+| Exact run verified on both hosting targets | **Not implemented** | Node/SQLite is the only executed hosting target. The D1 adapter is verified only against a D1-shaped SQLite double; live D1, Workers, and R2 are an external gap (see below). |
 
 ## Backend, persistence, and operations
 
@@ -131,7 +131,7 @@ remain absent or untested.
 | Exact-revision security/contract audits | **Verified for code checkpoints** | PASS verdicts with trees recorded in `IMPLEMENTATION_STATE.md` through `7812505` (`d0fb133`). This docs tree pending audit. |
 | SQLite persistence | **Verified locally** | `npm run check`; four-process persistence test; synthetic smoke at this revision wrote, listed, and re-read a body. |
 | Backup / verify / restore | **Verified locally** | `npm run check`; synthetic smoke at this revision ran `backup`, `verify` (`ok:true`), `restore` into a new directory, and `doctor` on the restored copy (exit `0`, 0 issues). |
-| D1 adapter and Workers deployment | **Not implemented (external gap)** | No adapter ships; the one skipped test is the live-D1 marker. Local SQL is kept D1-compatible but unexecuted. |
+| D1 adapter and Workers deployment | **Adapter verified locally; deployment external gap** | `src/storage/d1.ts` passes the shared contract against a D1-shaped SQLite test double (`tests/helpers/d1-double.ts`). Real Cloudflare D1/R2/Workers execution and wrangler migration application are unexecuted (TODO 325/362). |
 | R2 blob store | **Not implemented (external gap)** | Local filesystem blob store only. |
 | `doctor` read-only diagnostics | **Verified locally** | `npm run check`; smoke: `doctor --json` exit `0`, 0 issues. |
 | Operator retention (`prune`) | **Verified locally** | `npm run check`; smoke: `prune --json` printed counts and deleted nothing on a clean installation. |

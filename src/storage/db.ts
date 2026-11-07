@@ -41,8 +41,11 @@ export interface SqlDatabase extends SqlTransaction {
   /**
    * Runs `fn` inside one transaction and commits only when it resolves; any
    * throw rolls back. The callback must use only the supplied handle. D1 has
-   * no interactive transactions, so a future adapter must buffer a write-only
-   * callback and submit it with `batch()`, with no callback-visible results.
+   * no interactive transactions, so an adapter must buffer a write-only
+   * callback and submit it with `batch()`. A buffered `run` cannot know its
+   * affected-row count before the batch runs; such an adapter resolves the
+   * documented `{ changes: 0 }` sentinel, and callers must never branch on an
+   * in-transaction `changes` value.
    * Only project creation (two inserts) and session message-send publication
    * (one conditional UPDATE carrying its authorization predicate) are
    * write-only, result-independent callers today. Credential issuance,

@@ -506,6 +506,14 @@ secrets for the root key and pepper, and a real staging test. Local mocks are no
 evidence. Do not describe Workers support as complete until a live staging deployment
 passes the same contract tests and a live two-client exchange.
 
+`src/storage/d1.ts` implements the `SqlDatabase` port over a structural D1 API
+(`prepare`/`exec`/`batch`) and buffers write-only `transaction()` callbacks into one
+`batch()`. `tests/contract/storage.test.ts` runs the shared contract against that
+adapter using a D1-shaped test double over a real SQLite file
+(`tests/helpers/d1-double.ts`). That proves the adapter and its SQL on SQLite; it is
+**not** Cloudflare execution. Real D1/R2 bindings, the Worker runtime, and wrangler
+migration application remain unexecuted (TODO 325/362).
+
 ## Repository safety
 
 Never commit `ORIGINAL_DESIGN.md` (it contains a credential-bearing proxy URL) or a

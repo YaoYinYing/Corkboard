@@ -31,7 +31,8 @@ list, synthetic accounts, and an automated HTTP preflight.
 Out of scope and not claimed:
 
 - account self-registration (the application has no registration endpoint);
-- Cloudflare Workers/D1/R2 (no adapter exists);
+- Cloudflare Workers/R2 and live D1 (a D1 adapter is contract-tested only against a
+  SQLite double; no Workers/R2 adapter exists);
 - attachments (text bodies only, 64 KiB request cap);
 - per-IP limits inside the application (the reverse proxy owns them);
 - multi-process or multi-host operation (SQLite and all in-process state are

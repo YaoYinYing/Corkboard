@@ -228,9 +228,9 @@ write.
   crash before commit leaves neither row. The guarantee is scoped to this dashboard
   create path, not to all project rows: the CLI `create-project` inserts a project
   without a membership (invisible and denied until one is added), and `remove-member`
-  can remove the last membership. A future D1 adapter must implement the
-  same port with `batch` semantics and pass the shared contract; D1 is not
-  exercised here.
+  can remove the last membership. The D1 adapter (`src/storage/d1.ts`) implements the
+  same port with `batch` semantics and passes the shared contract against a D1-shaped
+  SQLite test double; live Cloudflare D1 is not exercised here (TODO 325/362).
 - **Enumeration and cross-account reads.** The viewer is derived only from active,
   non-removed memberships of speakers owned by the session account. A project
   without a qualifying membership is a uniform `404`, whether it is missing,

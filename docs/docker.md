@@ -13,8 +13,10 @@ SQLite + local-blob service. This is the local half of `TODO.md` Phase 4 item 36
 > attribution; the provenance was re-checked against the local image and digest.
 
 This document does **not** provide or claim a Cloudflare Workers/D1/R2 deployment.
-There is no D1/R2 adapter and no Cloudflare access or test has been performed. That
-half of item 368 remains external and unimplemented; the TODO item stays unchecked.
+A D1 adapter exists and passes the shared storage contract only against a D1-shaped
+SQLite double; there is no R2 adapter, no live Cloudflare D1/Workers execution, no
+wrangler migration application, and no Cloudflare access or test. That half of item 368
+remains external and unimplemented; the TODO item stays unchecked.
 
 The image is a single process. Rate limits, login limits, metrics, and MCP sessions are
 process-local; SQLite serializes writers. Do not run multiple replicas against the same
@@ -325,7 +327,9 @@ is lost. The full procedure is in [`runbook.md`](./runbook.md#9-upgrade-and-roll
 
 ## 8. Not provided
 
-- **Cloudflare Workers/D1/R2:** no adapter, no deployment, no test. Not claimed.
+- **Cloudflare Workers/R2 and live D1:** no Workers/R2 adapter, no live Cloudflare
+  D1/Workers run, no wrangler migration application, and no deployment. The D1 adapter
+  itself is contract-tested only against a D1-shaped SQLite double. Not claimed.
 - **ChatGPT Web installation/linking:** not implemented or verified.
 - **TLS, per-IP rate limiting, and volumetric limits:** host reverse-proxy
   responsibility; the application only has process-local bearer public-prefix limits.

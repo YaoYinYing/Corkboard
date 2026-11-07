@@ -1976,3 +1976,19 @@ prevented regression; when to remove the advice.
   undoing an emergency containment step.
 - **Remove when:** transitions and audit rows are written atomically in one
   transaction with a retryable outbox, so no committed transition can lack its row.
+
+## 2026-11-07 — a shaped double proves the adapter, not the platform
+
+- **Failure avoided:** replacing the skipped D1 contract with a run against a
+  D1-shaped SQLite double could be reported as "D1 support", while real Cloudflare
+  D1, wrangler-applied migrations, R2, and Workers remain unexecuted.
+- **Rule:** name the double at the contract call site and in every doc/state claim:
+  the D1 adapter passes the shared contract over a SQLite-backed D1-shaped double.
+  Keep live-D1 TODO clauses unchecked. The batch-emulated adapter must fail closed on
+  reads inside a transaction and on a callback return value; do not invent a result
+  to make a read-then-write caller pass.
+- **Prevents:** a skipped contract becoming a passing mock while live-execution
+  boxes are checked, and a batch adapter silently returning fake affected-row counts
+  that callers start depending on.
+- **Remove when:** a live D1 staging run executes the same contract and
+  wrangler-applied migrations.
