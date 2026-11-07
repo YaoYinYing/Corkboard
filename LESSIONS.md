@@ -3,6 +3,21 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-07 — an accurate outcome can hide an inaccurate mechanism
+
+- **What happened:** a fix note said malformed UTF-8 was "normalized by the platform
+  parser" and a revert-check note said each probe was "a complete request whose only
+  defect is the malformed byte". The outcomes were right (U+FFFD ends up stored; each
+  decoder is load-bearing) but the mechanisms were wrong: `JSON.parse` preserves a lone
+  surrogate and the replacement appears when the server UTF-8-encodes it, and two probes
+  carry a second deliberate defect (a bogus digest, a missing `login_csrf`).
+- **Why it matters:** auditors found the same wrong mechanism repeated in five files, so
+  one imprecise sentence propagates into docs, TODO, state, and the commit message.
+- **Rule:** when writing evidence, describe the mechanism that was observed, not the
+  one that would explain the outcome; state the probe's actual shape (including other
+  invalid fields) instead of an idealized "only defect" claim. Cite the platform call
+  (`JSON.parse`, `TextEncoder`, SQLite) that performs the transformation.
+- **Remove when:** docs quote a reproduced trace instead of a mechanism summary.
 ## 2026-11-07 — a non-fatal TextDecoder silently rewrites untrusted bytes
 
 - **Failure avoided:** Request bodies were decoded with `new TextDecoder()`, whose
