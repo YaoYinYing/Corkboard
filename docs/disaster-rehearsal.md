@@ -48,8 +48,9 @@ of recovery.
 
 ## What the drill does
 
-Each numbered step records one or more named checks. Without `--json`, the script
-prints `[ok] <check>` lines and a final `PASS` or `FAIL` line. With `--json`, stdout
+Each numbered step records one or more named checks. Without `--json`, a successful
+run prints `[ok] <check>` lines and a final `PASS` line; a failed run prints a final
+`FAIL` line (completed checks are available in the `--json` object). With `--json`, stdout
 is exactly one object: `{ok:true, checks, summary}` on success, or
 `{ok:false, checks, summary, failed_check?, error}` on failure, with no human line.
 
