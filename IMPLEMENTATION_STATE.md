@@ -2631,9 +2631,13 @@ report, strict typecheck; **711 tests: 710 pass, 0 fail, 1 skipped D1 contract**
 41 pass.
 
 Limitations: no per-credential expiry selection in the UI (rotation preserves the
-existing expiry); no browser capture for the rotation form; OAuth-issued credentials
-are deliberately excluded because the service rejects them; role separation remains
-account ownership rather than a separate administrator role.
+existing expiry); OAuth-issued credentials are deliberately excluded because the
+service rejects them; role separation remains account ownership rather than a separate
+administrator role. Real-browser acceptance was performed at `ebed0d9` (Issue #6
+comment, prerelease `web-ui-evidence-ebed0d9`): headed Chrome desktop and mobile
+inventory captures, a real click producing the one-time token page with the token
+pixel-redacted, old-token 401 / new-token 200, the DB transition and single sanitized
+audit row, and the repeat-POST 404. A GET to the POST route is the documented 405.
 
 ### Independent audits (final)
 
