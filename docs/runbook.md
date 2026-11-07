@@ -630,8 +630,13 @@ node dist/scripts/corkboard.js restore \
    ciphertext is unrecoverable: revoke credentials and treat body loss as permanent.
 
 A full restore into a scratch directory and a known-body fetch is the only proof of
-recoverability; the release gate requires a disaster rehearsal, which has **not been
-executed** (see [`acceptance-report.md`](./acceptance-report.md)).
+recoverability. The executable synthetic rehearsal in
+[`disaster-rehearsal.md`](./disaster-rehearsal.md)
+(`node scripts/disaster-rehearsal.ts`) performs this sequence plus audit-limit,
+cursor-resync, revoke/rotate, and interrupted send/finalize checks entirely in temporary
+directories, and has been executed against synthetic data. It does not replace a
+production rehearsal with the operator's real backup, keys, and a scratch host. See
+[`acceptance-report.md`](./acceptance-report.md) for the release-gate evidence.
 
 ## 7. Diagnostics and incident response
 

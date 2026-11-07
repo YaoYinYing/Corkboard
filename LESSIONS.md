@@ -1761,3 +1761,26 @@ prevented regression; when to remove the advice.
   example that no longer demonstrates the shipped poller.
 - **Remove when:** examples are generated from a single credential-safe template
   whose output is scanned automatically.
+## 2026-11-06 — a persisted cursor binds identities, not a data directory
+
+- **Failure avoided:** A disaster rehearsal can easily "prove" cursor resync by
+  replaying from zero and then assert the stored cursor still works, without checking
+  what actually binds it. The durable cursor contains `project_id`, `speaker_id`, and
+  `after_seq`; it contains no data-directory path. After a restore into a new
+  directory the same identities make the old cursor valid, and reusing it for another
+  project or speaker must be rejected rather than silently trusted. A rehearsal that
+  seeded with a test-only `serviceId` would also fail to decrypt restored bodies
+  because the service id is bound into the body AAD, so the drill must use the
+  production `corkboard` service id and the separately backed-up key material.
+- **Reproducer:** Write a cursor for `(project A, speaker A)`, then `loadCursorState`
+  it as `(project B, speaker A)` or `(project A, speaker B)`; the parser rejects it.
+  Seed a body with `svc_test` and read it with `corkboard`; decryption fails closed.
+- **Rule:** Assert the binding that exists, not a path that does not. Rehearse
+  from-scratch `after_seq` replay, no duplicate receipts on re-replay, same-identity
+  cursor acceptance, and cross-project/speaker rejection. Use the production service
+  id and the real key pair in every restore read.
+- **Prevents:** A recovery drill that silently trusts a stale cursor or reports a
+  false body-decryption failure caused by a test-only encryption context.
+- **Remove when:** the cursor format carries an installation identifier and the
+  service id/key version is derived from persisted, restorable state rather than a
+  constant plus the supplied key.

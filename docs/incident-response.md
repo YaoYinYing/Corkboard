@@ -123,8 +123,14 @@ preservation guarantees.
    again, so treat that as residual risk and escalate. Do not silently widen a
    credential's projects or scopes during reissue.
 5. Run `expire-bodies` and `prune` only after evidence collection and a verified backup.
-6. Confirm behavior with tests and, where applicable, negative authorization tests.
-7. Monitor readiness, error codes, `429` volume, and audit growth for a period chosen by
+6. Rehearse the recovery path before relying on it. The executable synthetic drill in
+   [`disaster-rehearsal.md`](./disaster-rehearsal.md) covers backup/verify, restore into
+   a new directory, known-body decrypt, audit limits, cursor resync, revoke/rotate, and
+   interrupted send/finalize recovery in temporary directories. It is evidence for the
+   procedure, not a substitute for a rehearsal with the operator's real backup and a
+   scratch host.
+7. Confirm behavior with tests and, where applicable, negative authorization tests.
+8. Monitor readiness, error codes, `429` volume, and audit growth for a period chosen by
    the operator.
 
 ## Post-incident
