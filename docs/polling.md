@@ -175,9 +175,11 @@ not consumable and likewise does not advance.
 
 Body-fetch and processing failures below leave **no receipt** and no cursor advance.
 A cursor-write failure happens **after** a confirmed receipt, so a receipt may already
-exist; the cursor stays unchanged and the message is reprocessed on the next run
-(at-least-once). The client never includes the body text or digest in an error or
-status line.
+exist. The atomic rename may already have replaced the cursor before a later directory
+`open`/`fsync` fails, so the cursor may have changed and the next run may start from
+the new value; this narrow window does not affect the at-least-once receipt rule and is
+documented rather than hidden. The client never includes the body text or digest in an
+error or status line.
 
 | Condition | Receipt | Cursor | Exit / code |
 | --- | --- | --- | --- |
@@ -197,7 +199,7 @@ status line.
 | `mark_read` network/`429`/`5xx` still unconfirmed after three attempts | none | unchanged | `1` `MARK_READ_UNCERTAIN` |
 | `mark_read` `200` naming another message or speaker | none | unchanged | `3` `UNSAFE_RESPONSE` |
 | `mark_read` `200` for the requested message and speaker | created | advances | `0`; receipt recorded |
-| Cursor file write fails after a confirmed `mark_read` | may already exist | unchanged | `1` (no stable `PollError` code); reprocessed next run |
+| Cursor file write fails after a confirmed `mark_read` | may already exist | may already be replaced | `1` (no stable `PollError` code); next run may start from the new value |
 
 ## Cursor durability
 
