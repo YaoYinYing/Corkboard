@@ -73,7 +73,9 @@ export function boundAuditDetail(
 // Random event ids are intentional: every event is a distinct action and a
 // retry is a new attempt recorded separately. Only deterministic, reconcilable
 // transitions (message expiry) use INSERT OR IGNORE with a derived id.
-export async function writeAudit(deps: AuditDeps, event: AuditEventInput): Promise<void> {
+// Returns whether the row was written; callers that can usefully report a
+// fail-open write (the operator prune command does) check it.
+export async function writeAudit(deps: AuditDeps, event: AuditEventInput): Promise<boolean> {
   try {
     await deps.db.run(
       `INSERT INTO audit_events
@@ -92,7 +94,9 @@ export async function writeAudit(deps: AuditDeps, event: AuditEventInput): Promi
         deps.now().toISOString(),
       ],
     );
+    return true;
   } catch {
     // Fail-open. Do not log the error or its parameters.
+    return false;
   }
 }

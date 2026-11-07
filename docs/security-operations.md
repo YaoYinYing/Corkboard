@@ -616,8 +616,8 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   body expiry (`message.expire`), with identifiers and outcome only and no body
   content. The optional `detail` column holds sanitized JSON (granted project IDs and
   scope lists); it never holds tokens, keys, or message text.
-- Authentication and OAuth lifecycle events (slice O) are written through the shared
-  `src/service/audit.ts` helper so the column convention is uniform. Every row is
+- Authentication, OAuth lifecycle, and operator retention events are written through the
+  shared `src/service/audit.ts` helper so the column convention is uniform. Every row is
   sanitized metadata only:
 
   | Operation | Outcome | Actor | Bounded `detail` |
@@ -632,6 +632,12 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   | `oauth.token.issue` | `failure` | none | `reason`; `grant_type` only for the two supported literals (rate-limited failures omit it); `client_id` only when syntactically valid and an active registered client |
   | `oauth.refresh.reuse` | `detected` | none | `client_id`, internal `credential_id` |
   | `oauth.revoke` | `success` | none | `client_id`, internal `credential_id`, `token_type`; only when ownership is proven |
+  | `retention.prune` | `success` | system (null account and speaker) | `graceHours`, `limit`, and the deleted-row counts `sessions`, `authorizationCodes`, `refreshTokens`, `tokenClients`, `oauthCredentials` |
+
+  `retention.prune` is operator-only and is written once per `prune` run that deletes
+  at least one row; a run that deletes nothing writes no row. Counts are per table and
+  bounded by `limit`; the row carries no ids, prefixes, verifiers, session ids, IPs,
+  free text, or row contents.
 
   `detail` values are bounded by construction (200 characters per string, 32 array
   elements, 2,048 characters for the whole document; an oversized document is
@@ -645,16 +651,21 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   account-existence signal either.
 - Audit writes are **fail-open**: `writeAudit` swallows insert errors, never logs the
   error or its parameters, and therefore cannot change a login, token, consent,
-  revocation, or logout response or an authorization outcome. Authorization decisions
-  remain fail-closed and independent of the audit sink. Events use random ids because
-  every authentication/OAuth action is a distinct event and a retry is a separate
+  revocation, or logout outcome, nor what `prune` deletes. Authorization decisions
+  remain fail-closed
+  and independent of the audit sink. The `prune` audit row is inserted **after** the
+  deletion transaction commits: if it fails, the deletions stay committed, the
+  command still prints its counts, and it warns on stderr and exits 1 (it never
+  claims the deleted rows were restored). Events use random ids because every
+  authentication/OAuth action is a distinct event and a retry is a separate
   attempt; only reconcilable transitions such as `message.expire` use a deterministic
   id with `INSERT OR IGNORE`.
 - **No audit read API** exists; the authorized session-only `GET /overview` displays at
   most 20 sanitized `audit_events` rows for the account's own actions and readable
   projects. No authorization path consults audit data. There is **no retention,
   rotation, or deletion** of `audit_events`; `prune` deliberately never deletes audit
-  rows. Rows grow with authentication and OAuth traffic; the operator is responsible
+  rows (it only appends one `retention.prune` row on a deleting run). Rows grow with
+  authentication and OAuth traffic; the operator is responsible
   for database and backup lifecycle management. Audit rows are not cryptographically sealed or
   tamper-evident against an operator with database write access. No audit call site
   passes a request id to `writeAudit`, so `request_id` remains null for these events
@@ -693,12 +704,18 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   immediately and is intended for tests or an explicitly aggressive policy, not the
   default.
 - `prune` never deletes messages, message receipts, body objects or blobs, audit
-  events, speaker (`cb_`) credentials, or any token/credential that is still usable. It
-  does not write audit rows (nothing is selected from the audit table). Deletes run in
+  events, speaker (`cb_`) credentials, or any token/credential that is still usable.
+  A run that deletes at least one row appends exactly one system-actor
+  `retention.prune` audit row after the transaction commits; a run that deletes
+  nothing writes no audit row. If that insert fails, the deletions remain committed
+  and the CLI reports the audit failure (warning on stderr, exit 1) while still
+  printing the deletion counts. Audit rows are not tamper-evident. `audit_events` is
+  not pruned by this command. Deletes run in
   one `BEGIN IMMEDIATE` transaction in FK-safe order, bounded by `--limit` (default
   1000, 1–10000) per session/OAuth artifact table; an OAuth credential's
   `credential_project_grants` rows are removed with the credential and are not counted
-  separately. A failure rolls everything back and the command can be run repeatedly.
+  separately. A delete failure rolls everything back; an audit-insert failure after
+  the commit is fail-open as described above. The command can be run repeatedly.
   A credential blocked by a still-live refresh row is retained
   **together with its `oauth_token_clients` association and grants**, so refresh and
   RFC 7009 access-token revocation keep working. Once that refresh row itself ages out
@@ -994,8 +1011,9 @@ shows no traffic or error summary, because there is no per-tenant source. See
 ## Known limits
 
 - The operator can read all message bodies.
-- Retention (`prune`) is explicit, operator-run, and Node/SQLite-only; it writes no
-  audit row and never deletes blobs, messages, receipts, or audit events. A
+- Retention (`prune`) is explicit, operator-run, and Node/SQLite-only; it appends one
+  system-actor `retention.prune` audit row when it deletes at least one row (none on a
+  no-op) and never deletes blobs, messages, receipts, or audit events. A
   revoked/expired OAuth access credential that still has a live refresh row is retained
   with its `oauth_token_clients` association and grants (so refresh and RFC 7009
   revocation remain effective), and is deleted with them once the refresh row is

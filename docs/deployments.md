@@ -187,8 +187,13 @@ It deletes only definitely unusable sessions and OAuth rows (sessions, authoriza
 codes, refresh tokens, token-client associations, and OAuth access credentials) after
 the grace period. It never deletes messages, receipts, blobs, audit events, speaker
 `cb_` credentials, or any still-usable token. Deletes run in a single transaction, so
-a failure changes nothing. Running it again is a no-op once eligible rows are gone.
-Exit codes: `0` success, `1` the run failed and rolled back, `2` usage/config error
+a delete failure changes nothing. A run that deletes at least one row then appends one
+sanitized system-actor `retention.prune` audit row; a no-op run writes none. That
+insert is fail-open and runs after the commit: if it fails, the deletions stay
+committed and the command warns and exits 1. Audit rows are never pruned here and are
+not tamper-evident. Running it again is a no-op once eligible rows are gone.
+Exit codes: `0` success, `1` a rolled-back delete failure or an audit insert that
+failed after deletions committed, `2` usage/config error
 (invalid values are rejected before the database is opened). The command prints counts
 only; it never prints row contents, tokens, or emails. See
 [`security-operations.md`](./security-operations.md#logging-and-audit) for the policy

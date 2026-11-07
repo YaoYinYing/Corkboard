@@ -575,8 +575,19 @@ node dist/scripts/corkboard.js prune --data-dir /var/lib/corkboard --json
 ```
 
 `--grace-hours` defaults to 24 and `--limit` defaults to 1000 (1–10000). Deletes run in
-one transaction; rerunning is idempotent. Exit `0` success, `1` failure/rollback, `2`
-usage/config error. Schedule externally, after backups. See
+one transaction; no row is ever deleted twice, and a run truncated by `--limit`
+continues on the next run. A run that deletes at least one row writes
+exactly one system-actor `retention.prune` audit row (per-table deleted counts plus
+`graceHours` and `limit`, with no ids, prefixes, verifiers, or row contents) after the
+transaction commits; a run that deletes nothing writes no audit row, to avoid noise.
+Exit `0` success, `1` a delete failure that rolled back **or** an audit-insert failure
+after deletions committed (the CLI still prints its counts, warns on stderr that the
+audit row is missing, and exits 1; it never restores or claims to restore the deleted
+rows, and because the lost counts are never stored no rerun can recreate that row,
+though a rerun may delete newly eligible rows and writes its own row), `2`
+usage/config error. `prune` never deletes audit rows: they are unbounded and
+not tamper-evident, so size and archive them out of band. Schedule externally, after
+backups. See
 [`deployments.md`](./deployments.md#retention-and-pruning).
 
 ## 6. Backup, verify, and restore

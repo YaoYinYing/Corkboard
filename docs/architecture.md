@@ -256,8 +256,12 @@ sessions), with each session/OAuth artifact table bounded by `limit`. An OAuth
 credential's associated `credential_project_grants` rows are removed with the credential
 and are not counted separately against the limit. The write lock makes the set stable and every
 delete re-checks its predicate, so concurrent runs cannot delete a row that became
-valid in between. Any failure rolls back and the command exits non-zero. Messages,
-receipts, body objects/blobs, and audit events are never selected or modified.
+valid in between. A delete failure rolls back and the command exits non-zero. After the
+commit, a run that deleted at least one row appends one sanitized system-actor
+`retention.prune` audit row; a run that deleted nothing writes none. That insert is
+fail-open: if it fails, the deletions stay committed, the command warns and exits
+non-zero, and no audit row exists. Pruning never selects, deletes, or modifies messages,
+receipts, body objects/blobs, or pre-existing audit rows.
 
 ## Message commit protocol
 

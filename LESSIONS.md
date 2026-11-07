@@ -1904,6 +1904,22 @@ prevented regression; when to remove the advice.
 - **Remove when:** an attachment/upload route ships; then replace the
   inapplicability record with a real 10 MiB boundary scenario.
 
+## 2026-11-07 — auditing a committed deletion is fail-open by construction
+
+- **Failure avoided:** an audit row written after the deletion transaction commits can
+  be lost by a crash or a failed insert, and retrying the cleanup cannot recover the
+  counts. Silently returning success would make a destructive operator action look
+  audited when it is not.
+- **Rule:** when the destructive effect must not be undone by an audit failure, write
+  the audit after commit, surface the failure (a flag in the summary plus a CLI warning
+  and non-zero exit), and document that crash-after-commit can lose the row. Do not
+  move the audit inside the transaction to "fix" it; that turns an audit outage into a
+  failed cleanup.
+- **Prevents:** an operator believing every cleanup is recorded, or a cleanup rollback
+  caused by the audit table being unavailable.
+- **Remove when:** cleanup writes a durable intent row before the transaction and a
+  reconciliation pass completes it.
+
 ## 2026-11-07 — an operator service has no principal to re-check
 
 - **Failure avoided:** the dashboard resolved the owned speaker inventory, then called

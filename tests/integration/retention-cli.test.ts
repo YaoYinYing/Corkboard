@@ -244,6 +244,50 @@ test("prune rejects usage and config errors with exit 2 before opening the datab
   assert.match(missing.stderr, /data-dir|CORKBOARD_DATA_DIR/);
 });
 
+test("prune --json keeps the summary and exits 1 when the audit insert fails", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  await seed(dataDir);
+
+  const before = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    await before.exec(
+      `CREATE TRIGGER fail_prune_audit BEFORE INSERT ON audit_events
+       BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`,
+    );
+  } finally {
+    before.close();
+  }
+
+  const result = run(["prune", "--data-dir", dataDir, "--json"]);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /audit event could not be written/);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), {
+    graceHours: 24,
+    limit: 1000,
+    sessions: 1,
+    authorizationCodes: 1,
+    refreshTokens: 1,
+    tokenClients: 1,
+    oauthCredentials: 1,
+    auditFailed: true,
+  });
+
+  // The deletions stayed committed even though the audit row was not written.
+  const after = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    const row = await after.first<{ sessions: number; audit: number }>(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM audit_events) AS audit`,
+    );
+    assert.equal(row?.sessions, 1, "only the live session remains");
+    assert.equal(row?.audit, 0, "no audit row was written");
+  } finally {
+    after.close();
+  }
+});
+
 test("prune exits 1 and rolls back when a delete fails", async (t) => {
   const root = tempDir(t);
   const dataDir = join(root, "data");

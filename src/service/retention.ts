@@ -1,8 +1,11 @@
 // Operator-driven, bounded retention for session and OAuth artifacts. There is
 // no timer and no automatic deletion: this runs only when an operator invokes
-// the `prune` command. It never touches messages, receipts, blobs, audit events,
-// speaker credentials, or any token/credential that is still usable.
+// the `prune` command. It never touches messages, receipts, blobs, or speaker
+// credentials, and it deletes no audit events; a run that deletes something
+// appends exactly one sanitized `retention.prune` audit row. No token/credential
+// that is still usable is ever eligible.
 import type { SqlDatabase } from "../storage/db.ts";
+import { writeAudit } from "./audit.ts";
 import { SESSION_IDLE_MS } from "./sessions.ts";
 
 export const RETENTION_DEFAULT_GRACE_HOURS = 24;
@@ -37,6 +40,8 @@ export interface RetentionSummary {
   refreshTokens: number;
   tokenClients: number;
   oauthCredentials: number;
+  /** Set only when deletions committed but the audit row could not be written. */
+  auditFailed?: boolean;
 }
 
 export function validateRetentionOptions(
@@ -228,6 +233,33 @@ export async function pruneRetention(
       // A failed statement may already have ended the transaction.
     }
     throw error;
+  }
+
+  // One system-actor audit row per run that actually deletes something, written
+  // after COMMIT so an audit sink failure cannot roll back or change the
+  // deletions; the CLI surfaces `auditFailed`. A zero-deletion run writes
+  // nothing, to avoid unbounded noise.
+  const deletedRows =
+    summary.sessions +
+    summary.authorizationCodes +
+    summary.refreshTokens +
+    summary.tokenClients +
+    summary.oauthCredentials;
+  if (deletedRows > 0) {
+    const written = await writeAudit(deps, {
+      operation: "retention.prune",
+      outcome: "success",
+      detail: {
+        graceHours: summary.graceHours,
+        limit: summary.limit,
+        sessions: summary.sessions,
+        authorizationCodes: summary.authorizationCodes,
+        refreshTokens: summary.refreshTokens,
+        tokenClients: summary.tokenClients,
+        oauthCredentials: summary.oauthCredentials,
+      },
+    });
+    if (!written) summary.auditFailed = true;
   }
 
   return summary;

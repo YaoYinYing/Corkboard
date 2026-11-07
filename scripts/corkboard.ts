@@ -741,18 +741,26 @@ async function pruneCommand(values: Values): Promise<void> {
   );
   if (values.json === true) {
     console.log(JSON.stringify(summary));
-    return;
+  } else {
+    for (const line of [
+      `grace-hours: ${summary.graceHours}`,
+      `limit: ${summary.limit}`,
+      `sessions deleted: ${summary.sessions}`,
+      `authorization codes deleted: ${summary.authorizationCodes}`,
+      `refresh tokens deleted: ${summary.refreshTokens}`,
+      `token clients deleted: ${summary.tokenClients}`,
+      `oauth credentials deleted: ${summary.oauthCredentials}`,
+    ]) {
+      console.log(line);
+    }
   }
-  for (const line of [
-    `grace-hours: ${summary.graceHours}`,
-    `limit: ${summary.limit}`,
-    `sessions deleted: ${summary.sessions}`,
-    `authorization codes deleted: ${summary.authorizationCodes}`,
-    `refresh tokens deleted: ${summary.refreshTokens}`,
-    `token clients deleted: ${summary.tokenClients}`,
-    `oauth credentials deleted: ${summary.oauthCredentials}`,
-  ]) {
-    console.log(line);
+  // Deletions already committed. Report the missing audit row without hiding
+  // the counts or pretending the rows were restored.
+  if (summary.auditFailed === true) {
+    console.error(
+      "corkboard: retention audit event could not be written; deletions were committed",
+    );
+    process.exitCode = 1;
   }
 }
 

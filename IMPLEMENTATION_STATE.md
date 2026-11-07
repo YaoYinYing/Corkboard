@@ -197,7 +197,8 @@ Scope caveat recorded in `TODO.md`: local adapter only; no R2.
 - Emergency project-disable absent: 347.
 - Hard impersonation boundary absent: 351 (no credential broker or OS-level
   separation; the documented threat limitation stands).
-- Project deletion absent and operator `prune` writes no audit event: 349.
+- Project deletion absent (operator `prune` audit row superseded by the later
+  prune-audit slice): 349.
 - Service overview lacks per-tenant traffic/error summaries and admin operations: 393.
 - P2 optional features absent: 401–405 (405 is a standing constraint, deliberately
   open).
@@ -889,12 +890,15 @@ pushed.
   credential and are not counted separately. The eligible OAuth credential ids are captured
   under the write lock while the association still exists, then deleted with
   conditional predicates, so a speaker credential can never be classified as OAuth and
-  a concurrent run cannot widen the set. Any failure rolls back and exits non-zero.
-  A second run deletes nothing extra.
+  a concurrent run cannot widen the set. A delete failure rolls back and exits
+  non-zero (the later prune-audit slice adds a fail-open audit insert after commit).
+  A second run deletes nothing extra once eligible rows are exhausted; while the
+  per-table `limit` truncated a run, a rerun continues deleting up to the limit.
 - **CLI.** `prune --data-dir <dir> [--grace-hours N] [--limit N] [--json]` also accepts
   `CORKBOARD_DATA_DIR`. Invalid grace/limit reuse the service validation and are
   rejected **before** the directory is created or the database opened. Exit `0`
-  success, `1` failed/rolled back, `2` usage/config. `--json` prints exactly one
+  success, `1` failed/rolled back (the later prune-audit slice adds: `1` also means
+  deletions committed but the audit insert failed), `2` usage/config. `--json` prints exactly one
   summary line `{graceHours, limit, sessions, authorizationCodes, refreshTokens,
   tokenClients, oauthCredentials}`; without it, short count lines. No row contents,
   tokens, or emails are printed.
@@ -931,7 +935,8 @@ pushed.
   association and grants, so refresh and RFC 7009 revocation remain effective; the
   credential, association, and grants are deleted together once the refresh row ages
   out past grace. There is no automatic scheduling and no audit row is written for
-  prune. No blob/message/audit deletion is added. Independent review passed on security
+  prune (superseded: the prune-audit slice appends one row per deleting run).
+  No blob/message/audit deletion is added. Independent review passed on security
   and contract for trees `9c5991e` and `1a5d207`; the remaining audit P2s were
   documentation/state wording corrected in this checkpoint.
 
@@ -2727,6 +2732,38 @@ audit row, and the repeat-POST 404. A GET to the POST route is the documented 40
   owner is already excluded from every dashboard inventory). Neither leaks existence
   nor mints a credential; both are documented in `docs/web-ui.md`.
 
+## Audited manual cleanup (branch `prune-audit`, base `4a69f78`)
+
+Scope: close the "manual cleanup" audit clause of TODO 349 for the operator `prune`
+command, without changing what it deletes.
+
+- After the bounded deletion transaction commits, `pruneRetention` writes exactly one
+  sanitized `retention.prune` audit row when at least one row was deleted. The detail
+  carries only `graceHours`, `limit`, and the per-table counts
+  (`sessions`, `authorizationCodes`, `refreshTokens`, `tokenClients`,
+  `oauthCredentials`); actor columns stay null, matching the expiry worker's system
+  actor. No ids, tokens, prefixes, verifiers, session ids, IPs, or free text.
+- A zero-deletion run writes no audit row (avoids unbounded noise), documented in the
+  runbook.
+- Audit failure is fail-open and explicit: deletions remain committed,
+  `summary.auditFailed` is set, the CLI prints the full summary first and then warns on
+  stderr with exit 1. `writeAudit` now reports whether it wrote, so callers can
+  distinguish a swallowed failure from success; existing callers ignore the value and
+  keep their previous behavior.
+- Documented limits: audit rows are not tamper-evident; a crash after `COMMIT` and
+  before the audit insert loses that row (no reconciliation, unlike message expiry);
+  `audit_events` is never pruned by this command; no scheduled execution and no
+  project deletion.
+
+Tests use the real SQLite adapter and a trigger that makes the audit insert fail: one
+sanitized row with exact counts for a deleting run, none for a zero run, deletions kept
+plus `auditFailed`/exit 1 on failure, and an expanded untouched-object check
+(messages, receipts, body objects, usable credentials, and pre-existing audit rows).
+
+Commands: `npm run check` exit 0 (secret scan, history scan over 189 commits, license
+report 98 dependencies, strict typecheck; **715 tests: 714 pass, 0 fail, 1 skipped D1
+contract**), `npm run build` exit 0, targeted retention suites 21 pass.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -2997,7 +3034,9 @@ Do not infer any of these from local MCP behavior or from another plan.
   consent/code/token/revocation events are not written to `audit_events` in this
   slice; D1/Workers and real ChatGPT/browser behavior are unverified.
 - Slice-K audit debt (non-blocking): `BEGIN IMMEDIATE` has no D1 batch equivalent, so
-  `prune` is Node/SQLite-only; there is no scheduler and no audit row by design;
+  `prune` is Node/SQLite-only; there is no scheduler, and there is no audit row by
+  design (superseded: the prune-audit slice appends one `retention.prune` row when a
+  run deletes rows);
   `oauth_clients` rows are not pruned; the user-facing out-of-range grace error still
   says "representable date range" although the accepted bound is
   `MAX_DATE_MS - SESSION_IDLE_MS`; the exact accepted boundary is probe-verified but not

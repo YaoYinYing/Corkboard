@@ -803,7 +803,7 @@ test("an injected delete failure rolls back every table", async (t) => {
   assert.equal(summary.authorizationCodes, 1);
 });
 
-test("messages, receipts, blobs, and audit events are untouched", async (t) => {
+test("messages, receipts, blobs, and existing audit rows are untouched", async (t) => {
   const fx = await withFixture(t);
   const base = await seedBase(fx);
   await fx.db.run(
@@ -826,6 +826,14 @@ test("messages, receipts, blobs, and audit events are untouched", async (t) => {
      VALUES ('evt_1', 'message.expire', 'success', ?)`,
     [at(NOW, -DAY_MS)],
   );
+  // A still-usable speaker credential (no OAuth association) must survive.
+  await addCredential(fx, {
+    id: "cred_speaker_live",
+    speakerId: base.speakerId,
+    revokedAt: null,
+    expiresAt: at(NOW, HOUR_MS),
+    publicPrefix: "cb_speaker_",
+  });
   await addSession(fx, {
     id: "sess_expired",
     accountId: base.accountId,
@@ -838,6 +846,7 @@ test("messages, receipts, blobs, and audit events are untouched", async (t) => {
     messages: await count(fx, "messages"),
     receipts: await count(fx, "message_receipts"),
     objects: await count(fx, "body_objects"),
+    credentials: await count(fx, "credentials"),
     audit: await count(fx, "audit_events"),
   };
   const summary = await pruneRetention(retentionDeps(fx));
@@ -847,10 +856,128 @@ test("messages, receipts, blobs, and audit events are untouched", async (t) => {
       messages: await count(fx, "messages"),
       receipts: await count(fx, "message_receipts"),
       objects: await count(fx, "body_objects"),
-      audit: await count(fx, "audit_events"),
+      credentials: await count(fx, "credentials"),
     },
-    before,
+    {
+      messages: before.messages,
+      receipts: before.receipts,
+      objects: before.objects,
+      credentials: before.credentials,
+    },
   );
+  // The pre-existing row survives; the run appends exactly one audit row.
+  assert.equal(await count(fx, "audit_events"), before.audit + 1);
+  assert.equal(
+    (await fx.db.first<{ n: number }>("SELECT COUNT(*) AS n FROM audit_events WHERE id = 'evt_1'"))
+      ?.n,
+    1,
+  );
+});
+
+test("a run that deletes writes exactly one sanitized system audit row", async (t) => {
+  const fx = await withFixture(t);
+  const base = await seedBase(fx);
+  await addSession(fx, {
+    id: "sess_expired",
+    accountId: base.accountId,
+    revokedAt: null,
+    expiresAt: at(CUTOFF, -1),
+    lastSeenAt: at(NOW, 0),
+  });
+  await addCode(fx, base, {
+    id: "code_expired",
+    expiresAt: at(CUTOFF, -1),
+    consumedAt: null,
+  });
+
+  const summary = await pruneRetention(retentionDeps(fx));
+  assert.equal(summary.sessions, 1);
+  assert.equal(summary.authorizationCodes, 1);
+  assert.equal(summary.auditFailed, undefined);
+
+  const rows = await fx.db.all<{
+    id: string;
+    actor_account_id: string | null;
+    actor_speaker_id: string | null;
+    project_id: string | null;
+    operation: string;
+    outcome: string;
+    detail: string | null;
+  }>(
+    `SELECT id, actor_account_id, actor_speaker_id, project_id, operation, outcome, detail
+       FROM audit_events`,
+  );
+  assert.equal(rows.length, 1, "exactly one audit row per deleting run");
+  const row = rows[0];
+  assert.ok(row);
+  assert.equal(row.operation, "retention.prune");
+  assert.equal(row.outcome, "success");
+  // System actor, matching the expiry worker's convention.
+  assert.equal(row.actor_account_id, null);
+  assert.equal(row.actor_speaker_id, null);
+  assert.equal(row.project_id, null);
+  assert.deepEqual(JSON.parse(row.detail ?? "{}"), {
+    graceHours: 24,
+    limit: 1000,
+    sessions: 1,
+    authorizationCodes: 1,
+    refreshTokens: 0,
+    tokenClients: 0,
+    oauthCredentials: 0,
+  });
+  // No ids, prefixes, verifiers, or account data anywhere in the row.
+  const serialized = JSON.stringify(rows);
+  for (const forbidden of [
+    "sess_expired",
+    "code_expired",
+    base.accountId,
+    base.speakerId,
+    base.projectId,
+    "example.test",
+    "cb_",
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+});
+
+test("a run that deletes nothing writes no audit row", async (t) => {
+  const fx = await withFixture(t);
+  await seedBase(fx);
+  const summary = await pruneRetention(retentionDeps(fx));
+  assert.deepEqual(summary, {
+    graceHours: 24,
+    limit: 1000,
+    sessions: 0,
+    authorizationCodes: 0,
+    refreshTokens: 0,
+    tokenClients: 0,
+    oauthCredentials: 0,
+  });
+  assert.equal(await count(fx, "audit_events"), 0);
+});
+
+test("an audit insert failure is fail-open and reports auditFailed", async (t) => {
+  const fx = await withFixture(t);
+  const base = await seedBase(fx);
+  await addSession(fx, {
+    id: "sess_expired",
+    accountId: base.accountId,
+    revokedAt: null,
+    expiresAt: at(CUTOFF, -1),
+    lastSeenAt: at(NOW, 0),
+  });
+  await fx.db.exec(
+    `CREATE TRIGGER fail_prune_audit BEFORE INSERT ON audit_events
+     BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`,
+  );
+
+  const summary = await pruneRetention(retentionDeps(fx));
+
+  assert.equal(summary.sessions, 1, "the summary still reports committed deletions");
+  assert.equal(summary.auditFailed, true);
+  // Deletions stayed committed; only the live seed session remains.
+  assert.equal(await count(fx, "sessions"), 1);
+  assert.equal(await count(fx, "audit_events"), 0);
 });
 
 test("invalid grace and limit are rejected before any delete", async (t) => {

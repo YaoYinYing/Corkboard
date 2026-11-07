@@ -391,8 +391,11 @@ that are definitely unusable:
 The grace period keeps a just-expired row available to a request already in flight
 and tolerates clock skew. `prune` is transactional and bounded by `--limit` per
 session/OAuth artifact table (an OAuth credential's grants are removed with it),
-so it is safe to repeat and a failure deletes nothing. It never touches messages,
-receipts, blobs, or audit events. If a credential is blocked from deletion by a live
+so it is safe to repeat and a delete failure rolls back and deletes nothing. A run that
+deletes at least one row appends one sanitized `retention.prune` audit row after the
+commit; that insert is fail-open, so a failed insert leaves the deletions committed and
+exits non-zero. Pruning never touches messages, receipts, or blobs, and never deletes
+audit rows. If a credential is blocked from deletion by a live
 refresh row, it keeps its `oauth_token_clients` association and grants so refresh and
 RFC 7009 access-token revocation remain effective. Once the refresh row ages out past
 grace, the credential, association, and grants are deleted together; the association
