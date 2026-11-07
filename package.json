@@ -17,6 +17,7 @@
     "build": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/build.ts",
     "build:repro": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/reproducible-build.ts",
     "soak": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/soak.ts",
+    "preview-preflight": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/preview-preflight.ts",
     "check": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/secret-scan.ts && \"$npm_node_execpath\" --experimental-strip-types scripts/history-secret-scan.ts && \"$npm_node_execpath\" scripts/license-report.ts && \"$npm_node_execpath\" node_modules/typescript/lib/tsc.js --noEmit && \"$npm_node_execpath\" --test --test-reporter=spec \"tests/**/*.test.ts\"",
     "audit": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" --experimental-strip-types scripts/npm-audit.ts",
     "licenses": "\"${npm_node_execpath:?npm_node_execpath is not set - run via npm}\" scripts/license-report.ts",

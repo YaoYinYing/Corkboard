@@ -1,0 +1,43 @@
+# Private-preview override. It is not a standalone stack: always merge it with
+# the base file, which keeps the read-only rootfs, cap_drop, no-new-privileges,
+# non-root user, healthcheck, and stop signal.
+#
+#   docker compose -f compose.yaml -f compose.preview.yaml --project-name "$CORKBOARD_PREVIEW_PROJECT" ...
+#
+# Requires Docker Compose v2.24+ for the !override tag. !override replaces the
+# base port/volume lists, so the production port, production volume, and
+# production secrets path cannot be inherited by accident.
+#
+# No account registration route exists in the application. Leave
+# CORKBOARD_PUBLIC_BASE_URL unset (the default here) unless OAuth/MCP linking is
+# being tested; unset disables the OAuth routes.
+
+name: ${CORKBOARD_PREVIEW_PROJECT:-corkboard-preview}
+
+services:
+  corkboard:
+    image: ${CORKBOARD_PREVIEW_IMAGE:-corkboard:preview}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports: !override
+      # Host loopback only. TLS and any public exposure belong to the host
+      # reverse proxy, never to Docker's port publishing.
+      - "127.0.0.1:${CORKBOARD_PREVIEW_PORT:?CORKBOARD_PREVIEW_PORT must be a host loopback port}:8787"
+    volumes: !override
+      # A distinct preview volume, never the production `corkboard-data`.
+      - preview-data:/data
+      # A distinct preview-only secrets directory. It must be an absolute path
+      # outside this repository and outside the preview data volume.
+      - type: bind
+        source: ${CORKBOARD_PREVIEW_SECRETS_DIR:?CORKBOARD_PREVIEW_SECRETS_DIR must be an absolute host directory outside the repository}
+        target: /run/secrets
+        read_only: true
+
+volumes: !override
+  preview-data:
+    # Explicit name so the volume is easy to inspect and remove by exact name.
+    name: ${CORKBOARD_PREVIEW_DATA_VOLUME:-corkboard-preview-data}
+    labels:
+      # Pre-removal guard: check this label before any `down -v`.
+      corkboard.preview: "true"

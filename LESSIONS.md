@@ -1722,3 +1722,24 @@ prevented regression; when to remove the advice.
   object id without re-checking ownership.
 - **Remove when:** a single authorization object is bound into every atomic write and
   every replay lookup, so these predicates cannot drift apart.
+
+## 2026-11-06 — a preview override must replace, not append, the base port and volume lists
+
+- **Failure avoided:** Compose merges most sequences by appending. An override that
+  only adds a preview port or volume leaves the base production port, data volume, or
+  secrets bind in the merged stack, so a "preview" can publish or mount production
+  objects. The base `${CORKBOARD_SECRETS_DIR:?}` also fails interpolation before the
+  merge even when the override would replace it.
+- **Reproducer:** `docker compose -f compose.yaml -f compose.preview.yaml config`
+  without `!override` shows both `127.0.0.1:8787` and the preview port (or the
+  production volume), and interpolation fails when only the preview variable is set.
+- **Fix:** `compose.preview.yaml` uses service-level `ports: !override` and
+  `volumes: !override`, plus top-level `volumes: !override`, with a distinct Compose
+  project name, explicit preview volume name, and required preview secrets directory.
+  The operator procedure points `CORKBOARD_SECRETS_DIR` at the preview path solely so
+  the base file interpolates; the override discards that mount.
+- **Prevents:** A preview inheriting production port publishing, data, or secrets, and
+  a reviewer having to infer isolation from a merged file that still contains both.
+- **Remove when:** the base compose is parameterized so an override cannot inherit
+  production values, or Compose offers a merge mode that replaces sequences by
+  default.
