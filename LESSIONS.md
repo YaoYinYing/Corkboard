@@ -1784,3 +1784,20 @@ prevented regression; when to remove the advice.
 - **Remove when:** the cursor format carries an installation identifier and the
   service id/key version is derived from persisted, restorable state rather than a
   constant plus the supplied key.
+## 2026-11-06 — a load test must probe the limits the service actually exposes
+
+- **Failure avoided:** A checklist item named a 10 MiB boundary and a slow-upload
+  path, but the service has no attachment/upload route (Issue #5) and caps every
+  request body at 64 KiB. Building a fake endpoint or sending 10 MiB through the JSON
+  API would have produced a green test for behavior the product cannot perform.
+- **Reproducer:** Search the router for an upload/attachment route and the body
+  reader for its cap; both are absent/64 KiB, while the documented reverse-proxy cap
+  is 1 MiB. Repeating the checklist name would still not create either path.
+- **Fix:** Probe the real boundaries (64 KiB request cap, 8192-byte text, summary
+  grapheme/byte caps) and record the 10 MiB clause as structurally inapplicable with
+  the exact reason in the report and docs. Implement slow uploads by streaming a
+  valid chunked body under the real cap through the real adapter.
+- **Prevents:** Soak reports that claim coverage for unimplemented features, and
+  endpoints invented only to satisfy a test list.
+- **Remove when:** an attachment/upload route ships; then replace the
+  inapplicability record with a real 10 MiB boundary scenario.

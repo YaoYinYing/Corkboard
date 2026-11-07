@@ -7,10 +7,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { hashPassword } from "../src/auth/password.ts";
 import { generateSpeakerToken, hashSecret } from "../src/auth/credentials.ts";
 import { startServer, type RunningServer } from "../src/platforms/node/main.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
@@ -26,6 +28,10 @@ const DEFAULT_SCOPES = [
 
 const SCENARIO_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+// Deliberately slow refill (one token per minute) so a bounded burst cannot
+// gain tokens on a slow host; the refill allowance below is still measured.
+const RATE_LIMIT_PER_MINUTE = 1;
+const RATE_LIMIT_BURST = 5;
 
 export type SoakProfile = "quick" | "full";
 
@@ -68,7 +74,10 @@ export interface SoakReport {
   version: 1;
   profile: SoakProfile;
   base_sha: string;
-  dirty: boolean;
+  // null means `git status --porcelain` failed or git was unavailable; a clean
+  // tree is reported only when the probe actually succeeded.
+  dirty: boolean | null;
+  dirty_reason: string | null;
   started_at: string;
   duration_ms: number;
   node: string;
@@ -85,6 +94,8 @@ export interface SoakReport {
     prune_backlog: number;
     body_sample: number;
     replay_sample: number;
+    slow_upload_chunks: number;
+    slow_upload_delay_ms: number;
   };
   scenarios: Record<string, ScenarioReport>;
   correctness: { passed: boolean; failures: string[] };
@@ -110,6 +121,8 @@ export interface ProfilePlan {
   pruneBacklog: number;
   bodySample: number;
   replaySample: number;
+  slowUploadChunks: number;
+  slowUploadDelayMs: number;
   sendP95LimitMs: number;
   listP95LimitMs: number;
 }
@@ -125,6 +138,8 @@ const PROFILE_PLANS: Record<SoakProfile, ProfilePlan> = {
     pruneBacklog: 25,
     bodySample: 25,
     replaySample: 10,
+    slowUploadChunks: 8,
+    slowUploadDelayMs: 25,
     sendP95LimitMs: 5_000,
     listP95LimitMs: 3_000,
   },
@@ -132,12 +147,14 @@ const PROFILE_PLANS: Record<SoakProfile, ProfilePlan> = {
     messages: 1_000,
     concurrency: 16,
     expiryMessages: 100,
-    rateLimitRequests: 20,
+    rateLimitRequests: 40,
     exchangeSpeakers: 8,
     exchangePerSpeaker: 25,
     pruneBacklog: 50,
     bodySample: 100,
     replaySample: 25,
+    slowUploadChunks: 64,
+    slowUploadDelayMs: 50,
     sendP95LimitMs: 15_000,
     listP95LimitMs: 8_000,
   },
@@ -260,6 +277,57 @@ export function maxBoundaryText(): string {
 
 export function overBoundaryText(): string {
   return `${maxBoundaryText()}x`;
+}
+
+// 140 ASCII graphemes is the summary grapheme cap; 141 is over. Two regional
+// indicators form one grapheme cluster of 8 UTF-8 bytes, so 128 clusters is
+// exactly the 1024-byte cap and 129 is over it while still under 140 graphemes.
+export function maxSummaryText(): string {
+  return "s".repeat(140);
+}
+
+export function overSummaryText(): string {
+  return "s".repeat(141);
+}
+
+export function maxSummaryBytes(): string {
+  return "\u{1F1E6}\u{1F1E6}".repeat(128);
+}
+
+export function overSummaryBytes(): string {
+  return "\u{1F1E6}\u{1F1E6}".repeat(129);
+}
+
+// JSON allows trailing whitespace, so this produces a valid body of exactly
+// `targetBytes` ASCII bytes. Unit-tested; used to probe the 64 KiB request cap.
+export function paddedJsonBody(prefix: string, targetBytes: number): string {
+  const length = new TextEncoder().encode(prefix).length;
+  if (!Number.isSafeInteger(targetBytes) || targetBytes < length) {
+    throw new RangeError("targetBytes must be an integer at least the body length");
+  }
+  return `${prefix}${" ".repeat(targetBytes - length)}`;
+}
+
+// A fresh project allocates seq 1..n with no gaps or duplicates. Returns a
+// bounded list of human-readable mismatches (empty means contiguous).
+export function contiguousSequenceFailures(
+  seqs: readonly number[],
+  expectedStart = 1,
+): string[] {
+  const sorted = [...seqs].sort((left, right) => left - right);
+  const seen = new Set<number>();
+  for (let index = 0; index < sorted.length; index += 1) {
+    const expected = expectedStart + index;
+    const actual = sorted[index];
+    if (actual !== undefined && seen.has(actual)) {
+      return [`duplicate seq ${actual}`];
+    }
+    seen.add(actual ?? expected);
+    if (actual !== expected) {
+      return [`expected seq ${expected}, got ${actual ?? "none"}`];
+    }
+  }
+  return [];
 }
 
 export function evaluateThresholds(
@@ -470,14 +538,8 @@ interface SendInput {
   bodyExpiresAt?: string;
 }
 
-async function sendMessageHttp(
-  base: string,
-  token: string,
-  projectId: string,
-  idempotencyKey: string,
-  input: SendInput,
-): Promise<HttpOutcome> {
-  const body = JSON.stringify({
+function messageBodyJson(input: SendInput): string {
+  return JSON.stringify({
     summary: input.summary,
     type: input.type ?? "request",
     language: input.language ?? "en",
@@ -486,12 +548,174 @@ async function sendMessageHttp(
     ...(input.replyToId === undefined ? {} : { reply_to_id: input.replyToId }),
     ...(input.bodyExpiresAt === undefined ? {} : { body_expires_at: input.bodyExpiresAt }),
   });
+}
+
+async function sendMessageBodyHttp(
+  base: string,
+  token: string,
+  projectId: string,
+  idempotencyKey: string,
+  body: string,
+): Promise<HttpOutcome> {
   return request(base, `/api/v1/projects/${encodeURIComponent(projectId)}/messages`, {
     method: "POST",
     token,
     headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
     body,
   });
+}
+
+async function sendMessageHttp(
+  base: string,
+  token: string,
+  projectId: string,
+  idempotencyKey: string,
+  input: SendInput,
+): Promise<HttpOutcome> {
+  return sendMessageBodyHttp(
+    base,
+    token,
+    projectId,
+    idempotencyKey,
+    messageBodyJson(input),
+  );
+}
+
+// Stream a request body over chunked transfer-encoding, one chunk per delay.
+// The real Node adapter has no upload deadline, so a slow body completes under
+// the same 64 KiB cap as a buffered one; the only client bound is the scenario
+// timeout below. This is deliberately a raw node:http request because WHATWG
+// fetch does not expose per-chunk write timing.
+interface SlowBodyOptions {
+  token: string;
+  headers: Record<string, string>;
+  chunks: readonly Uint8Array[];
+  delayMs: number;
+}
+
+function headersFromRaw(raw: NodeJS.Dict<string | string[]>): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(raw)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(name, item);
+    } else {
+      headers.set(name, value);
+    }
+  }
+  return headers;
+}
+
+async function slowRequest(
+  base: string,
+  path: string,
+  options: SlowBodyOptions,
+): Promise<HttpOutcome> {
+  const url = new URL(base);
+  const started = performance.now();
+  return await new Promise<HttpOutcome>((resolve) => {
+    let settled = false;
+    let responding = false;
+    let deadline: NodeJS.Timeout | undefined;
+    const finish = (outcome: HttpOutcome): void => {
+      if (settled) return;
+      settled = true;
+      if (deadline !== undefined) clearTimeout(deadline);
+      if (!request.destroyed) request.destroy();
+      resolve(outcome);
+    };
+    const request = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path,
+        method: "POST",
+        headers: {
+          ...options.headers,
+          authorization: `Bearer ${options.token}`,
+          connection: "close",
+        },
+      },
+      (response) => {
+        responding = true;
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.byteLength;
+          if (bytes <= MAX_RESPONSE_BYTES) chunks.push(Buffer.from(chunk));
+        });
+        response.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let json: unknown;
+          if (bytes <= MAX_RESPONSE_BYTES && raw !== "") {
+            try {
+              json = JSON.parse(raw);
+            } catch {
+              json = undefined;
+            }
+          }
+          finish({
+            status: response.statusCode ?? 0,
+            headers: headersFromRaw(response.headers),
+            json,
+            latencyMs: performance.now() - started,
+          });
+        });
+        response.on("error", (error: Error) => {
+          finish({
+            status: 0,
+            headers: new Headers(),
+            json: undefined,
+            latencyMs: performance.now() - started,
+            networkError: error.name,
+          });
+        });
+      },
+    );
+    request.on("error", (error: Error) => {
+      if (responding) return;
+      finish({
+        status: 0,
+        headers: new Headers(),
+        json: undefined,
+        latencyMs: performance.now() - started,
+        networkError: error.name,
+      });
+    });
+    deadline = setTimeout(() => {
+      finish({
+        status: 0,
+        headers: new Headers(),
+        json: undefined,
+        latencyMs: performance.now() - started,
+        networkError: "TimeoutError",
+      });
+    }, SCENARIO_TIMEOUT_MS);
+    void (async () => {
+      for (const chunk of options.chunks) {
+        if (settled || responding) break;
+        try {
+          request.write(chunk);
+        } catch {
+          break;
+        }
+        if (options.delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+        }
+      }
+      if (!settled) request.end();
+    })();
+  });
+}
+
+function splitBody(body: string, chunks: number): Uint8Array[] {
+  const bytes = new TextEncoder().encode(body);
+  const size = Math.max(1, Math.ceil(bytes.length / Math.max(chunks, 1)));
+  const result: Uint8Array[] = [];
+  for (let offset = 0; offset < bytes.length; offset += size) {
+    result.push(bytes.slice(offset, offset + size));
+  }
+  return result;
 }
 
 function listedMessages(json: unknown): Array<{
@@ -590,7 +814,7 @@ function checkAscendingUnique(rows: PageResult["rows"], label: string): void {
   }
 }
 
-async function runBounded<T>(
+export async function runBounded<T>(
   items: readonly T[],
   limit: number,
   fn: (item: T, index: number) => Promise<void>,
@@ -629,10 +853,13 @@ interface Provisioned {
   ungrantedToken: string;
   outsiderToken: string;
   revokedToken: string;
+  sessionEmails: string[];
+  sessionPassword: string;
   projectIds: {
     small: string;
     exchange: string;
     boundary: string;
+    slow: string;
     expiry: string;
   };
 }
@@ -688,6 +915,7 @@ async function provision(
     small: "proj_soak_small",
     exchange: "proj_soak_exchange",
     boundary: "proj_soak_boundary",
+    slow: "proj_soak_slow",
     expiry: "proj_soak_expiry",
   };
   try {
@@ -695,6 +923,21 @@ async function provision(
       "INSERT INTO accounts (id, email, status, created_at) VALUES (?, ?, 'active', ?)",
       [accountId, "soak@example.test", now],
     );
+    // Prunable sessions are created through the real sign-in/sign-out routes;
+    // each account gets a synthetic credential hash so the login limiter's
+    // per-email bucket is exercised once per account.
+    const sessionPassword = `synthetic session password ${crypto.randomUUID()}`;
+    const sessionHash = await hashPassword(sessionPassword);
+    const sessionEmails: string[] = [];
+    for (let index = 0; index < plan.pruneBacklog; index += 1) {
+      const email = `soak-session-${index}@example.test`;
+      sessionEmails.push(email);
+      await db.run(
+        `INSERT INTO accounts (id, email, password_hash, status, created_at)
+         VALUES (?, ?, ?, 'active', ?)`,
+        [`acct_soak_session_${index}`, email, sessionHash, now],
+      );
+    }
     for (const speakerId of ["spk_soak_main", ...Array.from({ length: plan.exchangeSpeakers }, (_, index) => `spk_soak_x${index}`), "spk_soak_ungranted", "spk_soak_outsider"]) {
       await db.run(
         `INSERT INTO speakers (id, owner_account_id, display_name, status, created_at)
@@ -751,6 +994,8 @@ async function provision(
       ungrantedToken: ungranted.token,
       outsiderToken: outsider.token,
       revokedToken: revoked.token,
+      sessionEmails,
+      sessionPassword,
       projectIds,
     };
   } finally {
@@ -792,17 +1037,43 @@ async function countMessages(db: SqlDatabase, projectId: string): Promise<number
   return row?.count ?? 0;
 }
 
+async function projectSequenceFailures(
+  db: SqlDatabase,
+  projectId: string,
+): Promise<string[]> {
+  const rows = await db.all<{ seq: number }>(
+    "SELECT seq FROM messages WHERE project_id = ? AND seq IS NOT NULL ORDER BY seq",
+    [projectId],
+  );
+  return contiguousSequenceFailures(rows.map((row) => row.seq));
+}
+
+interface CreatedMessage {
+  messageId: string;
+  seq: number;
+  key: string;
+  text: string;
+  summary: string;
+}
+
 async function smallMessagesScenario(
   base: string,
   provisioned: Provisioned,
   plan: ProfilePlan,
-): Promise<{ recorder: Recorder; replayDuplicates: number; createdCount: number }> {
+): Promise<{ recorder: Recorder; replayDuplicates: number; created: CreatedMessage[] }> {
   const recorder = new Recorder();
-  const created: Array<{ messageId: string; seq: number; key: string; text: string; summary: string }> = [];
+  const created: CreatedMessage[] = [];
   const indexes = Array.from({ length: plan.messages }, (_, index) => index);
   await runBounded(indexes, plan.concurrency, async (index) => {
     const text = `synthetic soak body ${index}`;
-    const summary = index % 10 === 0 ? `soakneedle small ${index}` : `soak small ${index}`;
+    const summary =
+      index % 10 === 0
+        ? `soakneedle small ${index}`
+        : index % 17 === 0
+          ? `soak literal % small ${index}`
+          : index % 19 === 0
+            ? `soak literal _ small ${index}`
+            : `soak small ${index}`;
     const key = `soak-small-${index}`;
     const outcome = await sendMessageHttp(base, provisioned.main.token, provisioned.projectIds.small, key, {
       summary,
@@ -825,6 +1096,32 @@ async function smallMessagesScenario(
     created.map((row) => ({ messageId: row.messageId, seq: row.seq, replyToId: null, bodyState: "ready" })),
     "small messages",
   );
+  for (const failure of contiguousSequenceFailures(created.map((row) => row.seq))) {
+    activeChecks.check(false, `small messages: ${failure}`);
+  }
+
+  // Two different page sizes must return the same ordered set: a sustained
+  // write phase must not leave pagination gaps, duplicates, or reordering.
+  const pageSizes = [37, 100];
+  for (const pageSize of pageSizes) {
+    const stable = await paginate(
+      base,
+      provisioned.main.token,
+      provisioned.projectIds.small,
+      "",
+      pageSize,
+      recorder,
+    );
+    activeChecks.check(stable.complete, `small messages: pagination (${pageSize}) did not complete`);
+    const expectedIds = created.map((row) => row.messageId);
+    const actualIds = stable.rows.map((row) => row.messageId);
+    activeChecks.check(
+      actualIds.length === expectedIds.length &&
+        actualIds.every((id, index) => id === expectedIds[index]),
+      `small messages: pagination (${pageSize}) did not match the created set`,
+    );
+    checkAscendingUnique(stable.rows, `small messages pagination (${pageSize})`);
+  }
 
   const db = await openSqliteDatabase(provisioned.databasePath);
   let replayDuplicates = 0;
@@ -853,7 +1150,7 @@ async function smallMessagesScenario(
   } finally {
     db.close();
   }
-  return { recorder, replayDuplicates, createdCount: created.length };
+  return { recorder, replayDuplicates, created };
 }
 
 async function boundaryScenario(
@@ -861,10 +1158,13 @@ async function boundaryScenario(
   provisioned: Provisioned,
 ): Promise<ScenarioReport> {
   const recorder = new Recorder();
+  const projectId = provisioned.projectIds.boundary;
+  const encoder = new TextEncoder();
+
   const accepted = await sendMessageHttp(
     base,
     provisioned.main.token,
-    provisioned.projectIds.boundary,
+    projectId,
     "soak-boundary-8192",
     { summary: "soak boundary accepted", text: maxBoundaryText() },
   );
@@ -874,7 +1174,7 @@ async function boundaryScenario(
   const rejected = await sendMessageHttp(
     base,
     provisioned.main.token,
-    provisioned.projectIds.boundary,
+    projectId,
     "soak-boundary-8193",
     { summary: "soak boundary rejected", text: overBoundaryText() },
   );
@@ -885,16 +1185,201 @@ async function boundaryScenario(
     "boundary 8193 bytes: expected VALIDATION_ERROR",
   );
 
+  // The real request-body boundary is 64 KiB of JSON, not text bytes. Trailing
+  // JSON whitespace keeps the payload valid while reaching an exact byte count.
+  const baseJson = messageBodyJson({ summary: "soak request cap accepted", text: "x" });
+  const atCap = await sendMessageBodyHttp(
+    base,
+    provisioned.main.token,
+    projectId,
+    "soak-boundary-request-65536",
+    paddedJsonBody(baseJson, 64 * 1024),
+  );
+  recorder.record(atCap);
+  activeChecks.check(atCap.status === 201, `boundary 64 KiB request: expected 201, got ${atCap.status}`);
+
+  const overCap = await sendMessageBodyHttp(
+    base,
+    provisioned.main.token,
+    projectId,
+    "soak-boundary-request-65537",
+    paddedJsonBody(baseJson, 64 * 1024 + 1),
+  );
+  recorder.record(overCap);
+  activeChecks.check(overCap.status === 413, `boundary 64 KiB + 1 request: expected 413, got ${overCap.status}`);
+  activeChecks.check(
+    errorCodeOf(overCap.json) === "REQUEST_TOO_LARGE",
+    "boundary 64 KiB + 1 request: expected REQUEST_TOO_LARGE",
+  );
+
+  const summaryCases = [
+    { key: "graphemes-140", summary: maxSummaryText(), status: 201, label: "summary 140 graphemes" },
+    { key: "graphemes-141", summary: overSummaryText(), status: 400, label: "summary 141 graphemes" },
+    { key: "bytes-1024", summary: maxSummaryBytes(), status: 201, label: "summary 1024 bytes" },
+    { key: "bytes-1032", summary: overSummaryBytes(), status: 400, label: "summary 1032 bytes" },
+  ] as const;
+  for (const entry of summaryCases) {
+    const outcome = await sendMessageHttp(
+      base,
+      provisioned.main.token,
+      projectId,
+      `soak-boundary-summary-${entry.key}`,
+      { summary: entry.summary, text: `summary boundary ${entry.key}` },
+    );
+    recorder.record(outcome);
+    activeChecks.check(
+      outcome.status === entry.status,
+      `${entry.label}: expected ${entry.status}, got ${outcome.status}`,
+    );
+    if (entry.status === 400) {
+      activeChecks.check(
+        errorCodeOf(outcome.json) === "VALIDATION_ERROR",
+        `${entry.label}: expected VALIDATION_ERROR`,
+      );
+    }
+  }
+
   const db = await openSqliteDatabase(provisioned.databasePath);
   try {
-    const stored = await countMessages(db, provisioned.projectIds.boundary);
-    activeChecks.check(stored === 1, `boundary: stored ${stored} messages, expected 1`);
+    const stored = await countMessages(db, projectId);
+    activeChecks.check(stored === 4, `boundary: stored ${stored} messages, expected 4`);
   } finally {
     db.close();
   }
   return recorder.finish({
-    accepted_bytes: new TextEncoder().encode(maxBoundaryText()).length,
-    rejected_bytes: new TextEncoder().encode(overBoundaryText()).length,
+    accepted_bytes: encoder.encode(maxBoundaryText()).length,
+    rejected_bytes: encoder.encode(overBoundaryText()).length,
+    request_cap_accepted_bytes: 64 * 1024,
+    request_cap_rejected_bytes: 64 * 1024 + 1,
+    summary_accepted_graphemes: 140,
+    summary_rejected_graphemes: 141,
+    summary_accepted_bytes: 1024,
+    summary_rejected_bytes: encoder.encode(overSummaryBytes()).length,
+    // There is no attachment/upload route to soak. Issue #5 blocks attachments;
+    // the app caps every request body at 64 KiB and the documented reverse
+    // proxy caps bodies at 1 MiB, so a 10 MiB boundary cannot be exercised.
+    ten_mib_applicable: false,
+    ten_mib_reason:
+      "attachments are blocked by Issue #5; request bodies are capped at 64 KiB and the documented proxy cap is 1 MiB",
+  });
+}
+
+async function slowUploadScenario(
+  base: string,
+  provisioned: Provisioned,
+  plan: ProfilePlan,
+): Promise<ScenarioReport> {
+  const recorder = new Recorder();
+  const projectId = provisioned.projectIds.slow;
+  const chunks = plan.slowUploadChunks;
+  const delayMs = plan.slowUploadDelayMs;
+
+  const text = maxBoundaryText();
+  const acceptedBody = messageBodyJson({ summary: "soak slow upload accepted", text });
+  const accepted = await slowRequest(
+    base,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/messages`,
+    {
+      token: provisioned.main.token,
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "soak-slow-accepted",
+      },
+      chunks: splitBody(acceptedBody, chunks),
+      delayMs,
+    },
+  );
+  recorder.record(accepted);
+  activeChecks.check(accepted.status === 201, `slow upload: expected 201, got ${accepted.status}`);
+  const acceptedObject = asObject(accepted.json);
+  const acceptedId = acceptedObject === undefined ? undefined : stringField(acceptedObject, "message_id");
+  activeChecks.check(
+    acceptedObject !== undefined && stringField(acceptedObject, "digest") === digestOf(text),
+    "slow upload: response digest changed",
+  );
+  activeChecks.check(
+    acceptedId !== undefined,
+    "slow upload: 201 response did not include a message_id for the body probe",
+  );
+
+  if (acceptedId !== undefined) {
+    const body = await request(
+      base,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/messages/${encodeURIComponent(acceptedId)}/body`,
+      { token: provisioned.main.token },
+    );
+    recorder.record(body);
+    const bodyObject = asObject(body.json);
+    activeChecks.check(body.status === 200, `slow upload body: expected 200, got ${body.status}`);
+    activeChecks.check(stringField(bodyObject ?? {}, "text") === text, "slow upload: body text corrupted");
+    activeChecks.check(
+      stringField(bodyObject ?? {}, "digest") === digestOf(text),
+      "slow upload: body digest corrupted",
+    );
+  }
+
+  // A run that exceeds the text cap still finishes deterministically: the
+  // request body is read fully, then validation rejects it before any write.
+  const overText = await slowRequest(
+    base,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/messages`,
+    {
+      token: provisioned.main.token,
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "soak-slow-over-text",
+      },
+      chunks: splitBody(
+        messageBodyJson({ summary: "soak slow upload rejected", text: overBoundaryText() }),
+        chunks,
+      ),
+      delayMs,
+    },
+  );
+  recorder.record(overText);
+  activeChecks.check(overText.status === 400, `slow upload over text: expected 400, got ${overText.status}`);
+  activeChecks.check(
+    errorCodeOf(overText.json) === "VALIDATION_ERROR",
+    "slow upload over text: expected VALIDATION_ERROR",
+  );
+
+  // Streaming exactly the 64 KiB JSON cap must complete under the same cap as
+  // a buffered request; no upload-specific deadline exists in the adapter.
+  const capBody = paddedJsonBody(
+    messageBodyJson({ summary: "soak slow upload at cap", text: "x" }),
+    64 * 1024,
+  );
+  const atCap = await slowRequest(
+    base,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/messages`,
+    {
+      token: provisioned.main.token,
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "soak-slow-at-cap",
+      },
+      chunks: splitBody(capBody, chunks),
+      delayMs,
+    },
+  );
+  recorder.record(atCap);
+  activeChecks.check(atCap.status === 201, `slow upload at 64 KiB: expected 201, got ${atCap.status}`);
+
+  const db = await openSqliteDatabase(provisioned.databasePath);
+  try {
+    const stored = await countMessages(db, projectId);
+    activeChecks.check(stored === 2, `slow upload: stored ${stored} messages, expected 2`);
+  } finally {
+    db.close();
+  }
+  return recorder.finish({
+    chunks,
+    delay_ms: delayMs,
+    accepted_bytes: new TextEncoder().encode(acceptedBody).length,
+    at_cap_bytes: new TextEncoder().encode(capBody).length,
+    over_text_bytes: new TextEncoder().encode(overBoundaryText()).length,
+    corrupted_bodies: 0,
+    transport_deadline_ms: SCENARIO_TIMEOUT_MS,
   });
 }
 
@@ -902,6 +1387,7 @@ async function exchangeScenario(
   base: string,
   provisioned: Provisioned,
   plan: ProfilePlan,
+  smallSample: { projectId: string; messageId: string },
 ): Promise<ScenarioReport> {
   const recorder = new Recorder();
   const projectId = provisioned.projectIds.exchange;
@@ -988,61 +1474,149 @@ async function exchangeScenario(
     }
   }
 
+  // Parallel senders share one project sequence allocator: it must be
+  // contiguous with no gap or duplicate, not merely ascending.
+  const db = await openSqliteDatabase(provisioned.databasePath);
+  let contiguous = true;
+  try {
+    const failures = await projectSequenceFailures(db, projectId);
+    contiguous = failures.length === 0;
+    for (const failure of failures) activeChecks.check(false, `concurrent speakers: ${failure}`);
+  } finally {
+    db.close();
+  }
+
+  // A speaker granted only this project must not read another project's
+  // metadata or body through a guessed id.
+  let isolationChecks = 0;
+  const actor = provisioned.exchange[0];
+  if (actor !== undefined) {
+    const foreignList = await request(
+      base,
+      `/api/v1/projects/${encodeURIComponent(smallSample.projectId)}/messages`,
+      { token: actor.token },
+    );
+    recorder.record(foreignList);
+    isolationChecks += 1;
+    activeChecks.check(foreignList.status === 404, "exchange: speaker listed a foreign project");
+    activeChecks.check(
+      errorCodeOf(foreignList.json) === "NOT_FOUND",
+      "exchange: foreign project did not return NOT_FOUND",
+    );
+    const foreignBody = await request(
+      base,
+      `/api/v1/projects/${encodeURIComponent(smallSample.projectId)}/messages/${encodeURIComponent(smallSample.messageId)}/body`,
+      { token: actor.token },
+    );
+    recorder.record(foreignBody);
+    isolationChecks += 1;
+    activeChecks.check(foreignBody.status === 404, "exchange: speaker read a foreign body");
+  }
+
   return recorder.finish({
     speakers: provisioned.exchange.length,
     expected_messages: expectedTotal,
     created_messages: seedIds.length + createdIds.length,
     replies: expectedReplies.size,
+    sequences_contiguous: contiguous,
+    cross_speaker_isolation_checks: isolationChecks,
   });
 }
 
 async function searchPaginationScenario(
   base: string,
   provisioned: Provisioned,
-  expectedMessages: number,
+  plan: ProfilePlan,
+  created: readonly CreatedMessage[],
 ): Promise<ScenarioReport> {
   const recorder = new Recorder();
+  const projectId = provisioned.projectIds.small;
   const all = await paginate(
     base,
     provisioned.main.token,
-    provisioned.projectIds.small,
+    projectId,
     "",
     100,
     recorder,
   );
   activeChecks.check(all.complete, "pagination did not complete");
   activeChecks.check(
-    all.rows.length === expectedMessages,
-    `pagination returned ${all.rows.length} of ${expectedMessages} messages`,
+    all.rows.length === created.length,
+    `pagination returned ${all.rows.length} of ${created.length} messages`,
   );
   checkAscendingUnique(all.rows, "pagination");
-
-  const expectedHits = Math.ceil(expectedMessages / 10);
-  const search = await paginate(
-    base,
-    provisioned.main.token,
-    provisioned.projectIds.small,
-    "&q=soakneedle",
-    25,
-    recorder,
-  );
-  activeChecks.check(search.complete, "search pagination did not complete");
+  const expectedIds = created.map((row) => row.messageId);
   activeChecks.check(
-    search.rows.length === expectedHits,
-    `summary search returned ${search.rows.length} of ${expectedHits} hits`,
+    all.rows.length === expectedIds.length &&
+      all.rows.every((row, index) => row.messageId === expectedIds[index]),
+    "pagination did not return the created set in order",
   );
-  checkAscendingUnique(search.rows, "summary search");
-  const searchIds = new Set(search.rows.map((row) => row.messageId));
-  for (const row of search.rows) {
-    activeChecks.check(all.rows.some((entry) => entry.messageId === row.messageId), "search hit outside ordered set");
-  }
-  activeChecks.check(searchIds.size === search.rows.length, "search returned duplicate ids");
+
+  // LIKE is escaped, so % and _ are literal characters, not wildcards. Each
+  // query runs while the concurrent-speaker phase is in flight.
+  const searches = [
+    { q: "soakneedle", label: "token" },
+    { q: "%", label: "literal-percent" },
+    { q: "_", label: "literal-underscore" },
+    { q: "soakneedle-no-such-token", label: "empty" },
+  ];
+  let searchHits = 0;
+  let searchComplete = true;
+  let emptyResult = false;
+  await runBounded(searches, Math.min(plan.concurrency, searches.length), async (entry) => {
+    const expected = created
+      .filter((row) => row.summary.includes(entry.q))
+      .map((row) => row.messageId);
+    const result = await paginate(
+      base,
+      provisioned.main.token,
+      projectId,
+      `&q=${encodeURIComponent(entry.q)}`,
+      25,
+      recorder,
+    );
+    searchHits += result.rows.length;
+    searchComplete = searchComplete && result.complete;
+    if (entry.label === "empty") emptyResult = result.rows.length === 0;
+    activeChecks.check(result.complete, `search ${entry.label}: pagination did not complete`);
+    checkAscendingUnique(result.rows, `search ${entry.label}`);
+    const actual = result.rows.map((row) => row.messageId);
+    activeChecks.check(
+      actual.length === expected.length && actual.every((id, index) => id === expected[index]),
+      `search ${entry.label}: returned ${actual.length} of ${expected.length} expected hits`,
+    );
+    const ids = new Set(actual);
+    activeChecks.check(ids.size === actual.length, `search ${entry.label}: duplicate ids`);
+  });
+
+  // The documented q bound is 100 characters; 101 is rejected before the query.
+  const atBound = await request(
+    base,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/messages?limit=1&q=${encodeURIComponent("x".repeat(100))}`,
+    { token: provisioned.main.token },
+  );
+  recorder.record(atBound);
+  activeChecks.check(atBound.status === 200, `search at 100 chars: expected 200, got ${atBound.status}`);
+  const overBound = await request(
+    base,
+    `/api/v1/projects/${encodeURIComponent(projectId)}/messages?limit=1&q=${encodeURIComponent("x".repeat(101))}`,
+    { token: provisioned.main.token },
+  );
+  recorder.record(overBound);
+  activeChecks.check(overBound.status === 400, `search at 101 chars: expected 400, got ${overBound.status}`);
+  activeChecks.check(
+    errorCodeOf(overBound.json) === "VALIDATION_ERROR",
+    "search at 101 chars: expected VALIDATION_ERROR",
+  );
+
   return recorder.finish({
     ordered_messages: all.rows.length,
-    pages: Math.ceil(expectedMessages / 100),
-    search_hits: search.rows.length,
-    search_pages: Math.ceil(expectedHits / 25),
-    complete: all.complete && search.complete,
+    pages: Math.ceil(created.length / 100),
+    search_queries: searches.length,
+    search_hits: searchHits,
+    search_pages: Math.ceil(searchHits / 25),
+    empty_result: emptyResult,
+    complete: all.complete && searchComplete,
   });
 }
 
@@ -1194,7 +1768,11 @@ async function expiryScenario(
   });
 }
 
-function runCli(args: readonly string[], dataDir: string): { code: number; stdout: string } {
+function runCli(
+  args: readonly string[],
+  dataDir: string,
+  extraEnv: Record<string, string> = {},
+): { code: number; stdout: string } {
   const cliPath = fileURLToPath(new URL("./corkboard.ts", import.meta.url));
   try {
     const stdout = execFileSync(process.execPath, [cliPath, ...args, "--data-dir", dataDir], {
@@ -1202,7 +1780,7 @@ function runCli(args: readonly string[], dataDir: string): { code: number; stdou
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
-      env: { ...process.env, CORKBOARD_DATA_DIR: dataDir },
+      env: { ...process.env, CORKBOARD_DATA_DIR: dataDir, ...extraEnv },
     });
     return { code: 0, stdout };
   } catch (error) {
@@ -1225,47 +1803,116 @@ function lastJsonObject(stdout: string): Record<string, unknown> | undefined {
   }
 }
 
+// Sign in and sign out through the real session routes, leaving one revoked
+// (prunable) session row per account. The synthetic password is never printed.
+async function loginAndLogout(
+  base: string,
+  email: string,
+  password: string,
+  recorder: Recorder,
+): Promise<boolean> {
+  const login = await request(base, "/api/v1/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  recorder.record(login);
+  activeChecks.check(login.status === 200, `cleanup login: expected 200, got ${login.status}`);
+  if (login.status !== 200) return false;
+
+  const pairs = login.headers
+    .getSetCookie()
+    .map((cookie) => cookie.split(";")[0] ?? "")
+    .filter((pair) => pair !== "");
+  const csrfPair = pairs.find((pair) => pair.startsWith("corkboard_csrf="));
+  const csrf = csrfPair?.slice("corkboard_csrf=".length);
+  if (csrf === undefined || csrf === "") {
+    activeChecks.check(false, "cleanup login: CSRF cookie missing");
+    return false;
+  }
+  const logout = await request(base, "/api/v1/session", {
+    method: "DELETE",
+    headers: { cookie: pairs.join("; "), "x-csrf-token": csrf },
+  });
+  recorder.record(logout);
+  activeChecks.check(logout.status === 204, `cleanup logout: expected 204, got ${logout.status}`);
+  return logout.status === 204;
+}
+
+async function countProjectMessages(
+  db: SqlDatabase,
+  projectIds: Provisioned["projectIds"],
+): Promise<number> {
+  let total = 0;
+  for (const projectId of Object.values(projectIds)) {
+    total += await countMessages(db, projectId);
+  }
+  return total;
+}
+
+async function countRows(db: SqlDatabase, sql: string): Promise<number> {
+  const row = await db.first<{ count: number }>(sql);
+  return row?.count ?? 0;
+}
+
 async function cleanupScenario(
   provisioned: Provisioned,
   plan: ProfilePlan,
 ): Promise<{ report: ScenarioReport; messagesUnchanged: boolean }> {
   const recorder = new Recorder();
+  const server = await startSoakServer(provisioned, { perMinute: "0", burst: "1000" });
+  let loggedOut = 0;
+  try {
+    for (const email of provisioned.sessionEmails) {
+      if (await loginAndLogout(server.base, email, provisioned.sessionPassword, recorder)) {
+        loggedOut += 1;
+      }
+    }
+  } finally {
+    await server.running.close();
+  }
+  activeChecks.check(
+    loggedOut === plan.pruneBacklog,
+    `cleanup: created ${loggedOut} of ${plan.pruneBacklog} revoked sessions`,
+  );
+
   const db = await openSqliteDatabase(provisioned.databasePath);
   let beforeMessages = 0;
   let afterMessages = 0;
+  let revokedSessions = 0;
+  let pendingExpiry = 0;
+  let expiredTombstones = 0;
   try {
-    beforeMessages = await countMessages(db, provisioned.projectIds.small) +
-      await countMessages(db, provisioned.projectIds.exchange) +
-      await countMessages(db, provisioned.projectIds.boundary) +
-      await countMessages(db, provisioned.projectIds.expiry);
-
-    const old = new Date(Date.now() - 48 * 60 * 60_000).toISOString();
-    const future = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
-    for (let index = 0; index < plan.pruneBacklog; index += 1) {
-      await db.run(
-        `INSERT INTO sessions
-           (id, account_id, token_prefix, token_verifier, csrf_verifier, created_at, last_seen_at, expires_at, revoked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          `sess_soak_${index}`,
-          provisioned.accountId,
-          "cb_sess_soak",
-          "synthetic-verifier",
-          "synthetic-csrf",
-          old,
-          old,
-          future,
-          old,
-        ],
-      );
-    }
+    beforeMessages = await countProjectMessages(db, provisioned.projectIds);
+    revokedSessions = await countRows(
+      db,
+      "SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NOT NULL",
+    );
+    pendingExpiry = await countRows(
+      db,
+      "SELECT COUNT(*) AS count FROM messages WHERE body_state = 'ready' AND body_expires_at IS NOT NULL",
+    );
+    expiredTombstones = await countRows(
+      db,
+      "SELECT COUNT(*) AS count FROM messages WHERE body_state = 'expired'",
+    );
   } finally {
     db.close();
   }
+  activeChecks.check(
+    revokedSessions === plan.pruneBacklog,
+    `cleanup: ${revokedSessions} of ${plan.pruneBacklog} revoked sessions present`,
+  );
+  activeChecks.check(
+    pendingExpiry === 0,
+    `cleanup: ${pendingExpiry} due bodies remain after expiry`,
+  );
+  activeChecks.check(
+    expiredTombstones === plan.expiryMessages,
+    `cleanup: ${expiredTombstones} expired tombstones, expected ${plan.expiryMessages}`,
+  );
 
-  // Real operator CLI on the temporary installation: expire-bodies is a no-op
-  // after the injected-clock service run, and prune deletes the backdated
-  // revoked session backlog. Neither may touch messages.
+  // Real documented operator paths on the temporary installation.
   const expire = runCli(["expire-bodies", "--limit", "5000"], provisioned.dataDir);
   const expireSummary = lastJsonObject(expire.stdout);
   activeChecks.check(expire.code === 0, `expire-bodies CLI exited ${expire.code}`);
@@ -1279,15 +1926,54 @@ async function cleanupScenario(
   const sessions = typeof pruneSummary?.sessions === "number" ? pruneSummary.sessions : 0;
   activeChecks.check(sessions >= plan.pruneBacklog, `prune deleted ${sessions} of ${plan.pruneBacklog} sessions`);
 
+  // A second run must find nothing: the backlog drained rather than shifted.
+  const pruneAgain = runCli(["prune", "--grace-hours", "0", "--json"], provisioned.dataDir);
+  const pruneAgainSummary = lastJsonObject(pruneAgain.stdout);
+  activeChecks.check(pruneAgain.code === 0, `second prune CLI exited ${pruneAgain.code}`);
+  const sessionsAgain = typeof pruneAgainSummary?.sessions === "number" ? pruneAgainSummary.sessions : -1;
+  activeChecks.check(sessionsAgain === 0, `second prune deleted ${sessionsAgain} sessions`);
+
+  // Doctor is read-only and needs the same keys the server used.
+  const doctor = runCli(["doctor", "--json"], provisioned.dataDir, {
+    CORKBOARD_ROOT_KEY: provisioned.rootKey,
+    CORKBOARD_CREDENTIAL_PEPPER: provisioned.pepperBase64,
+  });
+  const doctorReport = lastJsonObject(doctor.stdout);
+  activeChecks.check(doctor.code === 0, `doctor CLI exited ${doctor.code}`);
+  activeChecks.check(doctorReport !== undefined, "doctor CLI printed no JSON summary");
+  const database = asObject(doctorReport?.database);
+  const schemaVersions = asObject(doctorReport?.schema_versions);
+  const blobs = asObject(doctorReport?.blobs);
+  const provisional = asObject(doctorReport?.provisional);
+  const counts = asObject(database?.counts);
+  const issues = doctorReport?.issues;
+  activeChecks.check(stringField(database ?? {}, "integrity") === "ok", "doctor: database integrity not ok");
+  activeChecks.check(schemaVersions?.complete === true, "doctor: schema incomplete");
+  activeChecks.check(numberField(blobs ?? {}, "missing") === 0, "doctor: missing blobs");
+  activeChecks.check(numberField(blobs ?? {}, "orphaned") === 0, "doctor: orphaned blobs");
+  activeChecks.check(
+    numberField(blobs ?? {}, "expired_pending_deletion") === 0,
+    "doctor: expired blobs pending deletion",
+  );
+  activeChecks.check(numberField(provisional ?? {}, "count") === 0, "doctor: stuck provisional rows");
+  activeChecks.check(
+    Array.isArray(issues) && issues.length === 0,
+    "doctor: reported integrity issues",
+  );
+
   const after = await openSqliteDatabase(provisioned.databasePath);
+  let sessionsRemaining = -1;
   try {
-    afterMessages = await countMessages(after, provisioned.projectIds.small) +
-      await countMessages(after, provisioned.projectIds.exchange) +
-      await countMessages(after, provisioned.projectIds.boundary) +
-      await countMessages(after, provisioned.projectIds.expiry);
+    afterMessages = await countProjectMessages(after, provisioned.projectIds);
+    sessionsRemaining = await countRows(after, "SELECT COUNT(*) AS count FROM sessions");
   } finally {
     after.close();
   }
+  activeChecks.check(sessionsRemaining === 0, `cleanup: ${sessionsRemaining} sessions remain`);
+  activeChecks.check(
+    numberField(counts ?? {}, "messages") === beforeMessages,
+    "doctor: message count disagrees with the database",
+  );
   const messagesUnchanged = afterMessages === beforeMessages;
   activeChecks.check(messagesUnchanged, "operator cleanup changed message counts");
 
@@ -1297,6 +1983,15 @@ async function cleanupScenario(
       expire_failures: typeof expireSummary?.failures === "number" ? expireSummary.failures : -1,
       prune_exit: prune.code,
       prune_sessions_deleted: sessions,
+      prune_second_exit: pruneAgain.code,
+      prune_second_sessions_deleted: sessionsAgain,
+      doctor_exit: doctor.code,
+      doctor_integrity: stringField(database ?? {}, "integrity") ?? "missing",
+      doctor_issues: Array.isArray(issues) ? issues.length : -1,
+      revoked_sessions_before: revokedSessions,
+      sessions_after: sessionsRemaining,
+      pending_expiry_before: pendingExpiry,
+      expired_tombstones: expiredTombstones,
       messages_before: beforeMessages,
       messages_after: afterMessages,
       messages_unchanged: messagesUnchanged,
@@ -1305,17 +2000,53 @@ async function cleanupScenario(
   };
 }
 
+async function countBodyObjects(db: SqlDatabase): Promise<number> {
+  return countRows(db, "SELECT COUNT(*) AS count FROM body_objects");
+}
+
 async function rateLimitScenario(
   provisioned: Provisioned,
   plan: ProfilePlan,
 ): Promise<{ report: ScenarioReport; rateLimited: number }> {
   const recorder = new Recorder();
-  const { running, base } = await startSoakServer(provisioned, { perMinute: "30", burst: "5" });
+  const { running, base } = await startSoakServer(provisioned, {
+    perMinute: String(RATE_LIMIT_PER_MINUTE),
+    burst: String(RATE_LIMIT_BURST),
+  });
+  const projectId = provisioned.projectIds.exchange;
   let rateLimited = 0;
+  let allowed = 0;
+  let beforeMessages = 0;
+  let beforeBodies = 0;
+  let afterRejectedMessages = 0;
+  let afterRejectedBodies = 0;
+  let afterOtherSend = 0;
+  let overLimitPostStatus = 0;
+  let overLimitPostSent = false;
+  let overLimitPostSkipped = false;
+  let rejectedWriteVerified = false;
+  let postWroteMessage = false;
+  let burstElapsedMs = 0;
+  let postGapMs = 0;
+  let postDurationMs = 0;
+  let lastBurstResponseAt = 0;
+
+  const beforeDb = await openSqliteDatabase(provisioned.databasePath);
   try {
+    beforeMessages = await countMessages(beforeDb, projectId);
+    beforeBodies = await countBodyObjects(beforeDb);
+  } finally {
+    beforeDb.close();
+  }
+
+  try {
+    // Sustained over-limit traffic from one credential: excess requests are
+    // bounded 429s, never 5xx.
+    const burstStarted = performance.now();
     for (let index = 0; index < plan.rateLimitRequests; index += 1) {
       const outcome = await request(base, "/api/v1/me", { token: provisioned.main.token });
       recorder.record(outcome);
+      lastBurstResponseAt = performance.now();
       if (outcome.status === 429) {
         rateLimited += 1;
         activeChecks.check(
@@ -1324,25 +2055,166 @@ async function rateLimitScenario(
         );
         const retryAfter = Number(outcome.headers.get("retry-after") ?? "");
         activeChecks.check(
-          Number.isInteger(retryAfter) && retryAfter >= 1,
-          "rate limit: missing or invalid Retry-After",
+          Number.isInteger(retryAfter) && retryAfter >= 1 && retryAfter <= 120,
+          "rate limit: missing or unbounded Retry-After",
         );
       } else {
+        allowed += 1;
         activeChecks.check(outcome.status === 200, `rate limit: unexpected status ${outcome.status}`);
       }
+    }
+    burstElapsedMs = performance.now() - burstStarted;
+    postGapMs = performance.now() - lastBurstResponseAt;
+
+    // One over-limit request must be a real write attempt, so "rejected traffic
+    // writes nothing" is provable rather than vacuous. The 429 expectation
+    // includes the POST's own duration: a token may legitimately refill if the
+    // whole measured window (burst + gap + POST) spans one refill interval.
+    // When that window could refill, only a 201 (a legitimate write that won
+    // the refill) is tolerated and reported as skipped; any other non-429 is a
+    // failure. When it is 429 the write-rejection assertions still run.
+    if (Math.floor((postGapMs * RATE_LIMIT_PER_MINUTE) / 60_000) === 0) {
+      overLimitPostSent = true;
+      const postStarted = performance.now();
+      const rejectedWrite = await sendMessageHttp(
+        base,
+        provisioned.main.token,
+        projectId,
+        "soak-rate-rejected-write",
+        {
+          summary: "synthetic rate limit rejected write",
+          text: "synthetic rate limit rejected write body",
+        },
+      );
+      postDurationMs = performance.now() - postStarted;
+      recorder.record(rejectedWrite);
+      overLimitPostStatus = rejectedWrite.status;
+      const windowMs = burstElapsedMs + postGapMs + postDurationMs;
+      const refillPossible = windowMs * RATE_LIMIT_PER_MINUTE >= 60_000;
+      if (rejectedWrite.status === 429) {
+        rejectedWriteVerified = true;
+        rateLimited += 1;
+        activeChecks.check(
+          errorCodeOf(rejectedWrite.json) === "RATE_LIMITED",
+          "rate limit: over-limit POST expected RATE_LIMITED",
+        );
+        const retryAfter = Number(rejectedWrite.headers.get("retry-after") ?? "");
+        activeChecks.check(
+          Number.isInteger(retryAfter) && retryAfter >= 1 && retryAfter <= 120,
+          "rate limit: over-limit POST missing or unbounded Retry-After",
+        );
+      } else if (refillPossible && rejectedWrite.status === 201) {
+        // A legitimate write that won the refill; anything else non-429 is a
+        // real failure, not a tolerated refill outcome.
+        overLimitPostSkipped = true;
+      } else {
+        activeChecks.check(
+          false,
+          `rate limit: over-limit POST expected 429 (or a tolerated 201 after a refill window), got ${rejectedWrite.status}`,
+        );
+      }
+    } else {
+      overLimitPostStatus = -1;
+      overLimitPostSkipped = true;
+    }
+
+    const midDb = await openSqliteDatabase(provisioned.databasePath);
+    try {
+      afterRejectedMessages = await countMessages(midDb, projectId);
+      afterRejectedBodies = await countBodyObjects(midDb);
+    } finally {
+      midDb.close();
+    }
+
+    // A tolerated refill on the probe is a legitimate write, so the survivor's
+    // sequence accounts for it; a verified 429 must not have written.
+    postWroteMessage = overLimitPostSent && overLimitPostStatus === 201;
+    // A different credential has its own bucket: it is neither blocked by the
+    // exhausted one nor corrupted by the rejected traffic.
+    const other = provisioned.exchange[0];
+    if (other !== undefined) {
+      const me = await request(base, "/api/v1/me", { token: other.token });
+      recorder.record(me);
+      activeChecks.check(me.status === 200, `rate limit: other credential got ${me.status}`);
+      const send = await sendMessageHttp(base, other.token, projectId, "soak-rate-other", {
+        summary: "synthetic rate limit survivor",
+        text: "synthetic rate limit survivor body",
+      });
+      recorder.record(send);
+      activeChecks.check(send.status === 201, `rate limit: other credential send got ${send.status}`);
+      const object = asObject(send.json);
+      const otherSendSeq = object === undefined ? undefined : numberField(object, "seq");
+      const expectedSeq = beforeMessages + (postWroteMessage ? 1 : 0) + 1;
+      activeChecks.check(
+        otherSendSeq === expectedSeq,
+        `rate limit: other credential seq ${otherSendSeq ?? "none"}, expected ${expectedSeq}`,
+      );
+    } else {
+      activeChecks.check(false, "rate limit: no second credential available");
+    }
+
+    const afterDb = await openSqliteDatabase(provisioned.databasePath);
+    try {
+      afterOtherSend = await countMessages(afterDb, projectId);
+    } finally {
+      afterDb.close();
     }
   } finally {
     await running.close();
   }
+
+  // Refill is grounded in the measured window, not an assumed request speed:
+  // the bucket starts full and each request costs one token, so at most
+  // floor(windowMs * perMinute / 60000) extra tokens can be spent. When the
+  // POST was skipped pre-send, its gap/duration happened after the loop and
+  // cannot have produced any of the loop's limited responses, so only the
+  // burst window counts; including them would overstate the allowance.
+  const measuredWindowMs = overLimitPostSent
+    ? burstElapsedMs + postGapMs + postDurationMs
+    : burstElapsedMs;
+  const refillAllowance = Math.floor(
+    (measuredWindowMs * RATE_LIMIT_PER_MINUTE) / 60_000,
+  );
+  const maximumAllowed = RATE_LIMIT_BURST + refillAllowance;
+  const overLimitRequests = plan.rateLimitRequests + (overLimitPostSent ? 1 : 0);
+  activeChecks.check(allowed >= 1, "rate limit burst produced no success");
   activeChecks.check(rateLimited >= 1, "rate limit burst produced no 429");
-  activeChecks.check(rateLimited < plan.rateLimitRequests, "rate limit burst produced no success");
+  activeChecks.check(
+    rateLimited >= overLimitRequests - maximumAllowed,
+    `rate limit: only ${rateLimited} of ${overLimitRequests} requests were limited`,
+  );
+  if (rejectedWriteVerified) {
+    activeChecks.check(
+      afterRejectedMessages === beforeMessages,
+      "rate limit: rejected traffic wrote a message",
+    );
+    activeChecks.check(
+      afterRejectedBodies === beforeBodies,
+      "rate limit: rejected traffic wrote a body row",
+    );
+  }
+  activeChecks.check(
+    afterOtherSend === beforeMessages + (postWroteMessage ? 1 : 0) + 1,
+    "rate limit: other credential write count did not advance exactly once",
+  );
   return {
     report: recorder.finish({
-      requests: plan.rateLimitRequests,
-      per_minute: 30,
-      burst: 5,
+      requests: overLimitRequests,
+      per_minute: RATE_LIMIT_PER_MINUTE,
+      burst: RATE_LIMIT_BURST,
       rate_limited: rateLimited,
-      allowed: plan.rateLimitRequests - rateLimited,
+      allowed,
+      burst_elapsed_ms: round1(burstElapsedMs),
+      post_gap_ms: round1(postGapMs),
+      post_duration_ms: round1(postDurationMs),
+      refill_allowance: refillAllowance,
+      over_limit_post_status: overLimitPostStatus,
+      over_limit_post_skipped: overLimitPostSkipped,
+      messages_before: beforeMessages,
+      body_objects_before: beforeBodies,
+      messages_after_rejected: afterRejectedMessages,
+      body_objects_after_rejected: afterRejectedBodies,
+      messages_after_other_send: afterOtherSend,
     }),
     rateLimited,
   };
@@ -1356,11 +2228,17 @@ function gitValue(args: readonly string[], cwd: string): string | undefined {
   }
 }
 
-function metadata(config: SoakConfig): { baseSha: string; dirty: boolean } {
+function metadata(config: SoakConfig): {
+  baseSha: string;
+  dirty: boolean | null;
+  dirtyReason: string | null;
+} {
   const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const status = gitValue(["status", "--porcelain"], repoRoot);
   return {
     baseSha: config.baseSha ?? gitValue(["rev-parse", "HEAD"], repoRoot) ?? "unknown",
-    dirty: (gitValue(["status", "--porcelain"], repoRoot) ?? "") !== "",
+    dirty: status === undefined ? null : status !== "",
+    dirtyReason: status === undefined ? "git status unavailable" : null,
   };
 }
 
@@ -1422,20 +2300,31 @@ export async function runSoak(config: SoakConfig): Promise<SoakReport> {
     const small = await smallMessagesScenario(base, provisioned, plan);
     scenarios.small_messages = small.recorder.finish({
       expected: plan.messages,
-      created: small.createdCount,
-      replayed: Math.min(plan.replaySample, small.createdCount),
+      created: small.created.length,
+      replayed: Math.min(plan.replaySample, small.created.length),
       duplicates: small.replayDuplicates,
       concurrency: plan.concurrency,
+      page_sizes_checked: 2,
     });
     replayDuplicates = small.replayDuplicates;
-    messagesCreated += small.createdCount;
+    messagesCreated += small.created.length;
 
     scenarios.boundary = await boundaryScenario(base, provisioned);
-    messagesCreated += 1;
+    messagesCreated += 4;
 
+    scenarios.slow_upload = await slowUploadScenario(base, provisioned, plan);
+    messagesCreated += 2;
+
+    const smallSample = small.created[0];
+    if (smallSample === undefined) {
+      activeChecks.check(false, "no small message available for isolation checks");
+    }
     const [exchange, pagination] = await Promise.all([
-      exchangeScenario(base, provisioned, plan),
-      searchPaginationScenario(base, provisioned, plan.messages),
+      exchangeScenario(base, provisioned, plan, {
+        projectId: provisioned.projectIds.small,
+        messageId: smallSample?.messageId ?? "msg_missing",
+      }),
+      searchPaginationScenario(base, provisioned, plan, small.created),
     ]);
     scenarios.concurrent_speakers = exchange;
     scenarios.metadata_search_pagination = pagination;
@@ -1458,6 +2347,28 @@ export async function runSoak(config: SoakConfig): Promise<SoakReport> {
 
   const rate = await rateLimitScenario(provisioned, plan);
   scenarios.rate_limit_burst = rate.report;
+  // The rate-limit survivor added exactly one message to the exchange project.
+  messagesCreated += 1;
+
+  const sequenceDb = await openSqliteDatabase(provisioned.databasePath);
+  let sequencesContiguous = true;
+  try {
+    for (const [name, projectId] of Object.entries(provisioned.projectIds)) {
+      const failures = await projectSequenceFailures(sequenceDb, projectId);
+      if (failures.length > 0) {
+        sequencesContiguous = false;
+        for (const failure of failures) {
+          activeChecks.check(false, `${name} project sequence: ${failure}`);
+        }
+      }
+    }
+  } finally {
+    sequenceDb.close();
+  }
+  scenarios.sequence_integrity = new Recorder().finish({
+    projects_checked: Object.keys(provisioned.projectIds).length,
+    contiguous: sequencesContiguous,
+  });
 
   activeChecks.check(counters.integrityFailures === 0, "integrity failure observed");
   activeChecks.check(counters.unexpected5xx === 0, "unexpected 5xx observed");
@@ -1478,6 +2389,7 @@ export async function runSoak(config: SoakConfig): Promise<SoakReport> {
     profile: config.profile,
     base_sha: meta.baseSha,
     dirty: meta.dirty,
+    dirty_reason: meta.dirtyReason,
     started_at: startedAt.toISOString(),
     duration_ms: round1(durationMs),
     node: process.version,
@@ -1494,6 +2406,8 @@ export async function runSoak(config: SoakConfig): Promise<SoakReport> {
       prune_backlog: plan.pruneBacklog,
       body_sample: plan.bodySample,
       replay_sample: plan.replaySample,
+      slow_upload_chunks: plan.slowUploadChunks,
+      slow_upload_delay_ms: plan.slowUploadDelayMs,
     },
     scenarios,
     correctness: {
@@ -1522,7 +2436,9 @@ function printHumanSummary(report: SoakReport): void {
     `  rate limited: ${report.summary.rate_limited}; network errors: ${report.summary.network_errors}`,
     `  send p95: ${report.thresholds.send_p95_ms}ms (guard ${report.thresholds.send_p95_limit_ms}ms); list p95: ${report.thresholds.list_p95_ms}ms (guard ${report.thresholds.list_p95_limit_ms}ms)`,
     `  thresholds (environment-dependent, non-fatal): ${report.thresholds.passed ? "within guards" : report.thresholds.breaches.join("; ")}`,
-    `  elapsed: ${report.duration_ms}ms; base: ${report.base_sha}${report.dirty ? " (dirty tree)" : ""}`,
+    `  elapsed: ${report.duration_ms}ms; base: ${report.base_sha}${
+      report.dirty === null ? " (tree state unknown)" : report.dirty ? " (dirty tree)" : ""
+    }`,
   ];
   if (!report.correctness.passed) {
     for (const failure of report.correctness.failures) lines.push(`  failure: ${failure}`);

@@ -22,6 +22,12 @@ commit/tree are recorded in that commit's trailer. The drill is documented in
 temporary-directory rehearsal, not a production-host rehearsal; the rest of this
 report still cites the revisions above.
 
+**Coverage superseded (TODO 410):** the load/soak figures below are historical and are
+superseded by the extended TODO 410 soak suite in `scripts/soak.ts` and
+[`soak.md`](./soak.md) (branch `soak-coverage`, rebased onto
+`f1bf4f6b5638d9c9d6175b29c7614fc0d33dff21`; its candidate SHA is pending in the
+checkpoint trailer). The historical numbers were not rewritten.
+
 **Design truth:** `TODO.md` §6 (Phase 8 and the release gate) and §8 (vertical-slice
 measure).
 
