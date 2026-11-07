@@ -3,6 +3,30 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-07 — MCP retries survive a restart as new messages
+
+- **Failure avoided:** Corkboard derives MCP idempotency from the session id, JSON-RPC
+  id, type and project. A restart invalidates the session (old id → 404 `-32001`), so a
+  blind retry of a send that may already have committed arrives as a new request and
+  can create a second message.
+- **Rule:** after any MCP session loss, read state (list) before resending, or send a
+  deliberately distinct intent with its own idempotency semantics; never "retry" an
+  uncertain send by reusing the same request id in a new session.
+- **Prevents:** duplicate committed messages after a restart that the client reports as
+  a clean retry.
+- **Remove when:** MCP idempotency is bound to a client-supplied, session-independent key.
+
+## 2026-11-07 — a 0600 directory is an unreadable evidence set
+
+- **Failure avoided:** the dogfooding evidence directory was created `0600` (no execute
+  bit), so five published transcript files could not be read or stat'ed and the
+  secret-scan and review of exactly those files were impossible.
+- **Rule:** evidence directories are `0700`, files `0600`; after publishing, exercise
+  the published artifacts the way a reviewer will (read them) instead of trusting the
+  producer's scan.
+- **Prevents:** a "verified" evidence bundle with unreadable members.
+- **Remove when:** the harness validates published-artifact readability automatically.
+
 ## 2026-11-07 — an accurate outcome can hide an inaccurate mechanism
 
 - **What happened:** a fix note said malformed UTF-8 was "normalized by the platform
