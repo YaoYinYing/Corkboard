@@ -3,6 +3,19 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-07 — a silent auditor is not a reviewing auditor
+
+- **What happened:** a resumed security auditor went idle for more than thirty minutes
+  with a 1.4 MB transcript, no completion notification, and no verdict. Waiting on it
+  would have stalled the checkpoint indefinitely.
+- **Rule:** treat a long-idle auditor as failed. Ask once for a current verdict, then
+  stop it and hand the exact tree to a fresh context-isolated reviewer; a partial
+  "new assertions are genuine" line is not an audit result and must not be recorded as
+  one. Keep the delta narrow so a replacement audit is cheap.
+- **Prevents:** a checkpoint waiting on a dead process, or a partial message being
+  mistaken for PASS.
+- **Remove when:** the harness reports subagent liveness/terminal states reliably.
+
 ## 2026-11-07 — MCP retries survive a restart as new messages
 
 - **Failure avoided:** Corkboard derives MCP idempotency from the session id, JSON-RPC
