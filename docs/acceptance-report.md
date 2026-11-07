@@ -156,7 +156,7 @@ remain absent or untested.
 | Design tokens, dark mode, focus, 320px, both locales | **Partially verified** | Stylesheet/DOM assertions in `npm run check`; browser evidence at `58e548f` for the token slice. No automated browser matrix is claimed. |
 | CSP, CSRF, XSS, stored injection | **Verified locally** | Integration/security tests; CSP header observed in smoke. |
 | Message-expiry management UI | **Implemented locally (single-body action)** | The timeline can expire one ready body through the existing service, with CSRF and a sanitized audit row; there is no expiry editor, listing, or cleanup UI beyond that action. Browser evidence: `web-ui-evidence-299ff86`, Issue #6. |
-| Receipts UI | **Not implemented** | Receipts are API-only. |
+| Receipts UI | **Verified locally (timeline display)** | The project timeline renders each message's read receipts (count and reader display names) through `listReadReceipts`; `tests/integration/web.test.ts` `timeline is ascending, carries metadata and receipts, omits bodies, and shows tombstones` asserts the "Read by" label and reader name. There is no separate receipt-administration UI and no new browser capture is claimed. |
 | Credential rotation | **Verified locally (CLI and dashboard)** | `rotate-key --credential <id>` and the dashboard inventory's rotate form both call the same atomic service: scopes/grants copied, replacement issued, old row revoked in one transaction, token shown once. `npm run check` integration tests cover old-token rejection, no widening, rollback, sanitized audit, and the dashboard route's authorization/CSRF refusals. A manual CLI smoke was observed during implementation; it is not reproducible from the repository. Per-credential grant add/remove is implemented locally and covered by `npm run check`; no browser capture is claimed for rotation or grants. |
 
 ## External acceptance and deferred work
@@ -174,7 +174,7 @@ remain absent or untested.
 | Disaster rehearsal | **Verified locally (synthetic drill); production-host rehearsal untested** | Automated synthetic drill PASS (84 checks) on the amendment candidate tree; see the §6 row and [`disaster-rehearsal.md`](./disaster-rehearsal.md). No production data, real crash, interrupted migration/upgrade, or offsite key custody was exercised. |
 | TLS deployment | **Untested** | Reverse-proxy example only; no certificate or proxy was exercised. |
 | Multi-process deployment | **Untested** | A local four-process SQLite persistence test exists. Rate limits, metrics, and MCP sessions are process-local; no multi-process deployment was run. |
-| Receipts UI | **Not implemented** | See above. |
+| Receipts UI | **Verified locally (timeline display)** | See the dashboard row above; receipts are displayed per message, with no dedicated administration surface. |
 
 ## Executed evidence for this report
 

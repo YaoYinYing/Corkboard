@@ -3,6 +3,25 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-07 — a negative UI claim can outlive the UI
+
+- **Failure avoided:** `docs/acceptance-report.md` said "Receipts UI — Not implemented;
+  Receipts are API-only" and `docs/runbook.md` said "No receipt UI" long after the
+  project timeline began rendering per-message read receipts (`listReadReceipts` and
+  the `renderTimeline` receipt block in `src/app/web.ts`). A reader would have
+  concluded the capability did not exist, and a checkbox pass could have repeated the
+  false claim.
+- **Reproducer:** `grep -rn "Receipts are API-only\|No receipt UI" docs/` before the
+  fix; `grep -rn "listReadReceipts\|readReceiptsLabel" src/app/web.ts` plus the
+  `tests/integration/web.test.ts` "Read by" assertion show the capability shipped.
+- **Fix:** Correct both current-state claims to describe the timeline display and the
+  absence of a separate receipt-administration UI. Historical slice records stay as
+  records of their time; only current-state claims were rewritten.
+- **Prevents:** A docs-only audit "confirming" a false negative, and users or agents
+  bypassing an existing UI capability because the docs deny it.
+- **Remove when:** Current-state capability claims are generated from the route/feature
+  inventory or a test-linked registry instead of being hand-maintained.
+
 ## 2026-11-07 — a silent auditor is not a reviewing auditor
 
 - **What happened:** a resumed security auditor went idle for more than thirty minutes

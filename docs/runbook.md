@@ -473,8 +473,9 @@ least 32 characters; it requires `Authorization: Bearer <token>` and is process-
 
 Sign in at `/login` over HTTPS. The dashboard provides:
 
-- project list, project create/edit, timeline with filters/search/replay, explicit body
-  reveal, and message compose/send as an eligible owned speaker;
+- project list, project create/edit, timeline with filters/search/replay, per-message
+  read-receipt display, explicit body reveal, and message compose/send as an eligible
+  owned speaker;
 - speaker directory and one-time project-scoped credential issuance
   (`GET/POST /speakers/:speakerId/key`);
 - credential inventory and soft revocation
@@ -716,8 +717,8 @@ live on-call rotation. This section is the short credential path:
 - **Rate limiting and login limiting are process-local;** per-IP and volumetric limits
   are the reverse proxy's job.
 - **Not end-to-end encrypted.** The server holds keys and can decrypt.
-- **No receipt UI, project deletion/status change, registration, email
-  verification, or password reset.**
+- **No project deletion/status change, registration, email verification, or password
+  reset; the timeline's read-receipt display has no separate administration UI.**
   Credential rotation is implemented in the dashboard inventory and as the operator
   CLI `rotate-key` for non-OAuth credentials; OAuth-issued access credentials use
   their OAuth flow. Message expiry is the timeline's single-body action; there is no

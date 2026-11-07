@@ -167,6 +167,69 @@ GitHub API calls failed with TLS handshake timeouts. No CI success is claimed fo
 
 Do not treat later phases as verified until their checkpoints exist.
 
+## TODO reconciliation (2026-11-07) — checkbox audit and stale receipt claims
+
+Docs-only slice on branch `todo-reconcile`, based on
+`264fb29d85d0805030b6646d7373d68079f3ec12`. No application, test, dependency, or
+workflow file changed. No independent audit is claimed for this candidate.
+
+**Checked (1 TODO box).** `335` (private opaque blob storage): evidence class
+source + tests + prior checkpoint. `src/storage/blobs/local.ts` creates a `0700`
+directory and `0600` temp file with an atomic rename, `src/storage/blobs.ts` validates
+opaque keys, and no blob/fileserver route exists;
+`tests/security/filesystem-permissions.test.ts` covers modes/symlinks and
+`tests/integration/cli.test.ts` sends and decrypts a body through `LocalBlobStore`.
+Scope caveat recorded in `TODO.md`: local adapter only; no R2.
+
+**Left unchecked (31 boxes).** A short reason is appended to every unchecked item in
+`TODO.md`. Groups and the missing clause:
+
+- D1/Workers/R2 absent or unexecuted: 317, 318, 322, 325, 362, 368, 482, 485. 317 has
+  all listed tables plus WAL/foreign keys but D1 compatibility is asserted, not run
+  (`tests/contract/storage.test.ts` skips D1); 322 also lacks orphan-blob garbage
+  collection (`doctor` only reports `BLOB_ORPHANED`).
+- ChatGPT Web absent or untested: 378, 379, 380, 384.
+- Attachments/registration absent: 336, 346.
+- No staging or production environment (separate deployment secrets are policy only):
+  311.
+- Root-key/pepper rotation and deletion behavior absent: 333.
+- Emergency project-disable absent: 347.
+- Hard impersonation boundary absent: 351 (no credential broker or OS-level
+  separation; the documented threat limitation stands).
+- Project deletion absent and operator `prune` writes no audit event: 349.
+- Service overview lacks per-tenant traffic/error summaries and admin operations: 393.
+- P2 optional features absent: 401–405 (405 is a standing constraint, deliberately
+  open).
+- Process/audit items not satisfied for this candidate: 452, 453, 486.
+- Deliberate design divergence recorded rather than weakening the item: 332 (the
+  plaintext digest is sealed inside the CBPT1 payload and the AAD binds only
+  pre-decryption metadata, per §2/§4).
+- 337 is implemented for text bodies but the "previously compressed files" clause
+  needs an attachment/file path (same conclusion as the 2026-11-06 pass).
+- 369 has a complete local Compose installation but no Worker deploy docs.
+
+**Stale current-state claims corrected.** `docs/acceptance-report.md` had two
+"Receipts UI — Not implemented / Receipts are API-only" rows, and `docs/runbook.md`
+said "No receipt UI". The project timeline has rendered per-message read receipts
+through `listReadReceipts` (`src/app/web.ts`, `renderTimeline`) and
+`tests/integration/web.test.ts` (`timeline is ascending, carries metadata and
+receipts, omits bodies, and shows tombstones`) asserts the "Read by" label and reader
+display name. Both files now state the implemented timeline display and the absence of
+a separate receipt-administration UI. Historical slice records above were not
+rewritten.
+
+**Commands run (isolated worktree; `npm ci --ignore-scripts` was needed to install the
+lockfile first).**
+
+- `npm run check` — exit 0; secret scan, history scan over 187 commits, license
+  report, strict typecheck, and tests. **711 tests: 710 pass, 0 fail, 1 skipped**
+  (live-D1 contract skip).
+- `npm run build` — exit 0.
+
+`Base-SHA: 264fb29d85d0805030b6646d7373d68079f3ec12`. `Candidate-SHA: pending` (the
+commit that contains this record). `Tests: npm run check` (711 tests: 710 pass, 1
+skipped); `npm run build` exit 0. `Independent-review: NOT CLAIMED`.
+
 ## Environment
 
 - Node.js 24.22.1 (LTS line), npm 11.19.1, `.nvmrc` = 24.
