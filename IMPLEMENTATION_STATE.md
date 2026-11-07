@@ -2557,8 +2557,12 @@ license report 98 dependencies, 0 flagged; strict typecheck; **705 tests: 704 pa
 
 Limitations: the control is on the timeline only; the standalone body-reveal page
 remains read-only. There is no expiry-timestamp editor, no expiry listing beyond the
-per-message state, and no dashboard cleanup worker. No real-browser pass was performed
-for this action.
+per-message state, and no dashboard cleanup worker. Real-browser acceptance was
+performed at `299ff86` (Issue #6 comment, prerelease `web-ui-evidence-299ff86`): Chrome
+156 via Playwright on desktop 1440×900 and mobile 390×844, a real click that expired
+one body and left the other ready, and a read-only member whose rendered page contains
+no expiry control; 30/30 DOM assertions passed, with the 303 response, `body_state`
+transition, and single sanitized audit row recorded alongside the images.
 
 ### Independent audits (final)
 
