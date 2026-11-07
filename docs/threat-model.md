@@ -253,13 +253,16 @@ write.
   database row, or log. Reopening the directory or form never shows it. A re-submitted
   POST is a fresh credential, not recovery of the old one. Dashboard credential
   inventory, soft revocation, and one-project-at-a-time grant add/remove are available
-  for owned speakers. Credential rotation is **CLI-only and atomic**: `rotate-key`
-  copies the old scopes and grants, writes the replacement, and revokes the old row in
-  one transaction. The dashboard has no rotation view, so its replacement path remains
-  revoke-then-issue. Per-credential expiry selection exists only as the CLI
-  `issue-key --expires-at`/`rotate-key --expires-at` options at issuance/rotation;
-  there is no dashboard expiry editor, and message-expiry management is unimplemented
-  (the compose form's optional body-expiry field is the only expiry UI). Grant adds are
+  for owned speakers. Credential rotation is **atomic** in the operator CLI
+  `rotate-key` and in the dashboard inventory, which share one service that copies the
+  old scopes and grants, writes the replacement, and revokes the old row in one
+  transaction. The dashboard inventory offers the same atomic rotation through a
+  CSRF-protected form whose response shows the replacement token once; OAuth-issued
+  access credentials are excluded and keep their OAuth flow. Per-credential expiry
+  selection exists only as the CLI `issue-key --expires-at`/`rotate-key --expires-at`
+  options at issuance/rotation; there is no dashboard expiry editor, and message
+  expiry is limited to the timeline's single ready-body action (the compose form's
+  optional body-expiry field is the only other expiry input). Grant adds are
   limited to active credentials of active speakers and only to projects with an active
   speaker membership the account can read; every ineligible target is the uniform
   `404`, and an existing grant is an idempotent no-op. A missing removal returns the

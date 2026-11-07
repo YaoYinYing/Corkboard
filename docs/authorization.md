@@ -261,7 +261,7 @@ the action. Auth is required for every row unless stated.
 | List owned speakers | Yes | — | Active account; lists all owned speakers, including inactive |
 | Issue credential; add/remove credential grant | Yes | — | Owned active speaker + active account; issuance/grant predicates above (add also needs account read) |
 | List/revoke credentials | Yes | — | Owned speaker (any status) + active account; credential must belong to the path speaker |
-| Rotate credential | — | — | Host operator CLI only; non-OAuth credentials only |
+| Rotate credential | Yes | — | Owned active speaker + active account, credential of the path speaker, active non-OAuth only; ownership re-checked inside the transaction |
 | OAuth register/authorize/consent/token | Yes, for authorize/consent | Token/revoke use OAuth artifacts | Public registration; session for consent; re-checked at exchange |
 | REST/MCP message and project APIs | — | Yes | Bearer predicate; MCP exposes six tools over the same service |
 | `/metrics` | — | — | Operator shared token `CORKBOARD_METRICS_TOKEN`; otherwise indistinguishable `404` |

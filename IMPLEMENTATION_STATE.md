@@ -2580,6 +2580,60 @@ transition, and single sanitized audit row recorded alongside the images.
   705 tests: 704 pass, 1 skipped D1 contract, 0 fail; `web.test.ts` 38 pass;
   `npm run build` exit 0).
 
+## Dashboard credential rotation (branch `dashboard-rotate`, base `b699fb3`)
+
+Scope: expose the existing atomic rotation capability in the dashboard inventory.
+`rotateSpeakerCredential` already backed `rotate-key`; this slice adds the
+CSRF-protected form and its POST route and adds an optional `expectedOwnerAccountId`
+ownership re-check to the service (scopes and capability model unchanged).
+
+- The inventory renders a rotate form only for an **active**, non-OAuth credential of an
+  **active owned** speaker. Revoked, expired, unparseable-expiry, inactive-speaker, and
+  OAuth-issued credentials stay read-only with no form and answer the uniform 404 on
+  POST.
+- `POST /speakers/:speakerId/credentials/:credentialId/rotate` authenticates the
+  session, loads the account-owned speaker inventory **before** parsing the form,
+  requires the credential id to be present in that speaker's inventory with active
+  state and a non-OAuth credential, then applies the shared double-submit and
+  fetch-metadata CSRF checks and calls `rotateSpeakerCredential` with the session
+  account as `expectedOwnerAccountId`. The service re-checks that ownership inside the
+  `BEGIN IMMEDIATE` transaction; a speaker that changes hands between the inventory
+  read and the write is `NOT_FOUND`, so the displaced owner cannot mint a token.
+- The response reuses the issuance page's show-once pattern: the replacement token
+  appears once in a `no-store` `200`, with a notice that the old credential is revoked
+  and the token will not be shown again. The token is never placed in the URL, a
+  redirect, a cookie, the audit row, or a log.
+- The service's single sanitized `credential.rotate` audit row is the only audit write;
+  scopes, grants, and the exact prior `expires_at` (including `NULL`) are preserved.
+
+Tests use the real `createApp` and SQLite fixture: form eligibility and count, success
+with the old token rejected and the new token working, expiry/grants preserved, exactly
+one sanitized audit row, repeat submission refused, revoked/expired/unparseable/
+inactive-speaker/OAuth credentials read-only and `404` on POST, foreign/removed-owner/
+unknown ids the uniform 404, missing/wrong CSRF plus cross-origin refused with no
+rotation, and an ownership transfer forced immediately before the write transaction
+(yields `404` with no new credential, no revocation, and no audit row). An inactive
+account invalidates the session and redirects to `/login`, matching other dashboard
+writes.
+
+Documentation reconciliation in the same change: `docs/web-ui.md` gains the rotation
+section, and current-state claims in `README.md`, `docs/api.md`, `docs/runbook.md`,
+`docs/threat-model.md`, `docs/security-operations.md`, `docs/authorization.md`,
+`docs/docker.md`, and `docs/acceptance-report.md` that said the dashboard had no
+rotation view (and that
+message-expiry management was unimplemented) were corrected to the implemented
+behavior. Historical slice rows are left as records of their time.
+
+Commands: `npm run check` exit 0 (secret scan, history scan over 184 commits, license
+report, strict typecheck; **711 tests: 710 pass, 0 fail, 1 skipped D1 contract**) and
+`npm run build` exit 0; the touched suite `tests/integration/speakers-web.test.ts` is
+41 pass.
+
+Limitations: no per-credential expiry selection in the UI (rotation preserves the
+existing expiry); no browser capture for the rotation form; OAuth-issued credentials
+are deliberately excluded because the service rejects them; role separation remains
+account ownership rather than a separate administrator role.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -2948,9 +3002,9 @@ Do not infer any of these from local MCP behavior or from another plan.
   unbounded (no pagination) and lists every ordinary credential, including
   OAuth-issued access credentials; revocation blocks their refresh through the
   credential's `revoked_at` but does not delete `oauth_refresh_tokens` rows (the
-  operator `prune` handles them later). Dashboard rotation, dashboard expiry
-  selection, and bulk revocation remain unimplemented; atomic credential rotation
-  exists as the operator CLI `rotate-key`, and per-credential expiry selection is
+  operator `prune` handles them later). Dashboard expiry selection and bulk
+  revocation remain unimplemented; dashboard rotation and the operator CLI
+  `rotate-key` share one atomic service, and per-credential expiry selection is
   CLI-only. Per-credential grant add/remove is
   implemented (slice AF) and inherits the read-inside-transaction D1 debt below. The `credential.revoke` audit row is
   written after the revocation transaction commits and is fail-open, so a crash or

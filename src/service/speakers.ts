@@ -382,6 +382,13 @@ export interface RotateCredentialInput {
    * value to move a near-expiry credential.
    */
   expiresAt?: string | undefined;
+  /**
+   * Dashboard callers pass the authenticated session account. When set, the
+   * rotation transaction fails closed unless the speaker is still owned by that
+   * account, closing the gap between an inventory read and the write. The
+   * operator CLI omits it and keeps its documented any-owner behavior.
+   */
+  expectedOwnerAccountId?: string | undefined;
 }
 
 export interface RotatedCredential {
@@ -480,6 +487,15 @@ export async function rotateSpeakerCredential(
     }
     if (source.owner_account_id === null || source.account_status !== "active") {
       throw new Error(`owner account is not active: ${source.speaker_id}`);
+    }
+    // Re-check ownership inside the write transaction: a dashboard request that
+    // resolved its inventory before the body read must not rotate a credential
+    // after the speaker changed hands.
+    if (
+      input.expectedOwnerAccountId !== undefined &&
+      source.owner_account_id !== input.expectedOwnerAccountId
+    ) {
+      throw new AppError("NOT_FOUND");
     }
 
     // Keep the old expiry policy unless the operator explicitly overrides it.

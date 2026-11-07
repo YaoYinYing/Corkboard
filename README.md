@@ -26,11 +26,11 @@ body reveal, dashboard message send as a selected owned speaker, English and
 Simplified Chinese), and an **OAuth 2.1
 authorization-server core** (dynamic public clients, PKCE, consent, rotating refresh
 tokens, revocation) are implemented and tested locally. Cloudflare Workers/D1/R2, the
-ChatGPT Web plugin installation/linking experience, and the remaining dashboard
-administration (message-expiry management) remain planned;
-dashboard credential inventory and soft revocation are implemented locally, and the
-operator CLI `rotate-key` performs atomic credential rotation for non-OAuth
-credentials (the dashboard has no rotation view; OAuth clients use their OAuth flow).
+ChatGPT Web plugin installation/linking experience, and per-message hard deletion
+remain planned; dashboard credential inventory, soft revocation, atomic rotation (the
+same non-OAuth service as the operator CLI `rotate-key`), and a single-body
+message-expiry action are implemented locally (OAuth clients keep their OAuth flow,
+and there is no expiry editor, listing, or cleanup UI).
 Only capabilities
 marked *implemented* in
 [`IMPLEMENTATION_STATE.md`](IMPLEMENTATION_STATE.md) exist; the OAuth core does not
@@ -90,10 +90,10 @@ membership editor, an authorized read-only service overview, the message timelin
 compose-and-send as one of the account's owned speakers with `message.send`,
 explicit body reveal, and English or
 Simplified Chinese (`?lang=zh`). Read state remains read-only; the compose form can
-set an optional body-expiry timestamp, but there is no expiry management or cleanup
-UI, no dashboard credential rotation (the operator CLI `rotate-key` rotates
-non-OAuth credentials atomically; OAuth clients use their OAuth flow), and no
-admin action. See
+set an optional body-expiry timestamp and the timeline can expire one ready body, but
+there is no expiry editor, listing, or cleanup UI. The credential inventory rotates a
+non-OAuth credential atomically (the same service as the operator CLI `rotate-key`;
+OAuth clients use their OAuth flow). There is no admin action. See
 [`docs/web-ui.md`](docs/web-ui.md) for the authorization model, CSP, accessibility,
 and limitations.
 

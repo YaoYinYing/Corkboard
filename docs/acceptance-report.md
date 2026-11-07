@@ -155,9 +155,9 @@ remain absent or untested.
 | Service overview | **Verified externally + locally** | Integration tests in `npm run check`; real-browser capture at `2a17a75` (Issue #6 comment `6670317820`, captures 8/9/16/22/25 and five overview-named assets, including `2a17a75-desktop-en-dark-overview.png` and `2a17a75-desktop-en-overview-full.png`). |
 | Design tokens, dark mode, focus, 320px, both locales | **Partially verified** | Stylesheet/DOM assertions in `npm run check`; browser evidence at `58e548f` for the token slice. No automated browser matrix is claimed. |
 | CSP, CSRF, XSS, stored injection | **Verified locally** | Integration/security tests; CSP header observed in smoke. |
-| Message-expiry management UI | **Not implemented** | Only the compose form's optional `body_expires_at` field exists. |
+| Message-expiry management UI | **Implemented locally (single-body action)** | The timeline can expire one ready body through the existing service, with CSRF and a sanitized audit row; there is no expiry editor, listing, or cleanup UI beyond that action. Browser evidence: `web-ui-evidence-299ff86`, Issue #6. |
 | Receipts UI | **Not implemented** | Receipts are API-only. |
-| Credential rotation | **CLI verified locally; no dashboard UI** | `rotate-key --credential <id>` atomically copies scopes/grants, issues a replacement, and revokes the old row in one transaction; `npm run check` integration tests cover old-token rejection, no widening, rollback, and sanitized audit. A manual CLI smoke was observed during implementation; it is not reproducible from the repository. The dashboard still has no rotation view (revoke-then-issue remains that path). Per-credential grant add/remove is implemented locally and covered by `npm run check`; no browser capture is claimed for it. |
+| Credential rotation | **Verified locally (CLI and dashboard)** | `rotate-key --credential <id>` and the dashboard inventory's rotate form both call the same atomic service: scopes/grants copied, replacement issued, old row revoked in one transaction, token shown once. `npm run check` integration tests cover old-token rejection, no widening, rollback, sanitized audit, and the dashboard route's authorization/CSRF refusals. A manual CLI smoke was observed during implementation; it is not reproducible from the repository. Per-credential grant add/remove is implemented locally and covered by `npm run check`; no browser capture is claimed for rotation or grants. |
 
 ## External acceptance and deferred work
 
@@ -169,12 +169,12 @@ remain absent or untested.
 | ChatGPT write-tool support by plan/workspace | **Untested external acceptance** | Must be tested on the intended subscription/workspace; a read-only or manual fallback would have to be documented if unavailable. |
 | Attachments (≤10 MiB, upload/scan/preview) | **Not implemented** | Blocked on Issue #5; text bodies only. The backup 16 KiB blob cap is sized for the 8 KiB text body. |
 | Key rotation (root key / pepper) | **Not implemented** | One root-key version `v1`; rotation requires re-encryption. Pepper rotation invalidates existing verifiers. |
-| Credential rotation | **Verified locally (CLI); no dashboard UI** | `rotate-key` provides atomic replacement with identical scopes/grants and old-row revocation; covered by `npm run check` integration tests (old 401, new accepted, ungranted project still denied, no secrets in logs/audit). A manual CLI smoke was observed during implementation; it is not reproducible from the repository. Dashboard grant add/remove for active credentials of active speakers is implemented (see `web-ui.md`); a rotation view is not. |
+| Credential rotation | **Verified locally (CLI and dashboard)** | `rotate-key` and the dashboard rotate form provide atomic replacement with identical scopes/grants and old-row revocation; covered by `npm run check` integration tests (old 401, new accepted, ungranted project still denied, no secrets in logs/audit, dashboard CSRF/authorization refusals). A manual CLI smoke was observed during implementation; it is not reproducible from the repository. Dashboard grant add/remove and rotation for active credentials of active speakers are implemented (see `web-ui.md`); no browser capture is claimed. |
 | Load/soak | **Verified locally (implemented scope)** | `npm run soak -- --profile quick` exit 0 on the dirty candidate tree based on `a530693` (see [`soak.md`](./soak.md)): 319 requests, 261 messages, 0 integrity/5xx/network failures. Slow uploads, 10 MiB attachments, quotas, D1/R2, TLS and multi-process remain uncovered; see [`soak.md`](./soak.md). |
 | Disaster rehearsal | **Verified locally (synthetic drill); production-host rehearsal untested** | Automated synthetic drill PASS (84 checks) on the amendment candidate tree; see the §6 row and [`disaster-rehearsal.md`](./disaster-rehearsal.md). No production data, real crash, interrupted migration/upgrade, or offsite key custody was exercised. |
 | TLS deployment | **Untested** | Reverse-proxy example only; no certificate or proxy was exercised. |
 | Multi-process deployment | **Untested** | A local four-process SQLite persistence test exists. Rate limits, metrics, and MCP sessions are process-local; no multi-process deployment was run. |
-| Receipts UI, message-expiry management | **Not implemented** | See above. |
+| Receipts UI | **Not implemented** | See above. |
 
 ## Executed evidence for this report
 
@@ -217,7 +217,7 @@ this report does not cite one.
   multi-process/D1 deployments (the bounded `quick` scope is in [`soak.md`](./soak.md));
   a disaster rehearsal with recreated keys and backups; and a real TLS reverse-proxy
   deployment.
-- Root-key/pepper (service-key) rotation; speaker credential rotation is now
-  implemented as the CLI `rotate-key` (no dashboard UI).
+- Root-key/pepper (service-key) rotation; speaker credential rotation is implemented
+  as the CLI `rotate-key` and in the dashboard credential inventory.
 - Browser re-capture of the dashboard after any future UI change. Until then, the
   `2a17a75` artifact is the last browser evidence; `7812505` is behavior-only.

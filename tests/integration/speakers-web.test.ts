@@ -11,6 +11,7 @@ import { hashPassword } from "../../src/auth/password.ts";
 import { SCOPES } from "../../src/domain/authz.ts";
 import { AppError } from "../../src/domain/errors.ts";
 import { authorizeProject, sessionAccountPrincipal } from "../../src/service/auth.ts";
+import { OAUTH_ACCESS_PREFIX } from "../../src/service/oauth.ts";
 import {
   grantOwnedSpeakerCredentialProject,
   issueProjectCredential,
@@ -1402,6 +1403,439 @@ test("ownership transfer between inventory reads yields no foreign rows", async 
   assert.deepEqual(
     newOwner.credentials.map((row) => row.id),
     [credential.credentialId],
+  );
+});
+
+test("the credential inventory renders one rotate form only for activatable credentials", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const active = await fx.addCredential({ speakerId: "spk_a" });
+  const revoked = await fx.addCredential({
+    speakerId: "spk_a",
+    revokedAt: new Date("2026-11-02T12:00:00.000Z"),
+  });
+  const expired = await fx.addCredential({
+    speakerId: "spk_a",
+    expiresAt: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  const unknown = await fx.addCredential({ speakerId: "spk_a" });
+  await fx.db.run("UPDATE credentials SET expires_at = ? WHERE id = ?", [
+    "not-a-date",
+    unknown.credentialId,
+  ]);
+  // OAuth access credentials are managed by their client and cannot be rotated
+  // through this surface; the prefix is the service's OAuth marker.
+  const oauth = await fx.addCredential({ speakerId: "spk_a" });
+  await fx.db.run("UPDATE credentials SET public_prefix = ? WHERE id = ?", [
+    `${OAUTH_ACCESS_PREFIX}synthetic`,
+    oauth.credentialId,
+  ]);
+  await fx.addSpeaker("spk_inactive", "acct_a", "inactive");
+  const inactive = await fx.addCredential({ speakerId: "spk_inactive" });
+
+  const { cookie } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const page = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.equal(page.status, 200);
+  assert.equal(
+    page.html.split(`action="/speakers/spk_a/credentials/${active.credentialId}/rotate"`).length - 1,
+    1,
+  );
+  // Exactly one rotate form on the page, carrying the session CSRF field.
+  assert.equal(page.html.match(/\/credentials\/[^"]+\/rotate/g)?.length, 1);
+  assert.ok(page.html.includes("Rotate credential"));
+  for (const credential of [revoked, expired, unknown, oauth]) {
+    assert.equal(
+      page.html.includes(`/credentials/${credential.credentialId}/rotate`),
+      false,
+      credential.credentialId,
+    );
+  }
+
+  const inactivePage = await getPage(app, "/speakers/spk_inactive/credentials", cookie);
+  assert.equal(inactivePage.status, 200);
+  assert.equal(
+    inactivePage.html.includes(`/credentials/${inactive.credentialId}/rotate`),
+    false,
+  );
+});
+
+test("a speaker that changes hands between inventory and write cannot be rotated", async (t) => {
+  const { fx } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read"],
+  });
+  const before = await credentialCount(fx);
+
+  // Login through the normal app, then POST through an app whose database
+  // transfers ownership immediately before the rotation transaction runs. This
+  // models a transfer that lands after the handler resolved its inventory but
+  // before the atomic write, which is the window the service must close.
+  const loginApp = createApp(fx.deps, { loginRateLimit: { perMinute: 600, burst: 100 } });
+  const { cookie, csrf } = await loginAsWithCsrf(loginApp, "a@example.test", "account a secret");
+  const racingDb = new Proxy(fx.db, {
+    get(target, property, receiver) {
+      if (property === "transaction") {
+        return async (fn: Parameters<SqlDatabase["transaction"]>[0]) => {
+          await target.run("UPDATE speakers SET owner_account_id = ? WHERE id = ?", [
+            "acct_d",
+            "spk_a",
+          ]);
+          return target.transaction(fn);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as SqlDatabase;
+  const racingApp = createApp(
+    { ...fx.deps, db: racingDb },
+    { loginRateLimit: { perMinute: 600, burst: 100 } },
+  );
+
+  const response = await postFormMulti(
+    racingApp,
+    `/speakers/spk_a/credentials/${credential.credentialId}/rotate`,
+    cookie,
+    [["csrf_token", csrf]],
+  );
+  assert.equal(response.status, 404);
+  assert.equal(await credentialCount(fx), before);
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(row?.revoked_at, null);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'credential.rotate'")).length,
+    0,
+  );
+});
+
+test("credential rotation shows the replacement once, revokes the old token, and preserves expiry", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const expiresAt = new Date("2027-01-01T00:00:00.000Z");
+  const old = await fx.addCredential({
+    speakerId: "spk_a",
+    scopes: ["project.read", "message.read"],
+    expiresAt,
+  });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const path = `/speakers/spk_a/credentials/${old.credentialId}/rotate`;
+
+  const response = await postFormMulti(app, path, cookie, [["csrf_token", csrf]]);
+  assert.equal(response.status, 200);
+  assertHardened(response);
+  const html = await response.text();
+  const replacementToken = html.match(TOKEN_RE)?.[0];
+  assert.ok(replacementToken, "the POST response must show the replacement once");
+  assert.notEqual(replacementToken, old.token);
+  assert.equal(html.split(replacementToken).length - 1, 1);
+  assert.equal(html.includes(old.token), false);
+  assert.ok(
+    html.includes("The previous credential is now revoked and can no longer authenticate."),
+  );
+  assert.ok(html.includes("It is shown only once and cannot be recovered."));
+  // The token never appears in the URL or response headers.
+  for (const [name, value] of response.headers) {
+    assert.equal(value.includes(replacementToken), false, name);
+  }
+
+  const oldRow = await fx.db.first<{ revoked_at: string | null; expires_at: string | null }>(
+    "SELECT revoked_at, expires_at FROM credentials WHERE id = ?",
+    [old.credentialId],
+  );
+  assert.notEqual(oldRow?.revoked_at, null);
+  assert.equal(oldRow?.expires_at, expiresAt.toISOString());
+
+  const replacement = await fx.db.first<{
+    id: string;
+    expires_at: string | null;
+    revoked_at: string | null;
+    scope_json: string;
+    speaker_id: string;
+  }>(
+    `SELECT id, expires_at, revoked_at, scope_json, speaker_id
+       FROM credentials WHERE speaker_id = ? AND revoked_at IS NULL`,
+    ["spk_a"],
+  );
+  assert.ok(replacement);
+  assert.notEqual(replacement.id, old.credentialId);
+  assert.equal(replacement.revoked_at, null);
+  assert.equal(replacement.speaker_id, "spk_a");
+  // The exact old expiry is preserved, not extended or shortened.
+  assert.equal(replacement.expires_at, expiresAt.toISOString());
+  assert.deepEqual(JSON.parse(replacement.scope_json), ["project.read", "message.read"]);
+
+  const grantsFor = (credentialId: string): Promise<Array<{ project_id: string }>> =>
+    fx.db.all<{ project_id: string }>(
+      `SELECT project_id FROM credential_project_grants
+        WHERE credential_id = ? ORDER BY project_id ASC`,
+      [credentialId],
+    );
+  assert.deepEqual(
+    (await grantsFor(replacement.id)).map((row) => row.project_id),
+    (await grantsFor(old.credentialId)).map((row) => row.project_id),
+  );
+  assert.deepEqual(
+    (await grantsFor(replacement.id)).map((row) => row.project_id).sort(),
+    ["proj_a", "proj_b"],
+  );
+
+  // The old token is dead immediately; the replacement is a working credential.
+  await assert.rejects(
+    fx.authenticate(old.token),
+    (error: unknown) => error instanceof AppError && error.code === "UNAUTHENTICATED",
+  );
+  const principal = await fx.authenticate(replacementToken);
+  assert.equal(principal.speakerId, "spk_a");
+
+  // Exactly the service's sanitized audit row: no token, prefix, or verifier.
+  const audits = await fx.db.all<{ detail: string | null }>(
+    "SELECT detail FROM audit_events WHERE operation = 'credential.rotate'",
+  );
+  assert.equal(audits.length, 1);
+  const detail = JSON.parse(audits[0]?.detail ?? "{}") as {
+    credential_id: string;
+    new_credential_id: string;
+    projects: string[];
+    project_count: number;
+    scopes: string[];
+    expires_at: string | null;
+  };
+  assert.equal(detail.credential_id, old.credentialId);
+  assert.equal(detail.new_credential_id, replacement.id);
+  assert.deepEqual([...detail.projects].sort(), ["proj_a", "proj_b"]);
+  assert.equal(detail.project_count, 2);
+  assert.deepEqual([...detail.scopes].sort(), ["message.read", "project.read"]);
+  assert.equal(detail.expires_at, expiresAt.toISOString());
+  const auditText = JSON.stringify(audits);
+  const stored = await fx.db.first<{ public_prefix: string; secret_verifier: string }>(
+    "SELECT public_prefix, secret_verifier FROM credentials WHERE id = ?",
+    [replacement.id],
+  );
+  assert.ok(stored);
+  for (const secret of [
+    old.token,
+    replacementToken,
+    stored.public_prefix,
+    stored.secret_verifier,
+  ]) {
+    assert.equal(auditText.includes(secret), false);
+  }
+
+  // A repeat submission targets the now-revoked credential: uniform 404 with no
+  // extra credential or audit row.
+  const repeated = await postFormMulti(app, path, cookie, [["csrf_token", csrf]]);
+  assert.equal(repeated.status, 404);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM credentials WHERE speaker_id = ?", ["spk_a"])).length,
+    2,
+  );
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'credential.rotate'")).length,
+    1,
+  );
+});
+
+test("non-activatable credentials show no rotate form and their POST is not-found", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const revoked = await fx.addCredential({
+    speakerId: "spk_a",
+    revokedAt: new Date("2026-11-02T12:00:00.000Z"),
+  });
+  const expired = await fx.addCredential({
+    speakerId: "spk_a",
+    expiresAt: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  const unknown = await fx.addCredential({ speakerId: "spk_a" });
+  await fx.db.run("UPDATE credentials SET expires_at = ? WHERE id = ?", [
+    "not-a-date",
+    unknown.credentialId,
+  ]);
+  await fx.addSpeaker("spk_inactive", "acct_a", "inactive");
+  const inactive = await fx.addCredential({ speakerId: "spk_inactive" });
+  // An OAuth-issued credential is rejected on POST too, not only in rendering.
+  const oauth = await fx.addCredential({ speakerId: "spk_a" });
+  await fx.db.run("UPDATE credentials SET public_prefix = ? WHERE id = ?", [
+    `${OAUTH_ACCESS_PREFIX}synthetic`,
+    oauth.credentialId,
+  ]);
+  const before = await credentialCount(fx);
+
+  const cases = [
+    {
+      path: `/speakers/spk_a/credentials/${revoked.credentialId}/rotate`,
+      id: revoked.credentialId,
+      revokedAt: "2026-11-02T12:00:00.000Z",
+    },
+    {
+      path: `/speakers/spk_a/credentials/${expired.credentialId}/rotate`,
+      id: expired.credentialId,
+      revokedAt: null,
+    },
+    {
+      path: `/speakers/spk_a/credentials/${unknown.credentialId}/rotate`,
+      id: unknown.credentialId,
+      revokedAt: null,
+    },
+    {
+      path: `/speakers/spk_inactive/credentials/${inactive.credentialId}/rotate`,
+      id: inactive.credentialId,
+      revokedAt: null,
+    },
+    {
+      path: `/speakers/spk_a/credentials/${oauth.credentialId}/rotate`,
+      id: oauth.credentialId,
+      revokedAt: null,
+    },
+  ];
+  for (const testCase of cases) {
+    const response = await postFormMulti(app, testCase.path, cookie, [["csrf_token", csrf]]);
+    assert.equal(response.status, 404, testCase.id);
+    const row = await fx.db.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ?",
+      [testCase.id],
+    );
+    assert.equal(row?.revoked_at, testCase.revokedAt, testCase.id);
+  }
+  assert.equal(await credentialCount(fx), before);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'credential.rotate'")).length,
+    0,
+  );
+
+  // An inactive account invalidates the session, matching every other dashboard
+  // write route: the request is redirected to login and writes nothing.
+  await fx.db.run("UPDATE accounts SET status = 'inactive' WHERE id = ?", ["acct_a"]);
+  const active = await fx.addCredential({ speakerId: "spk_a" });
+  const inactiveAccount = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${active.credentialId}/rotate`,
+    cookie,
+    [["csrf_token", csrf]],
+  );
+  assert.equal(inactiveAccount.status, 303);
+  assert.ok(inactiveAccount.headers.get("location")?.startsWith("/login?return_to="));
+});
+
+test("foreign, removed-owner, and unknown rotation targets are the uniform 404", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const aCred = await fx.addCredential({ speakerId: "spk_a" });
+  const bCred = await fx.addCredential({ speakerId: "spk_b" });
+  const dCred = await fx.addCredential({ speakerId: "spk_d" });
+  const owner = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const before = await credentialCount(fx);
+
+  const bodies: string[] = [];
+  for (const path of [
+    `/speakers/spk_d/credentials/${dCred.credentialId}/rotate`,
+    `/speakers/spk_a/credentials/${bCred.credentialId}/rotate`,
+    `/speakers/spk_a/credentials/${dCred.credentialId}/rotate`,
+    `/speakers/spk_a/credentials/cred_missing/rotate`,
+    `/speakers/spk_missing/credentials/${aCred.credentialId}/rotate`,
+  ]) {
+    const response = await postFormMulti(app, path, owner.cookie, [
+      ["csrf_token", owner.csrf],
+    ]);
+    assert.equal(response.status, 404, path);
+    bodies.push(await response.text());
+  }
+  // Identical main content: a forbidden and an unknown target are
+  // indistinguishable. (The language switcher echoes the requested path.)
+  const mains = bodies.map((body) => body.match(/<main[\s\S]*<\/main>/)?.[0]);
+  for (const main of mains) assert.equal(main, mains[0]);
+
+  for (const credential of [aCred, bCred, dCred]) {
+    const row = await fx.db.first<{ revoked_at: string | null }>(
+      "SELECT revoked_at FROM credentials WHERE id = ?",
+      [credential.credentialId],
+    );
+    assert.equal(row?.revoked_at, null, credential.credentialId);
+  }
+
+  // Ownership transferred away after sign-in makes the speaker NOT_FOUND.
+  await fx.db.run("UPDATE speakers SET owner_account_id = ? WHERE id = ?", [
+    "acct_d",
+    "spk_a",
+  ]);
+  const removed = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${aCred.credentialId}/rotate`,
+    owner.cookie,
+    [["csrf_token", owner.csrf]],
+  );
+  assert.equal(removed.status, 404);
+  assert.equal(await credentialCount(fx), before);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'credential.rotate'")).length,
+    0,
+  );
+});
+
+test("credential rotation requires the session double-submit CSRF check", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const credential = await fx.addCredential({ speakerId: "spk_a" });
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const sessionOnly = cookie.split("; ")[0];
+  const path = `/speakers/spk_a/credentials/${credential.credentialId}/rotate`;
+
+  const attempts: Array<{
+    name: string;
+    fields: Array<[string, string]>;
+    useCookie: string | undefined;
+  }> = [
+    { name: "missing", fields: [], useCookie: cookie },
+    { name: "wrong", fields: [["csrf_token", "A".repeat(43)]], useCookie: cookie },
+    {
+      name: "duplicate",
+      fields: [
+        ["csrf_token", csrf],
+        ["csrf_token", csrf],
+      ],
+      useCookie: cookie,
+    },
+    { name: "no cookie", fields: [["csrf_token", csrf]], useCookie: sessionOnly },
+  ];
+  for (const attempt of attempts) {
+    const response = await postFormMulti(app, path, attempt.useCookie, attempt.fields);
+    assert.equal(response.status, 400, attempt.name);
+    assert.ok((await response.text()).includes("The form expired."), attempt.name);
+  }
+
+  for (const headers of [
+    { origin: "https://evil.example" },
+    { "sec-fetch-site": "cross-site" },
+    { "sec-fetch-site": "same-site" },
+  ]) {
+    const response = await call(app, path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie,
+        ...headers,
+      },
+      body: new URLSearchParams({ csrf_token: csrf }).toString(),
+    });
+    assert.equal(response.status, 400, JSON.stringify(headers));
+    assert.ok((await response.text()).includes("The form expired."));
+  }
+
+  const row = await fx.db.first<{ revoked_at: string | null }>(
+    "SELECT revoked_at FROM credentials WHERE id = ?",
+    [credential.credentialId],
+  );
+  assert.equal(row?.revoked_at, null);
+  assert.equal(await credentialCount(fx), 1);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM audit_events WHERE operation = 'credential.rotate'")).length,
+    0,
   );
 });
 

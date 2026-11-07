@@ -52,6 +52,7 @@ import {
   listOwnedSpeakers,
   revokeOwnedSpeakerCredential,
   revokeOwnedSpeakerCredentialProject,
+  rotateSpeakerCredential,
   type IssuedCredential,
   type OwnedCredential,
   type OwnedSpeaker,
@@ -213,6 +214,9 @@ const EN = {
   credentialGrantAdded: "Project grant added.",
   credentialGrantExists: "That project grant already exists.",
   credentialGrantRemoved: "Project grant removed.",
+  rotateCredentialAction: "Rotate credential",
+  credentialRotatedNotice:
+    "The previous credential is now revoked and can no longer authenticate.",
   removeGrantAction: "Remove",
   statusRevoked: "Revoked",
   statusExpired: "Expired",
@@ -400,6 +404,8 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   credentialGrantAdded: "已添加项目授权。",
   credentialGrantExists: "该项目的授权已存在。",
   credentialGrantRemoved: "已移除项目授权。",
+  rotateCredentialAction: "轮换凭证",
+  credentialRotatedNotice: "之前的凭证现已撤销，无法再通过身份验证。",
   removeGrantAction: "移除",
   statusRevoked: "已撤销",
   statusExpired: "已过期",
@@ -2183,6 +2189,16 @@ ${options.inventory.credentials
 <input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
 <p class="form-actions"><button type="submit">${escapeHtml(t(locale, "revokeCredentialAction"))}</button></p>
 </form>`;
+    // Rotation is the same active-credential/active-speaker operation as grant
+    // editing. OAuth-issued credentials are managed by their client, so the
+    // service rejects them; the form is hidden here for the same reason.
+    const rotate = editable && !credential.oauthIssued
+      ? `
+<form method="post" action="/speakers/${encodeURIComponent(options.inventory.speaker.id)}/credentials/${encodeURIComponent(credential.id)}/rotate${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
+<p class="form-actions"><button type="submit">${escapeHtml(t(locale, "rotateCredentialAction"))}</button></p>
+</form>`
+      : "";
     const grantEdit = !grantEditable
       ? `<p class="hint">${escapeHtml(t(locale, "credentialGrantReadOnly"))}</p>`
       : options.inventory.grantableProjects.length === 0
@@ -2207,7 +2223,7 @@ ${options.inventory.credentials
 <dt>${escapeHtml(t(locale, "credentialCreatedLabel"))}</dt><dd><time datetime="${escapeHtml(credential.createdAt)}">${escapeHtml(formatCommittedAt(locale, credential.createdAt))}</time></dd>
 <dt>${escapeHtml(t(locale, "credentialExpiresLabel"))}</dt><dd>${expiry}</dd>
 <dt>${escapeHtml(t(locale, "credentialGrantsLabel"))}</dt><dd>${projects}</dd>
-</dl>${revoke}${grantEdit}
+</dl>${revoke}${rotate}${grantEdit}
 </article></li>`;
   })
   .join("\n")}
@@ -2300,6 +2316,7 @@ function renderIssuedCredential(
   url: URL,
   speaker: OwnedSpeakerForKey,
   issued: IssuedCredential,
+  noticeKey?: MessageKey,
 ): Response {
   const titles = new Map(speaker.projects.map((project) => [project.id, project.title]));
   const projectList = issued.projects
@@ -2308,8 +2325,12 @@ function renderIssuedCredential(
         `<li>${escapeHtml(titles.get(projectId) ?? projectId)} <code>${escapeHtml(projectId)}</code></li>`,
     )
     .join("");
+  const notice =
+    noticeKey === undefined
+      ? ""
+      : `<p class="filter-state" role="status">${escapeHtml(t(locale, noticeKey))}</p>`;
   const content = `<h1>${escapeHtml(t(locale, "credentialIssuedTitle"))}</h1>
-<p class="filter-state" role="alert">${escapeHtml(t(locale, "credentialOnceWarning"))}</p>
+${notice}<p class="filter-state" role="alert">${escapeHtml(t(locale, "credentialOnceWarning"))}</p>
 <p>${escapeHtml(t(locale, "speakerNameLabel"))}: ${escapeHtml(displaySpeakerName(speaker))} <code>${escapeHtml(speaker.id)}</code></p>
 <p>${escapeHtml(t(locale, "credentialLabel"))}: <code class="code">${escapeHtml(issued.token)}</code></p>
 <dl>
@@ -2400,6 +2421,68 @@ async function handleSpeakerCredentialRevoke(
   return redirect(
     303,
     `/speakers/${encodeURIComponent(speakerId)}/credentials${localeQuery(locale)}`,
+  );
+}
+
+async function handleSpeakerCredentialRotate(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  speakerId: string,
+  credentialId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const principal = sessionAccountPrincipal(session);
+  // Resolve the owned speaker and its inventory before parsing the body, so a
+  // foreign or unknown speaker, a credential from another speaker, an inactive
+  // speaker, and a credential the service cannot activate are all the uniform
+  // 404 regardless of payload shape.
+  const inventory = await listOwnedSpeakerCredentials(deps, principal, speakerId);
+  const credential = inventory.credentials.find((row) => row.id === credentialId);
+  if (
+    credential === undefined ||
+    credential.state !== "active" ||
+    inventory.speaker.status !== "active" ||
+    credential.oauthIssued
+  ) {
+    throw new AppError("NOT_FOUND");
+  }
+  const form = await readForm(request);
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return renderCredentialsPage(locale, url, {
+      inventory,
+      csrf: cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "",
+      status: 400,
+      errorKey: "formExpired",
+    });
+  }
+  // The shared service performs the atomic revoke-and-replace transaction and
+  // writes its own sanitized `credential.rotate` audit row.
+  const rotated = await rotateSpeakerCredential(
+    { db: deps.db, pepper: deps.pepper, now: deps.now },
+    { credentialId, expectedOwnerAccountId: principal.accountId },
+  );
+  // Project titles for the one-time display come from the credential grants
+  // already read by the authorized inventory.
+  const speaker: OwnedSpeakerForKey = {
+    ...inventory.speaker,
+    projects: credential.projects.map((grant) => ({
+      id: grant.id,
+      title: grant.title,
+      capabilities: [],
+    })),
+  };
+  // The only display of the replacement token: a POST-only, no-store response.
+  return renderIssuedCredential(
+    locale,
+    url,
+    speaker,
+    rotated,
+    "credentialRotatedNotice",
   );
 }
 
@@ -2942,6 +3025,14 @@ export function isWebPath(segments: readonly string[]): boolean {
     segments.length === 5 &&
     segments[0] === "speakers" &&
     segments[2] === "credentials" &&
+    segments[4] === "rotate"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 5 &&
+    segments[0] === "speakers" &&
+    segments[2] === "credentials" &&
     segments[4] === "grants"
   ) {
     return true;
@@ -3071,6 +3162,22 @@ export async function handleWebRoute(
     ) {
       if (method !== "POST") return methodNotAllowed(locale, url, "POST");
       return await handleSpeakerCredentialRevoke(
+        deps,
+        request,
+        url,
+        locale,
+        segments[1] ?? "",
+        segments[3] ?? "",
+      );
+    }
+    if (
+      segments.length === 5 &&
+      segments[0] === "speakers" &&
+      segments[2] === "credentials" &&
+      segments[4] === "rotate"
+    ) {
+      if (method !== "POST") return methodNotAllowed(locale, url, "POST");
+      return await handleSpeakerCredentialRotate(
         deps,
         request,
         url,

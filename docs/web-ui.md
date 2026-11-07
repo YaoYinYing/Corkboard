@@ -2,7 +2,8 @@
 
 **Status: implemented locally for Node.js + SQLite (vertical slices L and M plus
 dashboard project create/edit, speaker credential issuance, per-speaker credential
-inventory, revocation, and per-credential project-grant editing, the per-project
+inventory, revocation, atomic credential rotation, and per-credential project-grant
+editing, the per-project
 membership editor, the read-only per-project policy matrix, the authorized account
 service overview, and dashboard message send, with the approved design system tokens
 applied).**
@@ -10,23 +11,19 @@ The dashboard is server-rendered HTML for a signed-in **account**. Message reads
 filters, replay, and body reveal remain read-only; the timeline gains a compose link
 and a new-message form. The writes are project create, project title/summary edit,
 issuing one speaker credential with explicit project grants, revoking one speaker
-credential, adding/removing one explicit project grant on an active credential,
+credential, rotating one active credential into an atomic replacement, adding/removing
+one explicit project grant on an active credential,
 adding/removing a project membership with an explicit capability set, sending one
 message as a selected owned speaker, and expiring one message body through the
 existing expiry service. There is no expiry-policy change, automatic rotation, hard
-delete, or manual cleanup worker UI (the compose form optionally sets one
-body-expiry timestamp and the timeline can expire one ready body), no credential
-rotation UI, moderation, or administrative action. Atomic credential
-rotation is operator-only via the CLI `rotate-key`. It is not
+delete, moderation, or manual cleanup worker UI (the compose form optionally sets one
+body-expiry timestamp and the timeline can expire one ready body). It is not
 a SPA and ships no frontend framework, build step, or client script. Slice M adds
 metadata filters, a summary-only search, bounded cursor replay, and a CSS-only
 responsive layout.
 
 Cloudflare Workers/D1 parity, account registration/recovery, and the remaining
-dashboard write/admin surfaces (credential rotation) remain unimplemented.
-**The dashboard has no rotation view:** revoking a
-credential and issuing a new one through the existing issuance flow is its
-replacement path. Atomic rotation is available only as the operator CLI `rotate-key`.
+dashboard administrative surfaces remain unimplemented.
 See `IMPLEMENTATION_STATE.md` for the current evidence.
 
 ## Routes
@@ -55,6 +52,7 @@ See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/speakers/:speakerId/key` | `POST` | Form-encoded issuance for explicitly selected projects and scopes; one-time no-store display. |
 | `/speakers/:speakerId/credentials` | `GET` | Non-secret credential inventory for a speaker owned by the account, including each credential's project grants and, for active credentials of active speakers, add/remove grant forms. |
 | `/speakers/:speakerId/credentials/:credentialId/revoke` | `POST` | Form-encoded soft revocation; idempotent; `303` back to the inventory. |
+| `/speakers/:speakerId/credentials/:credentialId/rotate` | `POST` | Form-encoded atomic rotation of one active credential; one-time no-store display of the replacement token. |
 | `/speakers/:speakerId/credentials/:credentialId/grants` | `POST` | Form-encoded add of one explicit project grant to an active credential; `303` back to the inventory. |
 | `/speakers/:speakerId/credentials/:credentialId/grants/remove` | `POST` | Form-encoded removal of one explicit project grant; `303` back to the inventory. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet; constant body, no user input. |
@@ -328,11 +326,11 @@ and strict CSP, a `role="alert"` warning to copy the credential now, the speaker
 granted projects, and the scopes. Reopening `/speakers`, opening the form again,
 following any link, or loading any later page never renders the token again. A browser
 re-submit of the POST is a new issuance and creates a **different** credential; it
-does not reveal the earlier token. Credential inventory and revocation are available
-at the routes below; there is still no recovery or rotation view. **The dashboard has
-no rotation view:** after revocation, its replacement path is the existing issuance
-flow (`POST /speakers/:speakerId/key`), which creates a new credential and new grants.
-Atomic replacement is available only through the operator CLI `rotate-key`.
+does not reveal the earlier token. Credential rotation reuses this same one-time
+display and adds a notice that the previous credential is now revoked; its `POST` is
+likewise the only place the replacement token appears. Credential inventory,
+revocation, and rotation are available at the routes below. There is no recovery:
+a lost token must be replaced by a new issuance or another rotation.
 
 The credential forms use the same session CSRF defense as the project forms: the
 `corkboard_csrf` cookie plus exactly one non-empty hidden `csrf_token` field, compared
@@ -378,9 +376,11 @@ operator `prune` command later retains/removes them under its documented rules).
 Grants are displayed exactly as stored. For an **active** credential of an **active**
 speaker, the inventory also lists the projects the account may grant—the speaker's
 active projects that the account can read—and renders an add form, plus a remove form
-per existing grant (see *Credential project-grant editing* below). Revoked, expired,
-unparseable-expiry, and inactive-speaker credentials are read-only: they render no
-grant forms.
+per existing grant (see *Credential project-grant editing* below), together with a
+rotate form (see *Credential rotation* below). Revoked, expired, unparseable-expiry,
+inactive-speaker, and OAuth-issued credentials are read-only for add and rotate; an
+active OAuth-issued credential still renders its per-grant remove form (managed through
+the OAuth flow), so these credentials render no add or rotate form.
 
 `POST /speakers/:speakerId/credentials/:credentialId/revoke` softly revokes one
 credential with the same semantics as the CLI `revoke-key`: it sets
@@ -405,12 +405,58 @@ the non-secret credential ID; no token, prefix, verifier, or scope content is
 recorded. The credential is unusable on the next authenticated request, while any
 existing message metadata, receipts, and grants are untouched.
 
-**Rotation is deliberately not part of the dashboard.** This is revocation, not
-rotation: the dashboard offers no atomic "replace this credential" operation and no
-automatic re-issuance. Its replacement path is to revoke the credential here and
-create a new one through `POST /speakers/:speakerId/key`, selecting the intended
-projects and scopes again. The operator CLI `rotate-key` performs the atomic
-replacement. Per-credential expiry selection also remains CLI-only.
+## Credential rotation
+
+`POST /speakers/:speakerId/credentials/:credentialId/rotate` atomically replaces one
+credential with a new token for the same speaker. It is the dashboard counterpart of
+the operator CLI `rotate-key` and calls the shared `rotateSpeakerCredential` service,
+passing the session account for an ownership re-check inside the transaction. The inventory renders the rotate form only for an **active credential of an
+active speaker owned by the signed-in account**; revoked, expired,
+unparseable-expiry, inactive-speaker, and OAuth-issued credentials render no form.
+OAuth access credentials are managed by their OAuth client, so the service rejects
+them and the rotate form is hidden for the same reason (their per-grant remove form is
+still available, as described above).
+
+The route is **session-only** and never reads an `Authorization` header. It
+authenticates the session, then resolves the account-owned speaker and its inventory
+**before parsing the body**: a foreign or unknown speaker, a
+removed ownership, a credential from another speaker (owned or foreign), an unknown
+credential ID, and a credential that the service cannot activate are all the same
+uniform `404` regardless of payload shape, so the route is not an existence oracle.
+An inactive speaker is `404`; an inactive account invalidates the session like every
+other dashboard write (the request is redirected to `/login`). The form uses the
+session double-submit (`corkboard_csrf` cookie plus exactly one non-empty hidden
+`csrf_token`), the same `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. A
+CSRF failure re-renders the inventory with HTTP `400` and the "form expired" message
+and performs no write.
+
+The service performs the rotation in one `BEGIN IMMEDIATE` transaction: it re-checks
+that the old credential is active and non-OAuth, that its speaker and owning account
+are active, and that the owner is still the authenticated session account (the
+dashboard passes the account ID into the transaction, so a speaker that changes hands
+between the inventory read and the write cannot be rotated by the displaced owner),
+copies the exact stored scopes and current project grants, inserts the
+replacement row, and sets the old row's `revoked_at`. Any failure rolls the whole
+transaction back, so the old credential stays active and no orphan credential
+remains. The old credential's exact `expires_at` is preserved, including `NULL` (no
+expiry); there is no expiry-selection control in this UI. A failed or rejected
+rotation writes no credential and no audit row.
+
+The `POST` returns the one-time display page directly (`200`), not a redirect. That
+page carries `Cache-Control: no-store`, the existing one-time warning, a notice that
+the previous credential is now revoked, the replacement token, the speaker, the
+granted projects, and the scopes. The token is never placed in the URL, a redirect,
+a header, a hidden field, the database, the audit row, or a log. Re-loading the page
+uses the `POST` URL again: because the old credential is now revoked, a repeat after
+the first commit (browser history or a sequential duplicate) is the uniform `404` and
+does not issue or display another token. Two concurrent submissions can both pass the
+pre-check; the losing transaction fails closed without issuing a second credential or
+writing an audit row, currently surfaced as a generic `500` rather than `404`, with no
+existence or state leak. The service writes exactly one sanitized
+`credential.rotate` audit event with the actor account, actor speaker, the old and new
+non-secret credential IDs, bounded project IDs plus `project_count`, scope names, and
+`expires_at`; no token, prefix, verifier, or secret is recorded. The route adds no
+audit row of its own.
 
 ## Credential project-grant editing
 
@@ -463,10 +509,12 @@ content is recorded. The writes are after commit and fail-open, like the other
 dashboard audit rows.
 
 **Read-only credentials.** Revoked, expired, and unparseable-expiry credentials
-render no add or remove forms. The service independently returns `404` for grant
-editing on them, so a crafted POST cannot bypass the UI. This is least privilege: an
-unusable credential gains no new project binding. It does not affect revocation,
-which remains available for expired credentials as described above.
+render no add or remove forms and no rotate form. The service independently returns
+`404` for grant editing and rotation on them, so a crafted POST cannot bypass the UI.
+This is least privilege: an
+unusable credential gains no new project binding and cannot be rotated into a usable
+one. It does not affect revocation, which remains available for expired credentials
+as described above.
 
 ## Membership editor
 
@@ -533,8 +581,9 @@ Invitation/acceptance, bulk editing, and capability presets are **not implemente
 (no CLI command exists for them). Removal may target any active (non-removed)
 membership; an already removed row returns `NOT_FOUND`. Credential issuance is
 available here, and the credential inventory, soft revocation, and project-grant
-editing are described above; dashboard credential rotation remains unimplemented and
-atomic rotation is CLI-only (`rotate-key`).
+editing are described above; atomic rotation is available on the inventory for an
+active, non-OAuth credential of an active owned speaker (same service as the operator
+CLI `rotate-key`).
 
 ## Policy matrix
 
@@ -947,7 +996,7 @@ bounded form before checking CSRF.
 
 - Dashboard writes are project create/edit, one credential issuance for a
   selected subset of an owned speaker's active projects, one soft credential
-  revocation (no rotation UI), one explicit project-grant add or remove on an active
+  revocation and one atomic rotation, one explicit project-grant add or remove on an active
   credential, project-owner membership add/remove, one message
   send as an eligible owned speaker, and one message-body expiry through the
   existing service. The expiry action changes no expiry policy, performs no
@@ -955,13 +1004,13 @@ bounded form before checking CSRF.
   runs the same conditional `ready → expired` transition and ciphertext deletion
   as the REST route. There is no manual expiry cleanup UI and no expiry editor for
   already-sent messages beyond that action; the compose form may set one optional
-  body-expiry timestamp. There is no
-  credential rotation UI, per-credential expiry selection, speaker
+  body-expiry timestamp. There is no per-credential expiry selection, speaker
   creation, registration, or admin action. Creating a project does
   not create a speaker or credential; an account without an active owned speaker
   cannot create one from this UI. Grant editing applies to one project at a time and
-  only to active credentials of active speakers; the dashboard's replacement path is
-  the revoke-then-issue flow above, while the operator CLI `rotate-key` is atomic.
+  only to active credentials of active speakers. Atomic rotation is available on the
+  same inventory for an active, non-OAuth credential of an active owned speaker; the
+  operator CLI `rotate-key` performs the same replacement.
 - The project list is bounded to the API maximum (100 per request) and has no UI
   pagination; the REST API still paginates. The service overview uses the same
   100-project bound and states when the set is truncated.
@@ -996,9 +1045,8 @@ bounded form before checking CSRF.
   arbitrary chosen speaker. It never writes a receipt.
 - Replay offers bounded previous/next pages plus "jump to latest"; there is no
   time scrubber, date filter, infinite scroll, or client-side history.
-- No attachments, file previews, or image rendering; no credential rotation UI, no
-  project deletion/status change,
-  no speaker creation, no registration, email verification, password reset, or
+- No attachments, file previews, or image rendering; no project deletion/status
+  change, no speaker creation, no registration, email verification, password reset, or
   account settings. The directory shows active project grants only; the credential
   inventory shows non-secret credential metadata and grant rows, never tokens or
   prefixes.

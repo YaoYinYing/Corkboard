@@ -58,8 +58,9 @@ manager or treat it as a backup secret. Rules:
 Bootstrap creates the first key set and refuses to touch an existing installation.
 **Intentional service-key rotation is not implemented.** No command rotates, replaces,
 or appends key versions, and the loader reads only `v1`. This is about root-key/pepper
-material, not speaker credentials: speaker credential rotation is the separate
-CLI-only `rotate-key` operation described under Token handling. Do not delete or
+material, not speaker credentials: speaker credential rotation is the separate atomic
+operation available as `rotate-key` and in the dashboard inventory, described under
+Token handling. Do not delete or
 regenerate `secrets.env` to "start over": existing ciphertext and token verifiers
 become unreadable/unverifiable.
 
@@ -100,7 +101,7 @@ survive a changed pepper.
   grants for the project, so re-adding the membership requires an explicit re-grant.
 - Migration 002 does not backfill grants. Credentials issued before the migration lose
   project access until an operator grants each intended project explicitly.
-- **Rotation is atomic and CLI-only.** `rotate-key --credential <id>` issues a
+- **Rotation is atomic** (`rotate-key` and the dashboard inventory). `rotate-key --credential <id>` issues a
   replacement credential for the same speaker with exactly the old credential's scopes
   and current project grants, then sets the old row's `revoked_at`, all in one
   `BEGIN IMMEDIATE` transaction. A failure while writing the replacement or its grants
@@ -117,8 +118,9 @@ survive a changed pepper.
   OAuth-issued access credentials are identified by their `cb_oat_` token prefix or
   a durable `oauth_token_clients` association (their credential IDs are
   `cred_oat_*`), not by the ID string; they are rejected with no writes and are
-  managed through the OAuth refresh/revocation flow instead. The
-  dashboard has no rotation view. The `credential.rotate`
+  managed through the OAuth refresh/revocation flow instead. The dashboard inventory
+  rotates an active non-OAuth credential through the same atomic service (replacement
+  token shown once). The `credential.rotate`
   audit records the actor account/speaker, bounded project IDs plus count, scopes, and
   the old/new credential IDs; never the token, prefix, or verifier.
 - Agents must receive their own token. Do not share one token between a parent and its
@@ -143,11 +145,12 @@ operator-facing rules are:
   revoke an owned speaker's credential from `GET
   /speakers/:speakerId/credentials` (or with the CLI `revoke-key`); revocation sets
   `credentials.revoked_at` once, keeps the credential row and its grants, and is
-  idempotent. **The dashboard has no rotation view:** atomic rotation is the operator
-  CLI `rotate-key`, which copies the old scopes and grants and revokes the old row in
-  one transaction (see Token handling). A dashboard user can still revoke and issue a
-  new credential through the normal issuance form (or `issue-key`), selecting the
-  projects and scopes again. Per-credential expiry selection remains CLI-only. The
+  idempotent. **The dashboard inventory rotates atomically:** the rotate form and the
+  operator CLI `rotate-key` both call the same service, which copies the old scopes and
+  grants and revokes the old row in one transaction (see Token handling), and the
+  dashboard shows the replacement token once. A dashboard user can also revoke and
+  issue a new credential through the normal issuance form (or `issue-key`), selecting
+  the projects and scopes again. Per-credential expiry selection remains CLI-only. The
   dashboard may also add or remove one explicit project grant at a time on an
   **active** credential of an **active** owned speaker, using the CLI grant predicates
   plus account read access; every ineligible target is a uniform `404`, and an
@@ -391,11 +394,12 @@ or as authority to act as a speaker.
   the final ownership/membership check inside the publication transaction. The
   HTML form routes require the
   session-cookie double-submit (`corkboard_csrf` plus hidden `csrf_token`), the
-  `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Message-expiry
-  management, receipts, dashboard credential rotation, registration,
-  recovery, and administrative capability remain absent. Atomic credential rotation
-  exists only as the operator CLI `rotate-key`. Per-credential grant add/remove is
-  present on the credential inventory for active credentials of active speakers.
+  `Sec-Fetch-Site`/`Origin` checks, and the 64 KiB body cap. Receipts, registration,
+  recovery, expiry listing/editing/cleanup, and administrative capability remain
+  absent; message expiry is the timeline's single-ready-body action. Atomic credential
+  rotation is available in the dashboard inventory (ownership re-checked inside the
+  transaction) and as the operator CLI `rotate-key`. Per-credential grant add/remove
+  is present on the credential inventory for active credentials of active speakers.
 
 ## OAuth 2.1 authorization server
 
@@ -1028,13 +1032,13 @@ shows no traffic or error summary, because there is no per-tenant source. See
   the credential-inventory slice adds per-speaker listing and soft revocation, and
   the service-overview slice adds the authorized read-only `GET /overview` (counts,
   stored-byte totals, credential states, and 20 sanitized audit rows), and the
-  compose slice adds dashboard message send as a selected owned speaker.
-  Message-expiry management is unimplemented (the compose form's optional
-  body-expiry timestamp is the only expiry UI), and the dashboard has no credential
-  rotation view; atomic rotation exists only as the operator CLI `rotate-key`, and
-  revoke-then-issue remains the dashboard replacement path. Per-credential expiry
-  selection exists only as the CLI `issue-key --expires-at` and `rotate-key
-  --expires-at` options; there is no dashboard expiry editor.
+  compose slice adds dashboard message send as a selected owned speaker, and the
+  timeline can expire one ready body through the existing service (the compose form's
+  optional body-expiry timestamp is the only other expiry input). The dashboard
+  inventory rotates an active non-OAuth credential atomically and shows the
+  replacement token once; the operator CLI `rotate-key` performs the same replacement.
+  Per-credential expiry selection exists only as the CLI `issue-key --expires-at` and
+  `rotate-key --expires-at` options; there is no dashboard expiry editor.
   Per-credential grant add/remove is available in the dashboard credential
   inventory for active credentials of active speakers. Registration, email
   verification, and password reset are not implemented. Login rate limiting and outcome uniformity are bounded but not

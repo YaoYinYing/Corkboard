@@ -195,9 +195,10 @@ Rules and defaults:
   no expiry.
 - Rotation does not widen access: scopes and grants are copied, never recomputed or
   extended. An ungranted project stays ungranted.
-- Rotation is CLI-only. The dashboard inventory still supports issuance, soft
-  revocation, and one-project-at-a-time grant add/remove; it has no rotation view.
-  Per-credential expiry selection remains CLI-only.
+- Rotation is atomic in the dashboard inventory (form posts, replacement token shown
+  once, old row revoked in the same transaction) and in the operator CLI `rotate-key`.
+  The dashboard also supports issuance, soft revocation, and one-project-at-a-time
+  grant add/remove. Per-credential expiry selection remains CLI-only.
 
 ## 3. Start, stop, and health
 
@@ -484,9 +485,9 @@ Sign in at `/login` over HTTPS. The dashboard provides:
 
 Dashboard authority is account ownership for speakers/credentials and project
 ownership for membership/project edits; a uniform `404` covers foreign and unknown
-objects. There is no credential rotation view, expiry management, project
-deletion, or admin action in the UI; rotation is available only through the CLI
-(`rotate-key`).
+objects. Credential rotation is available in the dashboard inventory and through the
+CLI (`rotate-key`); the timeline can expire one ready body. There is no expiry editor,
+listing, or cleanup UI, and no project deletion or admin action in the UI.
 
 ## 5. Messages
 
@@ -715,11 +716,12 @@ live on-call rotation. This section is the short credential path:
 - **Rate limiting and login limiting are process-local;** per-IP and volumetric limits
   are the reverse proxy's job.
 - **Not end-to-end encrypted.** The server holds keys and can decrypt.
-- **No credential rotation UI, message-expiry management UI, receipt UI,
-  project deletion/status change, registration, email verification, or password reset.**
-  Credential rotation is implemented only as the operator CLI `rotate-key` for
-  non-OAuth credentials; there is no dashboard view and OAuth-issued access
-  credentials use their OAuth flow. Per-project grant add/remove is available in the credential inventory
+- **No receipt UI, project deletion/status change, registration, email
+  verification, or password reset.**
+  Credential rotation is implemented in the dashboard inventory and as the operator
+  CLI `rotate-key` for non-OAuth credentials; OAuth-issued access credentials use
+  their OAuth flow. Message expiry is the timeline's single-body action; there is no
+  expiry editor, listing, or cleanup UI. Per-project grant add/remove is available in the credential inventory
   for active credentials of active speakers.
 - **Readiness is shallow:** `/readyz` checks that SQLite answers `SELECT 1` and the
   configured blob store is accessible. It does not verify schema migrations, WAL

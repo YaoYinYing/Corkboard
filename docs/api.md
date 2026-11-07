@@ -288,6 +288,7 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | `/speakers/:speakerId/credentials` | `GET` | Non-secret credential inventory for a speaker owned by the session account: credential ID, created time, expiry (or no expiry), derived active/expired/revoked/unknown state, and project grants. Active credentials of active speakers also receive an add-grant form listing the speaker's active, account-readable projects and a remove form per grant. The service selects `public_prefix` only to derive the OAuth-origin flag; it is never rendered or logged, and the verifier and token are never selected or rendered. The service selects stored scope identifiers for the read-only policy matrix; the inventory page does not render them. Foreign and unknown speakers are the uniform `404`. |
 | `/speakers/:speakerId/credentials/:credentialId/revoke` | `POST` | Form-encoded soft revocation with the CLI `revoke-key` semantics: one `revoked_at` assignment, grants and the credential row retained, idempotent. Requires account ownership, the credential must belong to the path speaker, and the session CSRF check is required. Uniform `404` for a foreign/unknown speaker or a credential of another speaker; `303` to the inventory. |
 | `/speakers/:speakerId/credentials/:credentialId/grants` | `POST` | Form-encoded add of one explicit `project_id` grant, with the CLI `grant-key-project` rules plus account read access: the speaker must be active and owned by the session account, the credential must belong to that speaker and be active, and the project must have an active speaker membership the account can read. Existing grants are an idempotent no-op (`?grant=exists`). Uniform `404` for every ineligible target; `303` to the inventory. |
+| `/speakers/:speakerId/credentials/:credentialId/rotate` | `POST` | Form-encoded atomic rotation of one active, non-OAuth credential of an active owned speaker. Requires account ownership, the credential to belong to the path speaker, and the session CSRF check. The replacement token is shown once in a `no-store` `200`; scopes, grants, and the exact prior expiry are preserved and the old row is revoked in the same service transaction, which also re-checks ownership. Uniform `404` for every ineligible or foreign target. |
 | `/speakers/:speakerId/credentials/:credentialId/grants/remove` | `POST` | Form-encoded removal of one `project_id` grant with the CLI `revoke-key-project` SQL, scoped to the path speaker's active credential. Returns the same `303` (`?grant=removed`) whether or not a row existed and audits only a real deletion. Uniform `404` for a foreign/unknown speaker or a credential of another speaker. |
 | `/static/app.css` | `GET` | Fixed same-origin stylesheet. |
 
@@ -359,10 +360,13 @@ above). Per-credential project-grant add/remove is available on the same invento
 active credentials of active speakers: it lists only the speaker's active,
 account-readable projects, applies the CLI `grant-key-project` membership rule plus
 account read access, and treats every ineligible target as the uniform `404`.
-The dashboard has **no rotation view**: revoke the credential and issue a new one
-there, or use the operator CLI `rotate-key` for an atomic replacement. Per-credential
-expiry selection remains CLI-only (`issue-key --expires-at`, `rotate-key
---expires-at`).
+The dashboard inventory also offers **atomic rotation** for an active, non-OAuth
+credential of an active owned speaker: one CSRF-protected form posts to
+`POST /speakers/:speakerId/credentials/:credentialId/rotate`, and the `200` `no-store`
+response shows the replacement token exactly once while the old row is revoked in the
+same service transaction. The operator CLI `rotate-key` performs the same atomic
+replacement. Per-credential expiry selection remains CLI-only (`issue-key
+--expires-at`, `rotate-key --expires-at`); rotation preserves the old exact expiry.
 The membership
 editor is `GET`/`POST /projects/:projectId/members` plus
 `POST /projects/:projectId/members/:speakerId/remove`. It is **project-owner-only**:
@@ -390,11 +394,11 @@ addition/provisioning of other accounts' speakers remains CLI-only; removal may
 target any active (non-removed) membership; an already removed row returns
 `NOT_FOUND`. Dashboard message send is implemented as described above and in
 [`web-ui.md`](./web-ui.md): the compose form optionally sets one body-expiry
-timestamp, but there is no expiry listing/management/cleanup UI. Per-credential
-project-grant add/remove is implemented on the credential inventory for active
-credentials of active speakers; a dashboard credential
-rotation view, per-credential expiry editing, project deletion/status change,
-and administrative actions remain unimplemented (atomic rotation is CLI-only).
+timestamp; the timeline can expire one ready body through the existing service, but
+there is no expiry listing, editor, or cleanup UI. Per-credential project-grant
+add/remove and atomic credential rotation are implemented on the credential inventory
+for active credentials of active speakers; per-credential expiry editing, project
+deletion/status change, and administrative actions remain unimplemented.
 
 ## Endpoints
 
@@ -960,12 +964,13 @@ bounded cursor replay, body reveal, English/Simplified Chinese) is implemented p
 per-project HTML membership editor and the authorized service overview are
 implemented; the dashboard credential inventory, soft revocation, and per-credential
 project-grant editing are
-implemented; dashboard message send is implemented; there is no dashboard credential
-rotation view (revoke-then-issue remains that path); the operator CLI `rotate-key`
-performs an atomic replacement; project deletion/status changes remain
-deferred; and message-expiry management is unimplemented (the compose form's optional
-body-expiry field is the only expiry UI; per-credential expiry selection exists only
-as the CLI `issue-key --expires-at`/`rotate-key --expires-at` options). The
+implemented; dashboard message send is implemented; the dashboard can atomically
+rotate an active credential (show-once replacement token, old row revoked in the same
+transaction) and the operator CLI `rotate-key` performs the same replacement; the
+timeline can expire one ready body through the existing service; project
+deletion/status changes remain deferred; per-credential expiry selection exists only
+as the CLI `issue-key --expires-at`/`rotate-key --expires-at` options, and the compose
+form's optional body-expiry field is the only other expiry input. The
 bearer-authenticated `/mcp` surface is implemented
 (see above and `mcp.md`);
 the OAuth 2.1 authorization-server core is implemented (see above and `oauth.md`), but
