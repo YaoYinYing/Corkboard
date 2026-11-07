@@ -132,7 +132,7 @@ remain absent or untested.
 | SQLite persistence | **Verified locally** | `npm run check`; four-process persistence test; synthetic smoke at this revision wrote, listed, and re-read a body. |
 | Backup / verify / restore | **Verified locally** | `npm run check`; synthetic smoke at this revision ran `backup`, `verify` (`ok:true`), `restore` into a new directory, and `doctor` on the restored copy (exit `0`, 0 issues). |
 | D1 adapter and Workers deployment | **Adapter verified locally; deployment external gap** | `src/storage/d1.ts` passes the shared contract against a D1-shaped SQLite test double (`tests/helpers/d1-double.ts`). Real Cloudflare D1/R2/Workers execution and wrangler migration application are unexecuted (TODO 325/362). |
-| R2 blob store | **Not implemented (external gap)** | Local filesystem blob store only. |
+| R2 blob store | **Adapter verified locally; live R2 external gap** | `src/storage/blobs/r2.ts` implements the `BlobStore` port over a structural R2 bucket and passes the shared blob contract against an in-memory structural double (`tests/helpers/r2-double.ts`). Live Cloudflare R2 binding semantics and Workers execution are unverified (TODO 325/362); no production path selects it. |
 | `doctor` read-only diagnostics | **Verified locally** | `npm run check`; smoke: `doctor --json` exit `0`, 0 issues. |
 | Operator retention (`prune`) | **Verified locally** | `npm run check`; smoke: `prune --json` printed counts and deleted nothing on a clean installation. |
 | Rate limiting | **Verified locally** | `npm run check`; process-local, keyed by the presented credential public prefix before authentication, REST/MCP shared, `429` with `Retry-After`. |

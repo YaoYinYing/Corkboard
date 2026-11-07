@@ -3332,3 +3332,47 @@ delta-audited on trees `26991775` and `2b567352`; the final closure audit on
 final docs-only delta. Voided sibling candidates `0a1a6e0`, `4bbbad9`, and `fdd7032`
 share base `8706440`; the pushed commit has the same tree as `fdd7032`. CI run
 `42424857746` succeeded.
+
+## Checkpoint (2026-11-07) — R2 blob adapter and shared blob contract (TODO 362 partial)
+
+Branch `r2-blobs`, base `a348a0cd58549c66915f5b9424c64162a3657419`. Adds
+`src/storage/blobs/r2.ts`: a Web-standard-only `BlobStore` over a structural
+`R2BucketLike` (`get`/`put`/`delete`; `get` returns an object with `arrayBuffer()` or
+`null`). The adapter maps a null object to `undefined`, passes `put` bytes through
+unchanged, treats `delete` as idempotent, and enforces `isValidBlobKey` like the Memory
+and Local adapters (defense in depth; callers still supply generated keys). It has no
+`checkReady`: R2 offers no side-effect-free store-level probe (`head`/`list` require a
+sentinel object or a scan), so a future Workers readiness route must add a
+sentinel-object head probe before selecting it.
+
+`tests/helpers/r2-double.ts` is a test-only in-memory structural R2 bucket double that
+copies bytes on put/get and throws no custom errors. `tests/contract/blobs.test.ts`
+runs a shared blob contract against Memory, Local (temp directory), and R2 (double):
+put/get round-trip for empty, small, and multi-KiB binary data; missing key
+`undefined`; delete removes and is idempotent; overwrite replaces bytes; opaque keys
+with invalid-key rejection; 16- and 128-character key bounds; a subarray view with
+non-zero `byteOffset`; and 16 concurrent puts/gets. Four R2-specific tests cover a null
+body mapping to `undefined`, failing bucket operations (and a failing `arrayBuffer`)
+rejecting, `put` passing exactly the supplied bytes (byte equality; a defensive copy is
+acceptable), and invalid keys never reaching the bucket (instrumented call counter
+stays zero).
+
+Evidence: `npm run check` exit 0 (768 tests: 768 pass, 0 skipped, 0 fail; secret and
+history scans green, license report green, strict typecheck clean), `npm run
+test:contract` exit 0 (76 tests: 76 pass, 0 skipped, 0 fail; 28 blob scenarios = 8
+shared scenarios × 3 implementations plus 4 R2-specific), and `npm run build` exit 0
+(including `dist/src/storage/blobs/r2.js`). **Not proven:** live Cloudflare R2 or
+Workers execution, R2 binding semantics, live D1, any deployment, and any production
+selection of the R2 adapter (the Node server still uses `LocalBlobStore`). The commit
+trailers keep `Independent-review: NOT CLAIMED`; the coordinator relayed security PASS
+and contract PASS-WITH-P2 on `4ae447e`, and this amendment applies those P2
+documentation and P3 test findings.
+
+Docs updated: `docs/architecture.md` (deployment status, scoped exception, R2 adapter
+paragraph), `docs/deployments.md` (status and Cloudflare section), `docs/runbook.md`,
+`docs/docker.md`, `docs/disaster-rehearsal.md`, `docs/preview-deployment.md`, and
+`docs/acceptance-report.md` (stale "R2 adapter absent" claims narrowed to adapter
+present/contract-tested against a structural double with live R2 unverified), and
+`TODO.md` 335 and 362 narrowed from "no R2 adapter" to "adapter contract-tested
+against a structural double, live execution unexecuted". No dependency, lockfile,
+schema, migration, API, service-behavior, or adapter-behavior change.

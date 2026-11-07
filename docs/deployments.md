@@ -3,8 +3,9 @@
 Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical slices
 A–E, including the bearer-authenticated MCP slice, read-only `doctor` diagnostics,
 human account sessions, and the OAuth 2.1 authorization-server core), and the commands
-below are runnable after `npm run build`. Cloudflare Workers/D1/R2 and the ChatGPT Web
-plugin experience are planned and are not implemented or tested.
+below are runnable after `npm run build`. The D1 and R2 adapters exist and are
+contract-tested only against structural doubles; the Workers runtime, live Cloudflare
+execution, and the ChatGPT Web plugin experience remain unexecuted.
 
 Operator procedures are in [`runbook.md`](./runbook.md) (v1, 2026-11-05), and the
 verified/unverified criteria matrix is in [`acceptance-report.md`](./acceptance-report.md)
@@ -511,8 +512,16 @@ passes the same contract tests and a live two-client exchange.
 `batch()`. `tests/contract/storage.test.ts` runs the shared contract against that
 adapter using a D1-shaped test double over a real SQLite file
 (`tests/helpers/d1-double.ts`). That proves the adapter and its SQL on SQLite; it is
-**not** Cloudflare execution. Real D1/R2 bindings, the Worker runtime, and wrangler
-migration application remain unexecuted (TODO 325/362).
+**not** Cloudflare execution.
+
+`src/storage/blobs/r2.ts` implements the `BlobStore` port over a structural R2 bucket
+(`get`/`put`/`delete`). `tests/contract/blobs.test.ts` runs the shared blob contract
+against the Memory, Local, and R2 implementations; the R2 run uses an in-memory
+structural double (`tests/helpers/r2-double.ts`). That proves round-trip, overwrite,
+delete idempotency, opaque keys, and failure propagation on the double; it is **not**
+live Cloudflare R2 execution, and no deployment selects the R2 adapter. Real D1/R2
+bindings, the Worker runtime, and wrangler migration application remain unexecuted
+(TODO 325/362).
 
 ## Repository safety
 

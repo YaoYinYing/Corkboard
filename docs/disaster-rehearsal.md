@@ -1,8 +1,8 @@
 # Disaster rehearsal
 
 **Applies to:** the self-hosted Node.js 24 + SQLite + local-blob implementation in
-this repository. The D1 adapter passes the shared contract against a D1-shaped SQLite
-double, but Cloudflare Workers and R2 adapters, live Cloudflare D1, and wrangler
+this repository. The D1 and R2 adapters pass their shared contracts against structural
+doubles, but the Cloudflare Workers adapter, live Cloudflare D1/R2, and wrangler
 migration application are not implemented, so the live D1/R2 variants of this
 procedure are inapplicable and are not simulated or claimed.
 
@@ -149,9 +149,9 @@ is exactly one object: `{ok:true, checks, summary}` on success, or
   behavior has separate tests; TLS termination and reverse-proxy limits are documented
   in the runbook and preview checklist but remain unexecuted; cookie flags and
   container hardening have their own tests/documentation.
-- **Not live D1, Workers, or R2.** The D1 adapter exists and passes the shared
-  contract against a D1-shaped SQLite double, but no live D1/R2 fault injection or
-  portability claim is made; Workers and R2 adapters do not exist.
+- **Not live D1, Workers, or R2.** The D1 and R2 adapters exist and pass their shared
+  contracts against structural doubles, but no live D1/R2 fault injection or
+  portability claim is made; the Workers adapter does not exist.
 - **Not root-key or pepper rotation.** Neither rotation is implemented. The script
   restores the same key set; regenerating it would make ciphertext unrecoverable.
 - **Not offsite key custody.** The "separate" key backup is a second file in the same

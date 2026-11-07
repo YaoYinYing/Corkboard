@@ -9,7 +9,8 @@ One TypeScript core, two deployment adapters:
 
 - **Self-hosted Node.js 24 LTS** with SQLite (WAL, foreign keys) and a private local
   blob directory.
-- **Cloudflare Workers** with D1 and private R2 (planned, not yet implemented).
+- **Cloudflare Workers** with D1 and private R2 adapters (the Workers runtime and
+  live Cloudflare execution remain unexecuted).
 
 Adapters may differ in runtime concerns; they must not differ in authorization,
 validation, ordering, or encryption behavior.
@@ -19,7 +20,10 @@ validation, ordering, or encryption behavior.
 all SQL free of Node-only syntax and by adapter-agnostic contract tests. A D1 adapter
 (`src/storage/d1.ts`) now implements the same port with `batch()` semantics, and the
 shared contract runs against it over a D1-shaped SQLite test double
-(`tests/helpers/d1-double.ts`). Real Cloudflare D1, R2, and Workers execution and
+(`tests/helpers/d1-double.ts`). An R2 adapter (`src/storage/blobs/r2.ts`) implements
+the `BlobStore` port against a structural R2 bucket, and the shared blob contract runs
+against Memory, Local, and an in-memory R2-shaped double
+(`tests/helpers/r2-double.ts`). Real Cloudflare D1, R2, and Workers execution and
 wrangler migration application are still unexecuted (TODO 325/362), so a live staging
 run is required before Phase 1/vertical slice B can be called complete; it is not
 claimed by slice A.
@@ -125,6 +129,17 @@ D1 adapter enforces this by rejecting reads inside a transaction, buffering writ
 submitting one `batch()` on resolve and none on throw, and rejecting a non-undefined
 callback result. It passes the shared storage contract against a D1-shaped test double
 over SQLite; live Cloudflare D1 execution remains unexecuted (TODO 325/362).
+
+`src/storage/blobs/r2.ts` implements `BlobStore` over a structural `R2Bucket`
+(`get`/`put`/`delete`): `get` maps a null object to `undefined`, `put` passes the
+supplied bytes unchanged, and `delete` is idempotent. It has no `checkReady` because R2
+has no side-effect-free store-level probe (`head`/`list` need a sentinel object or a
+scan); a future Workers readiness route must add a sentinel-object head probe before
+selecting this adapter. `tests/contract/blobs.test.ts` runs the shared blob contract
+against the Memory, Local, and R2 implementations; the R2 run uses an in-memory
+structural double (`tests/helpers/r2-double.ts`). That proves the adapter and its byte
+handling on the double, not live Cloudflare R2 execution. The Node server still
+selects `LocalBlobStore`, and no production path selects R2.
 
 Sequence allocation happens at **finalization**, not at acceptance. Provisional rows
 carry `seq = NULL` and are invisible. One UPDATE assigns the next sequence and publishes

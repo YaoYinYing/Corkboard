@@ -4,9 +4,9 @@
 
 **Applies to:** the self-hosted Node.js 24 + SQLite + local-blob implementation in
 this repository, not a fixed historical build. It includes atomic CLI credential
-rotation (`rotate-key`). The D1 adapter exists and passes the shared contract against
-a D1-shaped SQLite double; Cloudflare Workers and R2 adapters, live Cloudflare D1, and
-wrangler migration application are not implemented.
+rotation (`rotate-key`). The D1 and R2 adapters exist and pass their shared contracts
+against structural doubles; the Cloudflare Workers adapter, live Cloudflare D1/R2
+execution, and wrangler migration application are not implemented.
 
 **Exact commands:** every command and flag below is implemented in
 [`scripts/corkboard.ts`](../scripts/corkboard.ts) and is shown as the built
@@ -743,9 +743,9 @@ live on-call rotation. This section is the short credential path:
 
 - **One root key version (`v1`), no rotation.** Rotation requires re-encryption and is
   unimplemented. Moving the unchanged secrets file is supported; regenerating it is not.
-- **Workers and R2 adapters absent; live D1 unexecuted.** The D1 adapter exists and
-  passes the shared contract only against a D1-shaped SQLite double; no Cloudflare
-  deployment path, live D1 execution, or wrangler migration application exists.
+- **Workers adapter absent; live D1/R2 unexecuted.** The D1 and R2 adapters exist and
+  pass their shared contracts only against structural doubles; no Cloudflare
+  deployment path, live D1/R2 execution, or wrangler migration application exists.
 - **Attachments are blocked** on Issue #5; text bodies only.
 - **Multi-process caveats.** Rate limits, metrics, and MCP sessions are process-local;
   each process enforces its own buckets and has its own sessions. SQLite serializes

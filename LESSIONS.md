@@ -1992,3 +1992,18 @@ prevented regression; when to remove the advice.
   that callers start depending on.
 - **Remove when:** a live D1 staging run executes the same contract and
   wrangler-applied migrations.
+
+## 2026-11-07 — a blob double proves byte handling, not R2
+
+- **Failure avoided:** an in-memory R2-shaped bucket can make the adapter look
+  "R2-ready" while the real binding, Worker runtime, probes, and deployment remain
+  unexecuted.
+- **Rule:** name the structural double at the contract call site and in every doc,
+  state, or TODO claim. Keep live R2/Workers boxes unchecked and keep the adapter out
+  of production selection until a real staging run passes the same contract. Do not
+  invent a `checkReady` probe for R2; `head`/`list` need a sentinel object or a scan,
+  so document the omission and the readiness gap instead.
+- **Prevents:** a passing mock reported as platform support and a readiness route that
+  silently reports ready without touching R2.
+- **Remove when:** a live R2 staging run executes the same blob contract and a
+  sentinel-object readiness probe is implemented and exercised.
