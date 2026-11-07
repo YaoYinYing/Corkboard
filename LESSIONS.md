@@ -1885,6 +1885,26 @@ prevented regression; when to remove the advice.
 - **Remove when:** an attachment/upload route ships; then replace the
   inapplicability record with a real 10 MiB boundary scenario.
 
+## 2026-11-07 — an operator service has no principal to re-check
+
+- **Failure avoided:** the dashboard resolved the owned speaker inventory, then called
+  the operator-oriented `rotateSpeakerCredential`, which re-checks that the owner is
+  non-null and active but not that it is the *session* account. A speaker ownership
+  transfer landing between the inventory read and the `BEGIN IMMEDIATE` transaction
+  let the displaced owner mint a replacement token for a speaker they no longer owned.
+- **Reproducer:** wrap `deps.db` so `transaction` transfers `speakers.owner_account_id`
+  before executing the rotation; the dashboard POST returned 200 and issued a credential
+  until the service took an `expectedOwnerAccountId`.
+- **Rule:** a dashboard write that calls a CLI/operator service must pass the session
+  account (or an explicit authorized wrapper) and have the service re-check it *inside*
+  the write transaction. Sibling services (`revokeOwnedSpeakerCredential`,
+  `grantOwnedSpeakerCredentialProject`) already do this; a pre-body inventory read is
+  not an in-transaction check.
+- **Prevents:** cross-account token issuance across a TOCTOU window, with the audit row
+  attributed to the new owner.
+- **Remove when:** operator services take a principal and every dashboard caller passes
+  it, instead of per-service expected-owner parameters.
+
 ## 2026-11-07 — a dashboard write must resolve its own write principal
 
 - **Failure avoided:** The timeline already resolves a `message.read` session viewer
