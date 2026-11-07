@@ -2521,6 +2521,44 @@ client's but model choice is host configuration; the Web UI login for the screen
 used a directly written password hash; sessions are in-memory, so a blind send retry
 after a restart can duplicate and the reconnect case used a distinct intent.
 
+## Dashboard message-body expiry (branch `dashboard-expiry`, base `9e4dc59`)
+
+Scope: add the missing dashboard action for an existing administrative capability.
+The REST route already performed `POST /api/v1/projects/:projectId/messages/:messageId/expire`;
+this slice adds the server-rendered timeline control and its POST route.
+
+- `GET /projects/:projectId` renders one CSRF-protected expiry form per **ready**
+  message only when `resolveSessionViewer(..., "project.edit")` succeeds. The same
+  resolution already gates the edit link, so the control is omitted for a member
+  without `project.edit`; the timeline remains readable.
+- `POST /projects/:projectId/messages/:messageId/expire` authenticates the session,
+  resolves the `project.edit` viewer **before** reading the form, applies the existing
+  double-submit + `Sec-Fetch-Site`/`Origin` CSRF checks, then calls the existing
+  `expireMessageBody` unchanged. The service re-authorizes `project.edit`
+  immediately before the conditional transition. The dashboard resolves a session
+  `project.edit` viewer and REST resolves a bearer principal, so the decision
+  procedures differ by principal class; both require `project.edit` and both
+  re-authorize in the same service, and the slice adds no scope or capability.
+- The service's existing `INSERT OR IGNORE` `message.expire` audit row is the only
+  audit write. The route adds none, and the response is `303` back to the timeline.
+  Already-expired bodies are idempotent and keep one audit row. No default policy,
+  automatic rotation, hard delete, or cleanup behavior changed.
+- Dashboard tests use the real `createApp` and SQLite fixture: success and tombstone,
+  member without `project.edit`, a non-owner editor with `project.edit`, non-member,
+  foreign message, authorization-before-parse with a non-form body, missing/wrong/
+  duplicate CSRF, missing CSRF cookie, cross-origin fetch metadata, `GET` 405,
+  already-expired idempotency, sanitized audit contents, and omission of the control.
+
+Commands: `npm run check` exit 0 (secret scan ok; history scan ok over 181 commits;
+license report 98 dependencies, 0 flagged; strict typecheck; **705 tests: 704 pass,
+0 fail, 1 skipped D1 contract**); `npm run build` exit 0;
+`node --test tests/integration/web.test.ts` 38 pass.
+
+Limitations: the control is on the timeline only; the standalone body-reveal page
+remains read-only. There is no expiry-timestamp editor, no expiry listing beyond the
+per-message state, and no dashboard cleanup worker. This slice claims no independent
+audit and no real-browser pass.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -2924,9 +2962,10 @@ Do not infer any of these from local MCP behavior or from another plan.
   sender-bound finalize predicate prevents publication and the row stays
   pending/invisible/reclaimable; reaching it requires direct database write access.
   Session sends produce no queue-to-commit histogram sample (the web route never
-  recorded one; REST/MCP bearer sends are unchanged). Message-expiry
-  listing/management/cleanup and receipt UI remain unimplemented, as does credential
-  rotation. D1/R2 parity and a real-browser pass for this slice are
+  recorded one; REST/MCP bearer sends are unchanged). Message-expiry listing,
+  expiry-timestamp editing, and cleanup UI remain unimplemented (the dashboard can
+  expire one ready body), as does credential rotation. D1/R2 parity and a
+  real-browser pass for this slice are
   unexecuted.
 - Bounded local soak only (`scripts/soak.ts`): one Node/SQLite process, text bodies
   only. It does not cover attachments/10 MiB, slow uploads, quotas, long-duration

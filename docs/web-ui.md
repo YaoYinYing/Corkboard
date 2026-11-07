@@ -11,18 +11,20 @@ filters, replay, and body reveal remain read-only; the timeline gains a compose 
 and a new-message form. The writes are project create, project title/summary edit,
 issuing one speaker credential with explicit project grants, revoking one speaker
 credential, adding/removing one explicit project grant on an active credential,
-adding/removing a project membership with an explicit capability set, and
-sending one message as a selected owned speaker. There is no message-expiry
-management or cleanup UI (the compose form optionally sets one body-expiry timestamp),
-credential rotation UI, moderation, or administrative action. Atomic credential
+adding/removing a project membership with an explicit capability set, sending one
+message as a selected owned speaker, and expiring one message body through the
+existing expiry service. There is no expiry-policy change, automatic rotation, hard
+delete, or manual cleanup worker UI (the compose form optionally sets one
+body-expiry timestamp and the timeline can expire one ready body), no credential
+rotation UI, moderation, or administrative action. Atomic credential
 rotation is operator-only via the CLI `rotate-key`. It is not
 a SPA and ships no frontend framework, build step, or client script. Slice M adds
 metadata filters, a summary-only search, bounded cursor replay, and a CSS-only
 responsive layout.
 
 Cloudflare Workers/D1 parity, account registration/recovery, and the remaining
-dashboard write/admin surfaces (message-expiry management and credential rotation)
-remain unimplemented. **The dashboard has no rotation view:** revoking a
+dashboard write/admin surfaces (credential rotation) remain unimplemented.
+**The dashboard has no rotation view:** revoking a
 credential and issuing a new one through the existing issuance flow is its
 replacement path. Atomic rotation is available only as the operator CLI `rotate-key`.
 See `IMPLEMENTATION_STATE.md` for the current evidence.
@@ -47,6 +49,7 @@ See `IMPLEMENTATION_STATE.md` for the current evidence.
 | `/projects/:projectId/messages/new` | `GET` | Compose form when the account can read the project; sender choices are its own send-capable speakers. |
 | `/projects/:projectId/messages/new` | `POST` | Form-encoded send as the selected owned speaker; `303` to the timeline; requires the session CSRF check. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal through the existing decrypt path. |
+| `/projects/:projectId/messages/:messageId/expire` | `POST` | Form-encoded expiry of one ready body; requires `project.edit` and the session CSRF check; `303` to the timeline. |
 | `/speakers` | `GET` | Speakers owned by the signed-in account, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active speaker owned by the account. |
 | `/speakers/:speakerId/key` | `POST` | Form-encoded issuance for explicitly selected projects and scopes; one-time no-store display. |
@@ -168,6 +171,35 @@ use a `--brand` fill with `--brand-ink` text. State pairs its text with a 4px
 rail: `.error` uses `--danger`, while the tombstone `.state.expired` and the
 active-filter `.filter-state` use `--border`. Project status uses `--success`
 only together with the word "Active", never colour alone.
+
+### Message body state and expiry
+
+Each timeline entry shows the existing body state: a ready body links to the
+existing read-only reveal page, and an expired body renders the tombstone text
+without a reveal link. When and only when the signed-in account resolves a
+`project.edit` viewer for that project (`resolveSessionViewer`, the same
+membership/capability decision the edit form uses), a ready entry also renders a
+one-button `POST /projects/:projectId/messages/:messageId/expire` form. The form
+uses the same session double-submit CSRF fields as the other dashboard writes and
+carries an escaped hidden `csrf_token`; it is server-rendered with no script. An
+expired entry never shows the control.
+
+The route resolves the `project.edit` viewer **before** reading the form, so a
+non-member, a removed membership, an inactive project/speaker/account, or a
+member without `project.edit` is the uniform 404 page with no state change. It
+then checks the CSRF/fetch-metadata rules and calls the existing
+`expireMessageBody` service unchanged. That service re-authorizes `project.edit`
+immediately before the conditional `ready → expired` transition, so the control
+cannot grant a capability the REST route does not. A foreign or unknown message
+ID in an editable project is `NOT_FOUND` (the same 404 page), and an
+already-expired body is an idempotent success. On success the route returns
+`303` to the project timeline, where the tombstone is visible.
+
+The write is the service's existing `message.expire` audit row: operation,
+outcome, actor identifiers, and project only. It contains no body text, digest,
+or token, and a repeated expiry does not insert a second row. This control adds
+no scope, capability, policy default, automatic rotation, or hard delete; body
+expiry cleanup remains the operator worker's job.
 
 ## Project create and edit
 
@@ -748,8 +780,9 @@ Fail-closed behavior:
   the page does not reveal whether a project exists.
 - A removed membership, a non-member account, a foreign account's project, an
   inactive project/speaker/account, or no eligible speaker is `404`.
-- A member without `project.edit` is also `404` on the edit form and update,
-  even though the read timeline remains available to that member.
+- A member without `project.edit` is also `404` on the edit form and update and on
+  the message-body expiry action, even though the read timeline remains available
+  to that member. The expiry control is omitted from that member's timeline.
 - A non-owner member (even with `project.edit`) is `404` on the membership editor and
   the policy matrix, as is an unknown, foreign, or inactive project; a bearer
   principal is rejected by the owner predicate.
@@ -776,10 +809,14 @@ selected project), `POST /speakers/:speakerId/credentials/:credentialId/revoke` 
 `credential_project_grants` insert) and its `/grants/remove` sibling (one grant
 deletion), `POST /projects/:projectId/members` (one membership insert or
 reactivation), `POST /projects/:projectId/members/:speakerId/remove` (the
-membership soft delete plus that speaker's grant deletions), and `POST
+membership soft delete plus that speaker's grant deletions), `POST
 /projects/:projectId/messages/new` (the blob, `body_objects` row, provisional
 `messages` row, idempotency record, and final sequence-bearing publication through
-the existing `sendMessage` path). Read receipt identities
+the existing `sendMessage` path), and `POST
+/projects/:projectId/messages/:messageId/expire` (the existing service's
+conditional `ready → expired` transition, its sanitized `message.expire` audit,
+and best-effort ciphertext deletion; no new write path or policy). Read receipt
+identities
 are displayed only through
 `listReadReceipts`, which authorizes `message.read` and re-applies the project filter.
 The speaker directory is an account-level read; it is not a project-scoped route and
@@ -845,7 +882,8 @@ share the existing per-email-digest rate limiter and return `429` with
 
 ### Project and credential form CSRF
 
-The create, edit, credential-issuance, credential-revocation, and membership forms
+The create, edit, credential-issuance, credential-revocation, membership, message
+send, and message-body expiry forms
 use the session CSRF value issued at sign-in: the
 non-`HttpOnly` `corkboard_csrf` cookie plus a hidden `csrf_token` field. `POST`
 requires the form media type, checks the same `Sec-Fetch-Site`/`Origin` fetch
@@ -853,8 +891,12 @@ metadata as login, requires exactly one non-empty hidden value, compares the
 hidden value and cookie as SHA-256 digests in constant time, and then verifies
 the presented value against the keyed CSRF verifier on the session row. A
 missing, duplicate, or mismatched value, a missing cookie, or a cross-site fetch
-metadata assertion returns the form with HTTP `400` and the "form expired"
-message and performs no project or membership write. Session authentication has
+metadata assertion returns HTTP `400` with the "form expired" message —
+re-rendering the originating form page where that handler re-renders one (the
+credential, membership, and other page-embedded forms), and otherwise the safe
+invalid-request page (the timeline expiry form uses the latter) — and performs no
+project, message, membership, credential, or expiry write.
+Session authentication has
 already run and may refresh `sessions.last_seen_at`; that bookkeeping is the only
 write before the check. The form body is read and bounded before the CSRF check.
 The CSRF check runs before project input validation and before any project
@@ -906,10 +948,14 @@ bounded form before checking CSRF.
 - Dashboard writes are project create/edit, one credential issuance for a
   selected subset of an owned speaker's active projects, one soft credential
   revocation (no rotation UI), one explicit project-grant add or remove on an active
-  credential, project-owner membership add/remove, and one message
-  send as an eligible owned speaker. There is no message-expiry management or
-  cleanup UI: the compose form may set one optional body-expiry timestamp, but
-  listing, changing, or deleting expiry state remains unimplemented. There is no
+  credential, project-owner membership add/remove, one message
+  send as an eligible owned speaker, and one message-body expiry through the
+  existing service. The expiry action changes no expiry policy, performs no
+  rotation of keys or credentials, and hard-deletes no message or metadata: it
+  runs the same conditional `ready → expired` transition and ciphertext deletion
+  as the REST route. There is no manual expiry cleanup UI and no expiry editor for
+  already-sent messages beyond that action; the compose form may set one optional
+  body-expiry timestamp. There is no
   credential rotation UI, per-credential expiry selection, speaker
   creation, registration, or admin action. Creating a project does
   not create a speaker or credential; an account without an active owned speaker

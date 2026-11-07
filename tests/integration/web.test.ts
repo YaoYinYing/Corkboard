@@ -482,6 +482,240 @@ test("timeline is ascending, carries metadata and receipts, omits bodies, and sh
   assert.ok(tombstoned.html.includes(`/messages/${first.messageId}/body`));
 });
 
+test("dashboard expiry control expires a ready body, audits once, and is hidden without project.edit", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  const bodyText = "EXPIRY-BODY-MUST-NOT-APPEAR";
+  const message = await send(
+    fx,
+    credential.token,
+    "proj_a",
+    "expiry-control",
+    "expire me",
+    bodyText,
+  );
+  const action = `/projects/proj_a/messages/${message.messageId}/expire`;
+
+  // A member with only read capabilities sees the timeline and the body link,
+  // but neither the edit link nor the expiry control.
+  await addPasswordAccount(fx, "acct_member", "member@example.test", "member secret");
+  await fx.addSpeaker("spk_member", "acct_member");
+  await fx.addMembership("proj_a", "spk_member", ["project.read", "message.read"]);
+
+  const owner = await loginAsWithCsrf(app, "a@example.test", "correct horse");
+  const before = await getPage(app, "/projects/proj_a", owner.cookie);
+  assert.equal(before.status, 200);
+  assert.ok(before.html.includes(`action="${action}"`));
+  assert.ok(before.html.includes('name="csrf_token"'));
+  assert.ok(before.html.includes("Expire body"));
+  assert.ok(before.html.includes(`/messages/${message.messageId}/body`));
+
+  const member = await loginAsWithCsrf(app, "member@example.test", "member secret");
+  const memberPage = await getPage(app, "/projects/proj_a", member.cookie);
+  assert.equal(memberPage.status, 200);
+  assert.ok(memberPage.html.includes(`/messages/${message.messageId}/body`));
+  assert.equal(memberPage.html.includes(action), false);
+  assert.equal(memberPage.html.includes("Expire body"), false);
+
+  // A member without project.edit is the same uniform 404 with no state change
+  // and no audit row.
+  const refused = await postForm(app, action, member.cookie, { csrf_token: member.csrf });
+  assert.equal(refused.status, 404);
+  const ready = await fx.db.first<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE id = ?",
+    [message.messageId],
+  );
+  assert.equal(ready?.body_state, "ready");
+  const refusedAudits = await fx.db.all(
+    "SELECT id FROM audit_events WHERE operation = 'message.expire'",
+  );
+  assert.equal(refusedAudits.length, 0);
+
+  // The authorized member expires the body; the service's own audit row is the
+  // only one created.
+  const success = await postForm(app, action, owner.cookie, { csrf_token: owner.csrf });
+  assert.equal(success.status, 303);
+  assert.equal(success.headers.get("location"), "/projects/proj_a");
+  const expired = await fx.db.first<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE id = ?",
+    [message.messageId],
+  );
+  assert.equal(expired?.body_state, "expired");
+  const after = await getPage(app, "/projects/proj_a", owner.cookie);
+  assert.ok(after.html.includes("This message body has expired."));
+  assert.equal(after.html.includes(action), false);
+  assert.equal(after.html.includes(`/messages/${message.messageId}/body`), false);
+
+  // A repeated expiry is idempotent and adds no second audit row.
+  const again = await postForm(app, action, owner.cookie, { csrf_token: owner.csrf });
+  assert.equal(again.status, 303);
+  const audits = await fx.db.all<Record<string, unknown>>(
+    "SELECT * FROM audit_events WHERE operation = 'message.expire'",
+  );
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0]?.operation, "message.expire");
+  assert.equal(audits[0]?.outcome, "success");
+  assert.equal(audits[0]?.project_id, "proj_a");
+  const serialized = JSON.stringify(audits);
+  assert.equal(serialized.includes(bodyText), false);
+  assert.equal(serialized.includes("sha256:"), false);
+  assert.equal(serialized.includes(credential.token), false);
+});
+
+test("a non-owner member with project.edit can expire a body", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  const message = await send(
+    fx,
+    credential.token,
+    "proj_a",
+    "editor-expiry",
+    "editor can expire",
+    "EDITOR-BODY",
+  );
+  await addPasswordAccount(fx, "acct_editor", "editor@example.test", "editor secret");
+  await fx.addSpeaker("spk_editor", "acct_editor");
+  await fx.addMembership("proj_a", "spk_editor", ALL_SCOPES);
+
+  const editor = await loginAsWithCsrf(app, "editor@example.test", "editor secret");
+  const action = `/projects/proj_a/messages/${message.messageId}/expire`;
+  const page = await getPage(app, "/projects/proj_a", editor.cookie);
+  assert.equal(page.status, 200);
+  assert.ok(page.html.includes(`action="${action}"`));
+
+  const response = await postForm(app, action, editor.cookie, {
+    csrf_token: editor.csrf,
+  });
+  assert.equal(response.status, 303);
+  const row = await fx.db.first<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE id = ?",
+    [message.messageId],
+  );
+  assert.equal(row?.body_state, "expired");
+  const audit = await fx.db.first<{ actor_account_id: string | null }>(
+    "SELECT actor_account_id FROM audit_events WHERE operation = 'message.expire'",
+  );
+  assert.equal(audit?.actor_account_id, "acct_editor");
+});
+
+test("dashboard expiry refuses non-members, foreign messages, and invalid CSRF with no state change", async (t) => {
+  const { fx, app } = await withApp(t);
+  const credential = await basicProject(fx);
+  const message = await send(
+    fx,
+    credential.token,
+    "proj_a",
+    "expiry-refusals",
+    "protected",
+    "PROTECTED-BODY",
+  );
+  const action = `/projects/proj_a/messages/${message.messageId}/expire`;
+
+  // A foreign message in a project the caller can edit is still NOT_FOUND.
+  await addPasswordAccount(fx, "acct_d", "d@example.test", "d secret");
+  await fx.addSpeaker("spk_d", "acct_d");
+  await fx.addProject("proj_d", "acct_d");
+  await fx.addMembership("proj_d", "spk_d", ALL_SCOPES);
+  const foreignCredential = await fx.addCredential({ speakerId: "spk_d" });
+  const foreign = await send(
+    fx,
+    foreignCredential.token,
+    "proj_d",
+    "foreign-message",
+    "foreign",
+    "foreign body",
+  );
+
+  // No owned speaker in the project at all: the timeline and the action are the
+  // uniform 404.
+  await addPasswordAccount(fx, "acct_none", "none@example.test", "none secret");
+  const nonMember = await loginAsWithCsrf(app, "none@example.test", "none secret");
+  assert.equal((await getPage(app, "/projects/proj_a", nonMember.cookie)).status, 404);
+  const nonMemberPost = await postForm(app, action, nonMember.cookie, {
+    csrf_token: nonMember.csrf,
+  });
+  assert.equal(nonMemberPost.status, 404);
+
+  const owner = await loginAsWithCsrf(app, "a@example.test", "correct horse");
+  const foreignPost = await postForm(
+    app,
+    `/projects/proj_a/messages/${foreign.messageId}/expire`,
+    owner.cookie,
+    { csrf_token: owner.csrf },
+  );
+  assert.equal(foreignPost.status, 404);
+
+  const attempts: Array<{ name: string; cookie: string; fields: Record<string, string> }> = [
+    { name: "missing token", cookie: owner.cookie, fields: {} },
+    { name: "wrong token", cookie: owner.cookie, fields: { csrf_token: "A".repeat(43) } },
+    { name: "missing cookie", cookie: owner.cookie.split("; ")[0] ?? "", fields: { csrf_token: owner.csrf } },
+  ];
+  for (const attempt of attempts) {
+    const response = await postForm(app, action, attempt.cookie, attempt.fields);
+    assert.equal(response.status, 400, attempt.name);
+    assert.ok((await response.text()).includes("The form expired."), attempt.name);
+  }
+  for (const headers of [
+    { origin: "https://evil.example" },
+    { "sec-fetch-site": "cross-site" },
+    { "sec-fetch-site": "same-site" },
+  ]) {
+    const response = await call(app, action, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: owner.cookie,
+        ...headers,
+      },
+      body: new URLSearchParams({ csrf_token: owner.csrf }).toString(),
+    });
+    assert.equal(response.status, 400, JSON.stringify(headers));
+    assert.ok((await response.text()).includes("The form expired."));
+  }
+
+  // Authorization runs before the form is read, so a non-member with a
+  // non-form body is still the uniform 404 rather than a CSRF 400.
+  const nonMemberNotForm = await call(app, action, {
+    method: "POST",
+    headers: { "content-type": "text/plain", cookie: nonMember.cookie },
+    body: "csrf_token=nope",
+  });
+  assert.equal(nonMemberNotForm.status, 404);
+
+  // The shared CSRF check rejects a duplicate token, and the route has no GET
+  // handler.
+  const duplicate = await call(app, action, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: owner.cookie,
+    },
+    body: new URLSearchParams([
+      ["csrf_token", owner.csrf],
+      ["csrf_token", owner.csrf],
+    ]).toString(),
+  });
+  assert.equal(duplicate.status, 400);
+  const getRoute = await call(app, action, { headers: { cookie: owner.cookie } });
+  assert.equal(getRoute.status, 405);
+  assert.equal(getRoute.headers.get("allow"), "POST");
+
+  const untouched = await fx.db.first<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE id = ?",
+    [message.messageId],
+  );
+  const foreignUntouched = await fx.db.first<{ body_state: string }>(
+    "SELECT body_state FROM messages WHERE id = ?",
+    [foreign.messageId],
+  );
+  assert.equal(untouched?.body_state, "ready");
+  assert.equal(foreignUntouched?.body_state, "ready");
+  const audits = await fx.db.all(
+    "SELECT id FROM audit_events WHERE operation = 'message.expire'",
+  );
+  assert.equal(audits.length, 0);
+});
+
 test("timeline pagination reuses the API bounds and keeps ascending order", async (t) => {
   const { fx, app } = await withApp(t);
   const credential = await basicProject(fx);

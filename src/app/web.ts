@@ -1,15 +1,17 @@
 // Human dashboard. Server-rendered HTML only: no inline script, no script at
 // all, no message HTML. Message reads are read-only; the writes are project
 // create/edit, credential issuance and soft revocation, membership add/remove,
-// and one session message send as a selected owned speaker (its own dedicated
-// authority, not the read viewer). Authorization is derived from the account
-// session and then the existing service functions run unchanged.
+// message-body expiry through the existing service, and one session message send
+// as a selected owned speaker (its own dedicated authority, not the read viewer).
+// Authorization is derived from the account session and then the existing
+// service functions run unchanged.
 import { randomBase64url } from "../auth/credentials.ts";
 import { SCOPES } from "../domain/authz.ts";
 import { digestsEqual, sha256Hex } from "../domain/digest.ts";
 import { AppError, RateLimitError } from "../domain/errors.ts";
 import { normalizeEmail, validateLoginPassword } from "../domain/validation.ts";
 import type { Principal, ServiceDeps } from "../service/auth.ts";
+import { expireMessageBody } from "../service/expiry.ts";
 import {
   listSessionSendSpeakers,
   resolveSessionSendPrincipal,
@@ -150,6 +152,7 @@ const EN = {
   readReceiptsLabel: "Read by",
   noneLabel: "None",
   revealBody: "Reveal body",
+  expireBodyAction: "Expire body",
   tombstone: "This message body has expired. Its metadata is retained.",
   olderMessages: "Older messages",
   newerMessages: "Newer messages",
@@ -339,6 +342,7 @@ const ZH: Readonly<Record<MessageKey, string>> = {
   readReceiptsLabel: "已读",
   noneLabel: "无",
   revealBody: "显示正文",
+  expireBodyAction: "使正文过期",
   tombstone: "此消息正文已过期，元数据仍保留。",
   olderMessages: "更早的消息",
   newerMessages: "更新的消息",
@@ -2623,6 +2627,8 @@ function renderTimeline(
   receipts: ReadonlyMap<string, ReadReceipt[]>,
   hasMore: boolean,
   filters: TimelineFilters,
+  canExpireBody: boolean,
+  csrf: string,
 ): string {
   const afterRaw = queryText(url, "after_seq");
   const beforeRaw = queryText(url, "before_seq");
@@ -2667,6 +2673,17 @@ function renderTimeline(
         message.bodyState === "expired"
           ? `<p class="state expired">${escapeHtml(t(locale, "tombstone"))}</p>`
           : `<p><a href="/projects/${escapeHtml(projectId)}/messages/${messageId}/body${localeQuery(locale)}">${escapeHtml(t(locale, "revealBody"))}</a></p>`;
+      // The control is rendered only for a ready body and only when the
+      // project-edit viewer was resolved for this request. The POST route
+      // re-resolves that viewer and the service re-authorizes before writing.
+      const expireForm =
+        message.bodyState === "ready" && canExpireBody
+          ? `
+<form class="expire-form" method="post" action="/projects/${escapeHtml(projectId)}/messages/${messageId}/expire${localeQuery(locale)}">
+<input type="hidden" name="csrf_token" value="${escapeHtml(csrf)}">
+<button type="submit" aria-label="${escapeHtml(t(locale, "expireBodyAction"))}: ${escapeHtml(message.summary)}">${escapeHtml(t(locale, "expireBodyAction"))}</button>
+</form>`
+          : "";
       return `<li><article id="msg-${messageId}" class="message" aria-labelledby="${titleId}">
 <span class="seq">#${message.seq}</span>
 <h3 id="${titleId}">${escapeHtml(message.summary)}</h3>
@@ -2676,7 +2693,7 @@ function renderTimeline(
 <dt>${escapeHtml(t(locale, "replyToLabel"))}</dt><dd>${replyHtml}</dd>
 <dt>${escapeHtml(t(locale, "readReceiptsLabel"))}</dt><dd>${receiptHtml}</dd>
 </dl>
-${state}
+${state}${expireForm}
 </article></li>`;
     })
     .join("\n");
@@ -2755,15 +2772,19 @@ async function handleTimeline(
     projectId,
     result.messages.map((message) => message.messageId),
   );
-  // Owners see the edit link; a non-owner's NOT_FOUND simply omits it. This
-  // does not change the read authorization already performed above.
+  // Owners and editors see the edit link and the per-message expiry control; a
+  // member without project.edit gets NOT_FOUND here and sees neither. This does
+  // not change the read authorization already performed above.
   let editLink = "";
+  let canExpireBody = false;
   try {
     await resolveSessionViewer(deps, session, projectId, "project.edit");
+    canExpireBody = true;
     editLink = ` <span aria-hidden="true">·</span> <a href="/projects/${escapeHtml(projectId)}/edit${localeQuery(locale)}">${escapeHtml(t(locale, "editProjectTitle"))}</a>`;
   } catch (error) {
     if (!(error instanceof AppError) || error.code !== "NOT_FOUND") throw error;
   }
+  const csrf = cookieValue(request.headers.get("cookie"), CSRF_COOKIE_NAME) ?? "";
 
   // The policy matrix is owner-only; a non-owner's NOT_FOUND simply omits it.
   let policyLink = "";
@@ -2787,7 +2808,7 @@ async function handleTimeline(
 ${renderFilterForm(locale, projectId, url, filters, limit)}
 <h2>${escapeHtml(t(locale, "timelineTitle"))}</h2>
 ${renderFilterState(locale, filters)}
-${renderTimeline(locale, projectId, url, result.messages, receipts, result.hasMore, filters)}`;
+${renderTimeline(locale, projectId, url, result.messages, receipts, result.hasMore, filters, canExpireBody, csrf)}`;
   return htmlResponse(200, renderPage(locale, url, project.title, content));
 }
 
@@ -2812,6 +2833,32 @@ async function handleBody(
 <h1>${escapeHtml(t(locale, "bodyTitle"))}</h1>
 <pre class="body-text" tabindex="0">${escapeHtml(body.text)}</pre>`;
   return htmlResponse(200, renderPage(locale, url, t(locale, "bodyTitle"), content));
+}
+
+// Reuses `expireMessageBody`: the same authorization decision, transition, and
+// sanitized audit as `POST /api/v1/.../expire`. The project-edit viewer is
+// resolved before the body is parsed, so a non-member or a member without
+// `project.edit` is the uniform 404 regardless of payload shape, and the
+// service re-authorizes immediately before the transition.
+async function handleMessageExpire(
+  deps: ServiceDeps,
+  request: Request,
+  url: URL,
+  locale: Locale,
+  projectId: string,
+  messageId: string,
+): Promise<Response> {
+  const session = await authenticateSession(
+    deps,
+    sessionTokenFromCookie(request.headers.get("cookie")),
+  );
+  const viewer = await resolveSessionViewer(deps, session, projectId, "project.edit");
+  const form = await readForm(request);
+  if (!(await verifyFormCsrf(deps, session, request, form))) {
+    return renderError(locale, url, 400, "invalidRequest", "formExpired");
+  }
+  await expireMessageBody(deps, viewer, projectId, messageId);
+  return redirect(303, `/projects/${encodeURIComponent(projectId)}${localeQuery(locale)}`);
 }
 
 function stylesheetResponse(): Response {
@@ -2943,6 +2990,14 @@ export function isWebPath(segments: readonly string[]): boolean {
     segments[0] === "projects" &&
     segments[2] === "members" &&
     segments[4] === "remove"
+  ) {
+    return true;
+  }
+  if (
+    segments.length === 5 &&
+    segments[0] === "projects" &&
+    segments[2] === "messages" &&
+    segments[4] === "expire"
   ) {
     return true;
   }
@@ -3141,6 +3196,22 @@ export async function handleWebRoute(
     ) {
       if (method !== "GET") return methodNotAllowed(locale, url, "GET");
       return await handleBody(
+        deps,
+        request,
+        url,
+        locale,
+        segments[1] ?? "",
+        segments[3] ?? "",
+      );
+    }
+    if (
+      segments.length === 5 &&
+      segments[0] === "projects" &&
+      segments[2] === "messages" &&
+      segments[4] === "expire"
+    ) {
+      if (method !== "POST") return methodNotAllowed(locale, url, "POST");
+      return await handleMessageExpire(
         deps,
         request,
         url,

@@ -1871,3 +1871,24 @@ prevented regression; when to remove the advice.
   endpoints invented only to satisfy a test list.
 - **Remove when:** an attachment/upload route ships; then replace the
   inapplicability record with a real 10 MiB boundary scenario.
+
+## 2026-11-07 — a dashboard write must resolve its own write principal
+
+- **Failure avoided:** The timeline already resolves a `message.read` session viewer
+  and reuses it for the page. Passing that principal to `expireMessageBody` would
+  fail closed with `NOT_FOUND`, because the session branch returns only the scope it
+  was resolved for and never widens a read viewer into `project.edit`. Reusing the
+  read viewer would also hide the real authorization decision inside a confusing
+  denial rather than test it.
+- **Reproducer:** Resolve `resolveSessionViewer(..., "message.read")` and call
+  `expireMessageBody` with it; it rejects. Resolve `project.edit`, then call the same
+  function; it transitions once and audits once.
+- **Rule:** Each dashboard write resolves the viewer for the exact scope it writes,
+  after the page's read authorization, and then calls the existing service. The
+  service must still re-authorize before the durable effect; the route does not
+  trust the viewer it just built.
+- **Prevents:** A dashboard control whose visibility and action use different
+  authority, or a "fix" that widens the read viewer's scope set to make the action
+  work.
+- **Remove when:** the session viewer carries a membership-derived capability set
+  that the service re-checks per write, instead of one pre-resolved scope.
