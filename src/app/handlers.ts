@@ -66,7 +66,10 @@ import { handleWebRoute, isWebPath } from "./web.ts";
 
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const MAX_LIMIT = 100;
-const DECODER = new TextDecoder();
+// Request bodies must be valid UTF-8. A non-fatal decoder would silently
+// replace malformed bytes with U+FFFD and accept content the client did not
+// send; decoding failures are mapped to VALIDATION_ERROR by the caller.
+const DECODER = new TextDecoder("utf-8", { fatal: true });
 const EMAIL_ENCODER = new TextEncoder();
 
 const FORBIDDEN_SEND_FIELDS: ReadonlySet<string> = new Set([

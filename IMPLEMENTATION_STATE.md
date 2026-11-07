@@ -20,6 +20,7 @@ as the work it describes.
 
 | Commit | Tree | Capability | Reviews |
 | --- | --- | --- | --- |
+| this checkpoint | commit trailer `Tree-SHA` | Negative permission and failure-path coverage (branch `negative-coverage`, base `60bafd17290d367b7e18849c79d000c86e51c4ee`): audits the committed suites against every project/session/OAuth/MCP authorization predicate and adds `tests/integration/negative-paths.test.ts` (6 tests) for malformed cursors/query parameters, sanitized persistence failure, blob-write failure plus same-key resume, invalid UTF-8 request bodies (with a fatal-decoder root fix in `src/app/handlers.ts`, `web.ts`, and `oauth.ts`; the SDK-decoded `/mcp` body and platform percent/escape normalization are documented exceptions, not covered), inactive principal/project bearer denial, and corrupt idempotency rows. SQLite is the only executed backend; the D1 contract test remains explicitly skipped, so "both backends" is recorded as structurally inapplicable, not passed. No audit PASS is pre-recorded; see the slice section for the gap map and commands. | PENDING (not yet reviewed) |
 | this checkpoint | commit trailer `Tree-SHA` | "Provide Codex CLI and Claude Code skill examples" (local Codex CLI / Claude Code integration examples): `examples/agent-integration/` adds `poll-consume.ts` (imports `scripts/poll.ts` and adds only an `onMessage` callback that writes verified, credential-redacted bodies to a private `0600` inbox before the poller's `mark_read`/cursor advance), `send.ts` (environment-only `CORKBOARD_APIKEY`, caller-supplied `Idempotency-Key`, poller-style deadline and 1 MiB streamed cap), `lib.ts` (env-only loading and error redaction), a Claude Code `SKILL.md`, and a Codex CLI `config.toml.example` + `AGENTS.md.example` + shell invocation; `tests/unit/agent-integration.test.ts` scans the examples with `findSecrets` plus a literal-bearer check and covers env-only loading, whitespace rejection, error redaction, inbox redaction/atomicity/privacy, and send oversize/timeout paths. Additive only: no application authorization, crypto, poller behavior, schema, dependency, or runtime-server change. Local examples only; no real Codex/Claude Code session and no ChatGPT integration is claimed. | Independent security and contract delta audits returned PASS on tree `31a87c9` after the repo-root/inbox corrections; both earlier rounds recorded. Pushed at `045ba2d`; audited candidate `25f5ff2` (same tree); CI concluded success (run ID redacted) |
 | this checkpoint | commit trailer `Tree-SHA` | TODO 411 disaster rehearsal (no runtime/authorization/crypto change). `scripts/disaster-rehearsal.ts` runs entirely in fresh temp directories and removes them even on failure. It initializes a synthetic `0700` data dir plus `0600` secrets outside the repo; seeds accounts/projects/speakers/credentials (CLI) and messages/receipts (service); takes and verifies a database+blob backup, asserting keys/tokens/bodies are absent and keys are copied separately; removes only the temporary live dir and restores into a new empty dir, then verifies, runs `doctor`, and asserts sequences/receipts/sanitized audit rows survive, bodies decrypt with the separately backed-up keys and match digests, a wrong root key fails closed with `INTEGRITY_FAILURE`, and the restored application router answers `/me`, send, list, and body read; asserts audit rows are sanitized but not tamper-evident (no hash/signature/trigger; a direct rewrite is observed and reverted); replays `after_seq` from scratch with ordered delivery and no duplicate receipts, and rejects a stored cursor for a different project/speaker (binding is project+speaker, not a data-dir path); revokes a credential (`revoke-key`, REST/MCP `401 UNAUTHENTICATED`) and rotates another (`rotate-key`; old fails, replacement works, revoked rotation rejected); simulates an interrupted send/finalize by injecting a failure immediately before the finalize `UPDATE` after the provisional writes, separately synthesizes an in-progress `.tmp-<32 hex>` writer artifact, asserts `doctor --stuck-minutes 0` reports `STUCK_PENDING`, asserts a fresh verified backup excludes the artifact but still lists every committed blob, resumes the same idempotency key to exactly one commit, and runs `expire-bodies`/`prune` without corrupting committed data. `tests/unit/disaster-rehearsal.test.ts` and `tests/integration/disaster-rehearsal.test.ts` cover redaction/secrets parsing, child-environment scrubbing, the full drill (about 11 s), and a forced mid-drill failure (cleanup, non-zero exit, redacted output); `docs/disaster-rehearsal.md` states what is and is not proven and is linked from the runbook and incident response. Limits are recorded in TODO 411: synthetic small data; in-process fault injection, not a real crash/power loss; an interrupted migration/upgrade is not simulated; in-process router, not the listener/TLS/proxy; D1/R2, key/pepper rotation, and offsite key custody are inapplicable or unexercised; audit is not tamper-evident. | Security and contract delta audits returned PASS on the rebased exact tree `fe91cd3` (the disaster script and unit test are byte-identical to the earlier PASSed tree; only state-conflict resolution and mode-specific doc/test-skip changes were added). Pushed at `5d25c1b`; audited candidate `4b99252` (same tree); CI concluded success (run ID redacted) |
 | this checkpoint | commit trailer `Tree-SHA` | Load/soak coverage for the Phase 8 bullet "many small messages, slow uploads, 10 MiB boundaries, metadata search, concurrent speakers, quota abuse and cleanup backlog", on branch `soak-coverage`, base `f1bf4f6b5638d9c9d6175b29c7614fc0d33dff21`. Extends the existing `scripts/soak.ts` harness (no parallel tool, no dependency): small-message contiguity plus two-page-size pagination stability; chunked slow uploads (8192-byte text verified by body `GET`, 8193-byte text deterministic `400`, exactly 64 KiB streamed JSON `201`); real boundary probes (64 KiB request cap, 8192-byte text, 140/141 graphemes, 1024/1032 summary bytes) with 10 MiB recorded structurally inapplicable because attachments are blocked by Issue #5, the app caps bodies at 64 KiB and the documented proxy cap is 1 MiB; four bounded `q=` searches (literal `%`/`_`, empty result, 100/101-character bound) during concurrent load; parallel speakers with contiguous shared `seq` and cross-project `404` isolation; sustained over-limit traffic yielding bounded `429 RATE_LIMITED` + `Retry-After`, an over-limit `POST /messages` whose `429` expectation is gated on the measured burst+gap+POST window being shorter than one refill interval (only a `201` after a possible refill is tolerated as skipped; any other non-`429` fails), and which leaves message and `body_objects` rows unchanged when it is `429`, and a second credential that still sends; and a prunable backlog built through real sign-in/sign-out plus expiry-eligible messages, with the expiry backlog drained by the real `expireDueBodies` service and the documented `expire-bodies`, two `prune` runs and `doctor` showing no remaining backlog with integrity/count/sequence assertions. The `dirty` report field is now `null` with `dirty_reason` when the `git status` probe fails instead of claiming a clean tree. Docs updated in `docs/soak.md`, `docs/acceptance-report.md`, `TODO.md`, state, and LESSIONS | `npm run check` exit 0 (696 tests: 695 pass, 1 skipped live-D1, 0 fail; secret/history/license scans green); `npm run build` exit 0; `npm run soak -- --profile quick` exit 0 (10.6 s, 401 requests, 267 messages, 0 integrity/5xx/network failures, 0 duplicates); `npm run soak -- --profile full` exit 0 (28.6 s, 1659 requests, 1307 messages). | Security and contract delta audits returned PASS on the rebased exact tree `3b34c4f` (the `201`-only tolerance, skipped-path allowance, and corrected 696/695 evidence count were verified; no other code changed). Pushed at `fbeaddf`; audited candidate `0e25e8a` (same tree); CI concluded success (run ID redacted) |
@@ -150,9 +151,13 @@ clause. Items evaluated and left unchecked in this pass are listed below.
 Left unchecked in this pass because a clause is unmet: 332 (the plaintext digest is
 deliberately not in the AAD), 337 (the
 previously-compressed-file clause needs an attachment path), 408 (current head
-and deployment artifacts not reviewed), 447 (D1 backend absent), 450/451 (slice
+and deployment artifacts not reviewed), 450/451 (slice
 T/V review records are PENDING and completed branches remain local), and 484 (some
 historical checkpoint rows do not record an exact-head independent review).
+The negative permission/failure-path clause was subsequently covered for the only
+executed backend (SQLite) on branch `negative-coverage`; the absent D1 backend is
+recorded as a caveat there rather than as a pass. No independent review of that
+branch is pre-recorded.
 
 The `981c761` TODO-reconciliation push (tree `6b3e5b6`) was verified with
 `git ls-remote`. CI status for that revision was **not retrievable** at the time:
@@ -2364,6 +2369,99 @@ Evidence: `npm run check` exit 0 (secret scans, license report, typecheck,
 682 tests: 681 pass, 1 skipped live-D1, 0 fail), `npm run build` exit 0, and
 `npm run build:repro` exit 0.
 
+## Negative permission and failure paths (branch `negative-coverage`, base `60bafd1`)
+
+Scope: audit the existing suites against the authorization predicates and failure
+paths, then add only the missing negative tests. Every new request uses the real
+`createApp` router or the real service with the real SQLite adapter. Faults are
+injected at one dependency boundary (`deps.db` or `deps.blobs`), never by mocking the
+function under test. No application behavior changed except the fatal-UTF-8 fix
+described below.
+
+### Existing coverage found (nearest committed test)
+
+| Required denial/failure class | Existing evidence |
+| --- | --- |
+| Project-scoped unknown object / foreign project | `tests/security/adversarial-probes.test.ts:509`, `:562`; `tests/integration/http.test.ts:511`; `tests/integration/messages.test.ts:197` |
+| Member without the required scope | `tests/integration/messages.test.ts:225`, `:879`; `tests/integration/project-stats.test.ts:170`; `tests/integration/web.test.ts:358` |
+| Removed membership | `tests/integration/messages.test.ts:904`; `tests/integration/web.test.ts:306`; `tests/integration/message-send-web.test.ts:389` |
+| Revoked/expired credential | `tests/integration/messages.test.ts:486`; `tests/integration/mcp.test.ts:872` |
+| Credential grant removed | `tests/security/project-grants.test.ts:16`, `:141`, `:190`; `tests/integration/messages.test.ts:944`; `tests/integration/expiry.test.ts:1004` |
+| Missing/expired/revoked session | `tests/security/session.test.ts:398`; `tests/integration/web.test.ts:414`; `tests/integration/overview.test.ts:577` |
+| Missing/wrong CSRF | `tests/integration/web.test.ts:1093`, `:1206`, `:1933`; `tests/integration/members-web.test.ts:643`; `tests/integration/message-send-web.test.ts:622`; `tests/integration/speakers-web.test.ts:458`, `:1225` |
+| Cross-origin form post | `tests/security/adversarial-probes.test.ts:1245`; `tests/integration/cors.test.ts:27` |
+| Inactive account (session) | `tests/security/session.test.ts:357`; `tests/integration/policy-web.test.ts:328`; `tests/integration/speakers-web.test.ts:1743` |
+| Session-send authorization | `tests/integration/message-send-web.test.ts:334`, `:389`, `:512`, `:545`, `:905`; `tests/security/adversarial-probes.test.ts:838`, `:882` |
+| OAuth wrong PKCE/redirect/used/expired code/unknown client | `tests/security/oauth.test.ts:661`, `:710` |
+| OAuth refresh reuse | `tests/security/oauth.test.ts:829` |
+| OAuth scope escalation | `tests/security/oauth.test.ts:590`, `:863` |
+| MCP foreign ids / spoofed arguments / foreign session / insufficient scope | `tests/integration/mcp.test.ts:229`, `:370`, `:543`; `tests/security/adversarial-probes.test.ts:1525` |
+| Missing/corrupt blob | `tests/integration/messages.test.ts:619`, `:656`, `:705`; `tests/integration/http.test.ts:1025` |
+| Digest mismatch | `tests/integration/http.test.ts:581`; `tests/integration/messages.test.ts:302` |
+| DB write failure rollback | `tests/integration/members-web.test.ts:732`; `tests/integration/speakers-web.test.ts:716`; `tests/integration/web.test.ts:1844`; `tests/integration/retention.test.ts:772`; `tests/integration/cli.test.ts:1058`, `:1849` |
+| Backup/cursor corruption | `tests/security/backup.test.ts:135`-`:771`; `tests/unit/poll.test.ts:910` |
+| Oversized/deep input | `tests/integration/http.test.ts:600`; `tests/security/adversarial-probes.test.ts:1442`; `tests/integration/members-web.test.ts:711`; `tests/integration/speakers-web.test.ts:1658` |
+
+### Gaps filled by `tests/integration/negative-paths.test.ts`
+
+1. Malformed opaque project cursors (non-base64, non-JSON, wrong field types) and
+   message query parameters (`after_seq`/`before_seq` together, `limit` out of
+   range) return `VALIDATION_ERROR` on REST. MCP returns the same stable tool error
+   for the cursor and for the mutually-exclusive bounds pair; values the tool input
+   schema itself rejects (a negative seq, `limit: 0`) raise the SDK's internal
+   `McpError(-32602)`, surfaced as a tool-result error (`isError: true`, HTTP 200);
+   no schema-level case is claimed here. No
+   prior test exercised the cursor decoder's negative path.
+2. An unexpected persistence error (injected at `deps.db`) maps to a sanitized
+   `503 UNAVAILABLE` JSON envelope on API and MCP, and a generic `500` HTML page on
+   dashboard routes; the injected message never reaches the response. Prior coverage
+   proved transaction rollbacks, not app-level error mapping.
+3. A blob-write failure returns a sanitized `503`, publishes nothing, leaves the
+   provisional idempotency row, and the same key/payload resumes to exactly one
+   message and one blob. Prior tests covered a failed blob *verification* and
+   mid-request revocation, not a failed blob *write* plus the route-level retry.
+4. Invalid UTF-8 in JSON, dashboard-form, and OAuth-form bodies is rejected before
+   validation or writes. **Root fix:** request-body `TextDecoder`s in
+   `src/app/handlers.ts`, `src/app/web.ts`, and `src/app/oauth.ts` are now
+   `{ fatal: true }`; non-fatal decoding previously replaced malformed bytes with
+   U+FFFD and could accept content the client did not send. Reverting each decoder
+   alone fails the test: JSON reaches `INTEGRITY_MISMATCH`, the dashboard form is
+   rejected with the `400` `loginExpired` retry page (fresh login cookie set where
+   the strict path sets none), and OAuth reaches `invalid_grant`. The probes are not clean-room minimal —
+   the JSON body carries a deliberately invalid digest and the login form no
+   `login_csrf` — but each assertion is sensitive to its decoder reverting. The
+   guarantee is over **raw request bytes on routes this server decodes**:
+   `URLSearchParams` percent-decoding (`x=%FF`) substitutes U+FFFD, and a JSON
+   lone-surrogate escape (`"\ud800"`) is preserved by `JSON.parse` and becomes
+   U+FFFD when the server UTF-8-encodes it; both are normalization outside the
+   raw-byte rule. `POST /mcp` is decoded by the pinned SDK transport (see
+   `docs/mcp.md`). `docs/api.md` and `docs/mcp.md` record that scope, and
+   `docs/oauth.md` the OAuth form error shapes.
+5. Inactive account, inactive speaker, and inactive project states fail closed on
+   bearer surfaces (401 `UNAUTHENTICATED` for the principal, 404 `NOT_FOUND` for the
+   project) with no writes; the project disappears from listing.
+6. Corrupt idempotency rows with a missing payload digest or missing message id
+   return `UNAVAILABLE` and never mint a second message.
+
+### D1 caveat (explicit)
+
+SQLite (`src/storage/sqlite.ts` over built-in `node:sqlite`) is the only persistence
+backend in this tree. There is no D1 or R2 adapter in `src/storage` or
+`src/platforms`, and the shared storage contract's D1 scenario is deliberately
+skipped at `tests/contract/storage.test.ts:24` with the reason "External gap: no D1
+adapter, Cloudflare runtime, or credentials in this environment". The "both backends
+if persistence affected" part of the clause is therefore **structurally
+inapplicable**, not passed: no second backend was simulated, and the pre-existing D1
+transaction-contract debt (read-then-write callbacks, in-transaction affected-row
+counts) is unchanged.
+
+### Commands
+
+`npm run check` exit 0 (secret scan, history scan, license report, strict typecheck,
+`702` tests: `701` pass, `1` skipped D1 contract scenario, `0` fail) and
+`npm run build` exit 0. Branch `negative-coverage`, base
+`60bafd17290d367b7e18849c79d000c86e51c4ee`.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -2792,3 +2890,16 @@ Do not infer any of these from local MCP behavior or from another plan.
   known address can be locked out; per-IP controls remain the reverse proxy's job.
 - Server-readable encryption only; not E2EE.
 - `lint` is strict typecheck; no separate linter.
+- Request-body UTF-8 strictness covers raw bytes on the routes this server decodes
+  (`/api/v1`, dashboard forms, `/oauth/*`). Three documented normalization exceptions
+  remain: `POST /mcp` is decoded by the pinned MCP SDK transport with a non-fatal
+  decoder, `URLSearchParams` percent-decoding substitutes U+FFFD for `x=%FF`, and a
+  JSON lone-surrogate escape is preserved by `JSON.parse` and becomes U+FFFD when the
+  server encodes it. Substituted values are compared exactly, so none of them widens
+  authorization; the upgrade is a strict pre-read in the MCP
+  adapter (or an upstream SDK change) and a percent/escape-strict form parser.
+- The negative-path suite does not assert schema-level MCP argument rejection: a
+  negative seq or `limit: 0` raises the SDK's internal `McpError(-32602)`, which the
+  SDK surfaces as a tool-result error (HTTP 200, `isError: true`) instead of the
+  Corkboard `VALIDATION_ERROR` envelope. Only cursor and semantic (service-level)
+  violations are asserted.

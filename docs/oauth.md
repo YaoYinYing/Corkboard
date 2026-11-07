@@ -221,7 +221,11 @@ membership does not hold returns `403` and issues no code.
 ## Token endpoint
 
 `POST /oauth/token` — `Content-Type: application/x-www-form-urlencoded` only; other
-media types are `400 {"error":"invalid_request"}`. Body cap 64 KiB. Process-local
+media types are `400 {"error":"invalid_request"}`. Form bodies must be valid UTF-8;
+malformed bytes are `400 {"error":"invalid_request"}` at decode time. The same JSON
+error shape is returned for a malformed `/oauth/consent` body, while `/oauth/signin`
+renders the HTML error page instead: both fail closed before any lookup, but the
+response shape differs by surface. Body cap 64 KiB. Process-local
 token-exchange limiters: **60 requests/minute, burst 20** keyed by submitted
 `client_id` (bounded map), plus a global **300 requests/minute, burst 60** bucket for
 the endpoint, so rotating an unauthenticated `client_id` cannot bypass limiting. Not

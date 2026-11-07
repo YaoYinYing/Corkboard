@@ -57,7 +57,9 @@ import { json } from "./responses.ts";
 const MAX_OAUTH_BODY_BYTES = 64 * 1024;
 const FORM_MEDIA_TYPE = "application/x-www-form-urlencoded";
 const LOGIN_CSRF_COOKIE = "corkboard_oauth_login";
-const DECODER = new TextDecoder();
+// Request bodies must be valid UTF-8; a non-fatal decoder would accept
+// malformed bytes as U+FFFD. Decode failures become invalid_request.
+const DECODER = new TextDecoder("utf-8", { fatal: true });
 const AUDIT_CLIENT_ID = /^[A-Za-z0-9._~-]{1,128}$/;
 const AUDIT_GRANT_TYPES = new Set(["authorization_code", "refresh_token"]);
 const ENCODER = new TextEncoder();
@@ -192,7 +194,12 @@ async function readForm(request: Request): Promise<URLSearchParams> {
   if (mediaType(request) !== FORM_MEDIA_TYPE) {
     throw new OAuthTokenError("invalid_request");
   }
-  return new URLSearchParams(DECODER.decode(await readBodyBytes(request)));
+  const bytes = await readBodyBytes(request);
+  try {
+    return new URLSearchParams(DECODER.decode(bytes));
+  } catch {
+    throw new OAuthTokenError("invalid_request");
+  }
 }
 
 function singleTokenParam(params: URLSearchParams, name: string): string | null {

@@ -78,7 +78,9 @@ import { escapeHtml, htmlResponse, WEB_CSP } from "./html.ts";
 import type { RateLimiter } from "./rate-limit.ts";
 
 const ENCODER = new TextEncoder();
-const DECODER = new TextDecoder();
+// Request bodies must be valid UTF-8; a non-fatal decoder would accept
+// malformed bytes as U+FFFD. Decode failures are a validation error.
+const DECODER = new TextDecoder("utf-8", { fatal: true });
 const MAX_WEB_BODY_BYTES = 64 * 1024;
 const MAX_RETURN_TO_LENGTH = 2048;
 const DEFAULT_TIMELINE_LIMIT = 50;
@@ -857,7 +859,11 @@ async function readForm(request: Request): Promise<URLSearchParams> {
   }
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > MAX_WEB_BODY_BYTES) throw new AppError("REQUEST_TOO_LARGE");
-  return new URLSearchParams(DECODER.decode(bytes));
+  try {
+    return new URLSearchParams(DECODER.decode(bytes));
+  } catch {
+    throw new AppError("VALIDATION_ERROR", "Malformed form encoding");
+  }
 }
 
 function singleFormParam(form: URLSearchParams, name: string): string | null {

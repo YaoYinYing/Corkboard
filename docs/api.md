@@ -14,8 +14,19 @@ actions, and the "Planned, not implemented" section below are not implemented. S
 [`oauth.md`](./oauth.md) for the OAuth flows, and [`web-ui.md`](./web-ui.md) for the
 dashboard.
 
-Base path: `/api/v1`. JSON in, JSON out, UTF-8. All timestamps are server-generated
-UTC ISO-8601 with milliseconds unless stated otherwise.
+Base path: `/api/v1`. JSON in, JSON out, UTF-8. Routes this server decodes itself
+read raw request bytes with a fatal UTF-8 decoder and refuse a malformed body before
+parsing or validation, never silently replacing it: the JSON API answers
+`400 VALIDATION_ERROR`, dashboard form posts answer the dashboard's generic `400` HTML
+page (no JSON error code). Two normalization layers sit outside that guarantee:
+`application/x-www-form-urlencoded` percent-decoding substitutes U+FFFD for an invalid
+sequence, and a JSON `\uD800`-style lone surrogate escape is preserved by `JSON.parse`
+and becomes U+FFFD when the server UTF-8-encodes it. Neither fails closed at decode
+time. Such a value is compared exactly like any other input and does not widen
+authorization, but it is not a decode-time rejection. `POST /mcp` bodies are
+decoded by the pinned MCP SDK transport and are not covered by this rule; see
+[`mcp.md`](./mcp.md). All timestamps are server-generated UTC ISO-8601 with
+milliseconds unless stated otherwise.
 
 ## Authentication and authorization
 

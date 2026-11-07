@@ -57,6 +57,15 @@ before routing, an oversized **unauthenticated** POST therefore returns `413` ra
 Web `Request` is handed directly to the core, the SDK transport returns a `413` JSON-RPC
 error. In both cases no tool argument is parsed.
 
+`POST /mcp` is the one route whose body UTF-8 validity this server does not enforce:
+the pinned SDK transport decodes the JSON-RPC body with a non-fatal decoder, so an
+authenticated client that sends malformed bytes sees them replaced with U+FFFD rather
+than refused. Tool arguments are then validated as usual; a replacement character makes
+an identifier miss (no match, no authorization) and cannot stand in for a stored value
+that contains no replacement character. The fix belongs at the adapter (a strict pre-read before the
+SDK sees the body) or upstream in the SDK, and is recorded as debt in
+`IMPLEMENTATION_STATE.md`.
+
 Every `/mcp` response carries `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`, including SDK JSON responses and protocol/auth
 errors.

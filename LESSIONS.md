@@ -3,6 +3,37 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-07 — a non-fatal TextDecoder silently rewrites untrusted bytes
+
+- **Failure avoided:** Request bodies were decoded with `new TextDecoder()`, whose
+  default replaces malformed UTF-8 with U+FFFD. A body containing `0xff` inside a JSON
+  string was accepted as valid text and only failed later if the digest happened to
+  disagree; form routes could accept the replacement value outright. The server would
+  then validate, store, or compare content the client never sent.
+- **Reproducer:** POST a JSON body with `0xff` inside the `text` string, or a
+  form-encoded login/OAuth body with `0xff` in a value. With a non-fatal decoder the
+  JSON path reaches digest validation (`INTEGRITY_MISMATCH`) or succeeds when the
+  digest is computed over the replacement text; the form paths reach credential
+  validation. Neither is a decode-time rejection.
+- **Fix:** Decode every request body this server parses itself with `new
+  TextDecoder("utf-8", { fatal: true })` and map the decode failure to the route's
+  validation error (`VALIDATION_ERROR` for API, the generic HTML `400` for dashboard
+  forms, `invalid_request` for OAuth). Stored plaintext and envelope headers keep
+  their own decoding; this rule is about the network trust boundary.
+- **Prevents:** Silent content mutation at the input boundary and tests that pass
+  because the malformed byte was replaced rather than rejected.
+- **Caveat (still true after the fix):** the guarantee is over **raw request bytes**.
+  `URLSearchParams` percent-decoding substitutes U+FFFD for `x=%FF`; a JSON
+  `\uD800`-style surrogate escape is preserved by `JSON.parse` and becomes U+FFFD when
+  the server UTF-8-encodes it. `POST /mcp` is decoded by the pinned MCP SDK transport,
+  which is not strict. Say "raw request bytes on routes this server decodes", not
+  "every body". A test for a strict decoder must also be a test that fails when the
+  decoder is reverted: a probe whose request is already invalid (unknown client) passes
+  either way, so verify by reverting the decoder and watching that test go red.
+- **Remove when:** every request-body decoder is provably strict (for example a
+  shared strict-body helper replaces the per-route decoders, including a strict
+  pre-read in the MCP adapter).
+
 ## 2026-11-06 — a limiter after authentication still pays the authentication cost
 
 - **Failure avoided:** The per-credential bucket was checked after the bearer
