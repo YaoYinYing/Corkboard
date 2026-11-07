@@ -1,0 +1,17 @@
+# Illustrative Codex CLI configuration fragment.
+#
+# Copy the relevant lines into ~/.codex/config.toml and check the schema of your
+# installed Codex CLI version; this file is an example, not a stable contract.
+#
+# Only variable NAMES appear in the environment policy. The bearer value is
+# exported by the invoking shell (see README.md) and is never stored here.
+[shell_environment_policy]
+include_only = [
+  "PATH",
+  "HOME",
+  "SHELL",
+  "CORKBOARD_APIKEY",
+  "CORKBOARD_BASE_URL",
+  "CORKBOARD_PROJECT_ID",
+  "CORKBOARD_POLL_CURSOR",
+]

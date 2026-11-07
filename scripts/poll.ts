@@ -214,7 +214,7 @@ function requestContext(options: PollContext): RequestContext {
 // AbortSignal.any, so the helper keeps working on older runtimes. The controller
 // stays live until the body has been read, so aborting it also aborts a stalled
 // body stream.
-function timeoutSignal(
+export function timeoutSignal(
   parent: AbortSignal | undefined,
   ms: number,
 ): { signal: AbortSignal; abort: () => void; cancel: () => void } {
@@ -237,7 +237,7 @@ function timeoutSignal(
 
 // Stream every body through a hard byte cap; Content-Length is never trusted.
 // Aborting the scoped controller cancels the response stream.
-async function readCappedBody(
+export async function readCappedBody(
   response: Response,
   abort: () => void,
   parent: AbortSignal | undefined,

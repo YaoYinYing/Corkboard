@@ -110,6 +110,16 @@ observation only: one bounded page, no body fetch, no receipt, and no cursor wri
 programmatic callback implies consumption. Summaries are untrusted metadata and are
 never executed. The server is not an agent scheduler.
 
+### Agent integration examples
+
+[`examples/agent-integration/`](examples/agent-integration/) contains runnable local
+Codex CLI and Claude Code examples built on that poller: a distinct
+`CORKBOARD_APIKEY` per agent read from the environment or a `0600` file outside the
+repository, the full list → fetch → verify → process → `mark_read` loop with a
+durable cursor, and a send example with a caller-generated `Idempotency-Key` and no
+credential in argv. These are local examples only; they are not a ChatGPT
+integration and no real Codex or Claude Code session is claimed as executed.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

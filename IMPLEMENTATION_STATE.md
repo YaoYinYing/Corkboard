@@ -20,6 +20,7 @@ as the work it describes.
 
 | Commit | Tree | Capability | Reviews |
 | --- | --- | --- | --- |
+| this checkpoint | commit trailer `Tree-SHA` | "Provide Codex CLI and Claude Code skill examples" (local Codex CLI / Claude Code integration examples): `examples/agent-integration/` adds `poll-consume.ts` (imports `scripts/poll.ts` and adds only an `onMessage` callback that writes verified, credential-redacted bodies to a private `0600` inbox before the poller's `mark_read`/cursor advance), `send.ts` (environment-only `CORKBOARD_APIKEY`, caller-supplied `Idempotency-Key`, poller-style deadline and 1 MiB streamed cap), `lib.ts` (env-only loading and error redaction), a Claude Code `SKILL.md`, and a Codex CLI `config.toml.example` + `AGENTS.md.example` + shell invocation; `tests/unit/agent-integration.test.ts` scans the examples with `findSecrets` plus a literal-bearer check and covers env-only loading, whitespace rejection, error redaction, inbox redaction/atomicity/privacy, and send oversize/timeout paths. Additive only: no application authorization, crypto, poller behavior, schema, dependency, or runtime-server change. Local examples only; no real Codex/Claude Code session and no ChatGPT integration is claimed. | PENDING independent review; exact-revision audit to be recorded by the coordinator |
 | this checkpoint | commit trailer `Tree-SHA` | Private-preview deployment package (no runtime/authorization/crypto change). `compose.preview.yaml` merges with the base file and uses `!override` for ports/volumes plus a distinct Compose project, explicit preview data-volume name, required preview secrets directory, and `127.0.0.1:${CORKBOARD_PREVIEW_PORT}:8787`; it inherits the read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, non-root UID/GID, healthcheck, and stop signal. `docs/preview-deployment.md` gives the operator procedure: fresh `init` into a `0600` file outside the repository; synthetic owner/member/outsider accounts, projects, and credentials; an issued-then-revoked credential; a valid non-member credential; TLS reverse-proxy Option A (source-IP allowlist that does not intercept machine clients) and Option B (Cloudflare Access scoped to browser paths with explicit `/mcp`, OAuth token/registration/revocation, discovery, and bearer-REST bypasses; not a blanket front); loopback/firewall expectations; an acceptance checklist (image ID, secret mode/owner, hardening, loopback, TLS, proxy limits, `/healthz`, `/readyz`, cookie flags, CSRF, non-member 404, issuance/revocation, send/list/body/receipt/replay/conflict, restart persistence, backup/verify/restore, browser/manual gaps); rollback/decommission confined to the preview project and exact volume; and known limitations. `scripts/preview-preflight.ts` is a credential-safe, no-new-dependency HTTP preflight with `--base-url` (https or loopback origin only), `--credential-file` (regular `0600`, never printed), `--project`, optional revoked/nonmember credential files, and optional `--login`/`--password-file`; it checks health/ready, unauthenticated `401`, `/me` binding, list, deterministic send, body, receipt, replay, `409` conflict, revoked `401`, non-member `404` with exact `error.code = NOT_FOUND`, login cookie flags for the exact `SESSION_COOKIE_NAME`, and CSRF negative/positive, reading every response with a 1 MiB cap and printing only pass/fail and statuses with no token, cookie, body, or URL. `tests/unit/preview-preflight.test.ts` covers argument/file validation, the full pass path, redaction of a fetch error carrying the token, and fail-closed status/binding failures with an injected fetch. `npm run preview-preflight` follows the existing operator-script pattern. Rebased onto `0cd5ffc` (tree `bb8270e`), the docs/state tail that records the TODO 409 review-remediation checkpoint `5a310d1` (tree `d8b1bb3`) as independently audited and pushed; `da6eba9` remains the latest audited CI-passing code checkpoint before that remediation. **Nothing was deployed; host, domain/DNS, TLS, tester allowlist, and credentials are maintainer-supplied.** Results and blockers are tracked in Issue #11, `[Preview] Restricted private-preview deployment — status and blockers`. | `npm run check` exit 0 (673 tests: 672 pass, 1 skipped live-D1, 0 fail; secret scan ok, history scan ok, license scan 98 dependencies with 0 flagged); `npm run build` exit 0; built CLI config smoke exits `2` for missing/invalid arguments as documented; `CORKBOARD_PREVIEW_PORT=18787 CORKBOARD_PREVIEW_SECRETS_DIR="$PREVIEW_ROOT/secrets" CORKBOARD_SECRETS_DIR="$PREVIEW_ROOT/secrets" docker compose -f compose.yaml -f compose.preview.yaml config` exit 0 with only the preview volume, preview secrets bind, loopback port, and inherited hardening. No deployment, browser pass, TLS pass, backup rehearsal, or ChatGPT interoperability claim. Independent security and contract delta audits returned PASS on tree `fbf73fe` (security PASS with no P1/P2 after the 1 MiB cap and exact cookie-name fixes; contract PASS after the rebase to `0cd5ffc` and the §5.1 ordering fix). Pushed at `f1845b6`; audited candidate `d63e728` (same tree); CI concluded success (run ID redacted) |
 | this checkpoint | commit trailer `Tree-SHA` | TODO 409 fresh-review remediation: pre-authentication bearer rate limiting keyed by the parsed token's public prefix (no credential SELECT/HMAC/`last_used_at` write when over limit), OAuth-issued credentials rejected for grant widening by the service, dashboard, and `grant-key-project` CLI via one shared predicate, bounded RFC 3339 `client_sent_at`, same-origin link normalization for duplicate leading slashes, cleartext-HTTP rejection for non-loopback pollers, `--ignore-scripts` install docs, a pinned SBOM fallback, corrected acceptance-report artifact claims, and secret-scan worktree/stat-before-read coverage. Docs updated wherever the limiter order/key, prefix selection, OAuth widening, `client_sent_at`, polling TLS, install, and scan behavior is described | Security audit PASS with P3s (pre-auth limiter meets the no-DB-work-when-limited requirement; host-check tricks, OAuth predicate, validation, link normalization, and scan fail-closed properties verified); contract audit BLOCKed the first tree on five stale rate-limit docs, then PASSed the final docs-only tree. Final exact-tree verdicts: security PASS, contract PASS. Pushed at `5a310d1`; candidate `b236635` (same tree); CI concluded success (run ID redacted). `npm run check` exit 0 (663 tests: 662 pass, 1 skipped live-D1, 0 fail); `npm run build` exit 0 |
 | this checkpoint | commit trailer `Tree-SHA` | Issue #10 (polling receipt semantics): the reference poller now fetches and verifies `GET /api/v1/projects/:projectId/messages/:messageId/body` before any `mark_read`. It checks that `message_id` exactly matches the listed row, requires a canonical `sha256:<64 lowercase hex>` digest, recomputes SHA-256 over the UTF-8 `text` with `node:crypto`, and on success passes the metadata plus verified plaintext to `onMessage(message, body)`. Consumption is explicit: `--consume` or a programmatic callback; the default CLI is metadata observation only (one bounded page, optional `--show-summary`, no body fetch, no receipt, no cursor write, and an emitted `consumed=0, no body fetched, no receipt, cursor unchanged` line). Acknowledge and advance the durable cursor only after the callback returns and `mark_read` is confirmed, or after a definitive body `410 BODY_EXPIRED` tombstone (escaped status line, no receipt). Body `401`/`403`/`404` exit `2`; `5xx`/network/timeout exit `1`; a malformed contract or `410` without `BODY_EXPIRED` exits `3`; a digest mismatch is `INTEGRITY_FAILURE` exit `3`; a callback throw is `PROCESS_FAILED` exit `1`; all leave no receipt and no cursor advance. Body text and digest are never printed or logged; the existing request context/deadline and 1 MiB capped streaming read are reused, with no new HTTP machinery, dependency, schema, migration, or service-layer import. Docs: `docs/polling.md` (flow, receipt rule, `--consume`, failure table), `docs/api.md`, `README.md`, `TODO.md`, state, and LESSIONS | Pushed on `origin/main` at `da6eba9`; audited candidate `f499342` (same tree); CI concluded success (run ID redacted in this environment). Both exact-revision audits returned PASS: the security audit found no blocking/P1/P2 issues, and the contract audit judged the HTTP-layer interception of the two synthetic `/body` failures acceptable because the un-intercepted ordering test exercises the real `createApp` body handler. `npm run check` exit 0 (655 tests: 654 pass, 1 skipped live-D1, 0 fail; secret and history scans ok, license scan 98 dependencies with 0 flagged); `npm run build` exit 0. New unit coverage: transport-observed (injected-fetch) body-`GET`-before-receipt order; default CLI observation creates zero receipts and leaves the cursor bytes unchanged; body `401`/`403`/`404`/`429`/`5xx`/non-`BODY_EXPIRED` 410 failures; malformed/wrong-message/missing-field/non-canonical-digest/digest-mismatch; callback failure; body-fetch-succeeds / `mark_read`-410 expiry race; body cap, deadline, and signal abort; body/digest/credential redaction. Integration coverage over the real `createApp` loopback path asserts server-observed request order and verified plaintext, plus body-`GET` failure, digest mismatch, callback failure, restart-dedup after a persisted cursor, and default-observation no-receipt/no-cursor cases |
@@ -2226,6 +2227,68 @@ worktree, and no `git cat-file -s` precheck before reading a staged index blob.
 
 Evidence: `npm run check` exit 0 (secret scans, license report, typecheck, 663 tests:
 662 pass, 1 skipped live-D1, 0 fail) and `npm run build` exit 0 at the candidate tree.
+
+## Agent integration examples ("Provide Codex CLI and Claude Code skill examples", branch `agent-skill-examples`, base `4241ec7`)
+
+Status: implemented on branch `agent-skill-examples`; the commit trailers record the
+tree and candidate. Independent review and the exact-revision audit are **PENDING**
+and this slice must not be described as audited until the coordinator records them.
+
+TODO line-number labels in this file drift as `TODO.md` edits shift lines; the
+stable bullet title above is authoritative. This slice is not the earlier polling
+slice that used a numeric label.
+
+- **Deliverable:** `examples/agent-integration/` contains a Claude Code
+  `claude-code/SKILL.md`; a Codex CLI `codex/config.toml.example`,
+  `codex/AGENTS.md.example`, and `codex/README.md` shell invocation; `poll-consume.ts`;
+  `send.ts`; and `lib.ts`. Both agent examples treat message content as untrusted
+  data, forbid rendering the credential, and require a distinct key per agent.
+- **Credential handling:** `lib.ts` reads `CORKBOARD_APIKEY` from the environment
+  only and applies the poller's non-empty/no-whitespace rule before any request.
+  The examples reject argv delivery, never print the key, and redact it on every
+  error path; raw transport errors are replaced with the fixed `unexpected failure`.
+  Documentation shows each key stored in its own `0600` file outside the repository
+  and exported into the environment, uses explicit `issue-key --scopes`
+  (`message.read,receipt.write` for polling, `message.send` for sending) instead of
+  the broader default, and names the operator `revoke-key`/`rotate-key` commands. No
+  registration endpoint or committed credential is introduced; the examples are
+  scanned by the repository secret scan.
+- **Full loop:** `poll-consume.ts` imports `run`, `parseBaseUrl`, `redact`,
+  `redactAndEscape`, and the limit constants from `scripts/poll.ts`. It adds only an
+  `onMessage` callback: it writes each digest-verified body to a private inbox
+  (`<cursor-dir>/inbox`, `0700`, one `0600` file per `seq`) and emits a status line
+  without content. Every persisted field, including `message_id`/`sender_id`, is
+  credential-redacted. Inbox writes use a fsynced temp file and atomic rename, so a
+  partial write is never mistaken for delivery; an existing complete target is not
+  overwritten by an at-least-once replay. The inbox path is validated (including
+  against symlinks) before it is created, must resolve outside the repository, and
+  is then chmodded `0700`. The reference poller still owns list `after_seq`, body fetch and digest
+  verification, explicit `mark_read`, and the atomic durable cursor; no list URL,
+  receipt endpoint, or cursor writer is duplicated.
+- **Send:** `send.ts` reads the credential from the environment, computes
+  `body_digest` over the exact UTF-8 text, sends a caller-generated
+  `Idempotency-Key`, and prints only status/message id/seq. It reuses the poller's
+  exported `timeoutSignal`/`readCappedBody` for one request-and-body deadline and a
+  1 MiB streamed cap, and neither the key nor the text is printed.
+- **Tests:** `tests/unit/agent-integration.test.ts` (9 tests) scans every file under
+  `examples/agent-integration/` with `findSecrets` and a literal-bearer regex;
+  asserts environment-only loading with whitespace rejection and error redaction
+  (including the fixed fallback for a raw undici-style error); asserts the consume
+  example imports the reference poller and contains no list URL or receipt endpoint;
+  covers inbox field redaction, no-overwrite, stale-temp, failed-write, `0700`
+  tightening, outside-repository rejection, the production-computed repository root
+  against the default `$HOME/.local/state` inbox, a symlinked inbox path, and
+  complete writes; and covers send's oversize-body exit `3` and request timeout
+  exit `1` without echoing the credential.
+- **Non-claims:** local examples only. No real Codex CLI or Claude Code session was
+  executed, and no ChatGPT integration, OAuth linking, or conversation-level tool
+  invocation is claimed. Runtime smoke used a synthetic loopback HTTP fixture
+  (not committed): consume advanced the cursor to `seq` 1 and wrote one inbox file;
+  send returned `201`.
+
+Evidence: `npm run check` exit 0 (secret scans, license report, typecheck,
+682 tests: 681 pass, 1 skipped live-D1, 0 fail), `npm run build` exit 0, and
+`npm run build:repro` exit 0.
 
 ## Implemented and verified at this tree
 

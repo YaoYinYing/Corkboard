@@ -1743,3 +1743,21 @@ prevented regression; when to remove the advice.
 - **Remove when:** the base compose is parameterized so an override cannot inherit
   production values, or Compose offers a merge mode that replaces sequences by
   default.
+
+## 2026-11-06 — a "never print the secret" example needs a scan and an error-path test
+
+- **Failure avoided:** An integration example can pass review while a copied
+  credential literal, a literal after `Bearer `, or an unredacted error path leaks
+  the key later. Examples also drift when they copy the reference client instead of
+  importing it.
+- **Reproducer:** Add a `cb_`-shaped literal or a literal bearer value to any file
+  under `examples/`, or make `safeErrorMessage` return `error.message` without
+  redaction; the scan and helper tests fail respectively.
+- **Fix:** `tests/unit/agent-integration.test.ts` runs the repository's
+  `findSecrets` over the example directory plus a literal-bearer check, and tests
+  environment-only loading and error redaction; `poll-consume.ts` imports
+  `scripts/poll.ts` rather than reimplementing the list/body/receipt/cursor loop.
+- **Prevents:** A credential leaked through example content or output, and an
+  example that no longer demonstrates the shipped poller.
+- **Remove when:** examples are generated from a single credential-safe template
+  whose output is scanned automatically.
