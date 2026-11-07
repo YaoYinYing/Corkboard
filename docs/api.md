@@ -398,7 +398,16 @@ timestamp; the timeline can expire one ready body through the existing service, 
 there is no expiry listing, editor, or cleanup UI. Per-credential project-grant
 add/remove and atomic credential rotation are implemented on the credential inventory
 for active credentials of active speakers; per-credential expiry editing, project
-deletion/status change, and administrative actions remain unimplemented.
+deletion, API/dashboard project status changes, and administrative actions remain
+unimplemented. Project `active`/`disabled` transitions exist only as the operator CLI
+`disable-project`/`enable-project`. While disabled, paths that authorize access to
+project data (`/api/v1`, MCP, and dashboard sends/reads/bodies/receipts/session
+resolution) fail closed as uniform `NOT_FOUND`; project listings omit the project,
+indistinguishable from an inaccessible project; the dashboard credential inventory and
+OAuth consent candidates omit it; OAuth authorization-code issuance instead returns the
+same non-enumerable `FORBIDDEN` it returns for an unknown project. Credential
+revocation, rotation, and grant removal remain available during a disable through the
+CLI and service/POST paths.
 
 ## Endpoints
 
@@ -967,8 +976,10 @@ project-grant editing are
 implemented; dashboard message send is implemented; the dashboard can atomically
 rotate an active credential (show-once replacement token, old row revoked in the same
 transaction) and the operator CLI `rotate-key` performs the same replacement; the
-timeline can expire one ready body through the existing service; project
-deletion/status changes remain deferred; per-credential expiry selection exists only
+timeline can expire one ready body through the existing service; project deletion and
+API/dashboard status changes remain deferred (the operator CLI
+`disable-project`/`enable-project` is the only status transition); per-credential
+expiry selection exists only
 as the CLI `issue-key --expires-at`/`rotate-key --expires-at` options, and the compose
 form's optional body-expiry field is the only other expiry input. The
 bearer-authenticated `/mcp` surface is implemented

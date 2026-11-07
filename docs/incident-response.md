@@ -59,11 +59,25 @@ backups intact.
    connections, closes the server, and closes the database. In Docker, `docker compose
    stop` uses `SIGTERM` with the configured grace period. Stopping the service is the
    blunt containment for an unresolved active intrusion.
-5. **There is no supported project-disable operation.** New projects are created with
-   `status='active'`, but no CLI or dashboard command changes an existing project's
-   status (`create-project` does not accept a status option). Do not hand-edit project
-   status as a containment step. To cut off access, revoke credentials/memberships or
-   stop the service.
+5. **Disable a project.** `disable-project --project <id>` sets `projects.status` to
+   `disabled`; `enable-project --project <id>` sets it back to `active`. This is an
+   operator-only local containment action (there is no HTTP or dashboard route). Paths
+   that authorize access to project data require `status = 'active'`, so reads, sends,
+   bodies, receipts, and dashboard session resolution fail closed as uniform
+   `NOT_FOUND`; project listings omit the project, indistinguishable from an
+   inaccessible project. The dashboard credential inventory hides the project's grant
+   (and its remove-grant control), and OAuth consent candidates omit the project. OAuth
+   authorization-code issuance denies a disabled project with the same non-enumerable
+   `FORBIDDEN` it returns for an unknown project. Credential revocation/atomic rotation
+   and project-grant removal remain available while the project is disabled through the
+   CLI and service/POST paths, which is what lets an operator revoke access without
+   re-enabling it. Re-running a transition is an
+   idempotent no-op; each real transition writes one sanitized system-actor audit row
+   (`project.disable` / `project.enable`) with the project id. If the audit insert
+   fails, the status change is already committed and the command warns and exits 1.
+   Disabling a project does not revoke credentials or sessions, and it is reversible;
+   for credential compromise still revoke or rotate the credential as in step 1.
+   Re-enable only after the cause is resolved.
 6. **Do not rotate the root key or pepper as a reflex.** Root-key rotation with
    re-encryption and pepper dual-read migration are **not implemented**. Regenerating
    the secrets file makes existing ciphertext undecryptable and existing token verifiers

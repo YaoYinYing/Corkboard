@@ -22,10 +22,20 @@ import { AppError } from "../../src/domain/errors.ts";
 import {
   authenticateBearer,
   authorizeProject,
+  resolveSessionViewer,
+  sessionAccountPrincipal,
   type ServiceDeps,
 } from "../../src/service/auth.ts";
 import { expireMessageBody } from "../../src/service/expiry.ts";
-import { getMessageBody, sendMessage } from "../../src/service/messages.ts";
+import {
+  getMessageBody,
+  listMessages,
+  markRead,
+  sendMessage,
+} from "../../src/service/messages.ts";
+import { listConsentCandidates } from "../../src/service/oauth.ts";
+import { listProjects } from "../../src/service/projects.ts";
+import { listOwnedSpeakerCredentials } from "../../src/service/speakers.ts";
 import { LocalBlobStore } from "../../src/storage/blobs/local.ts";
 import { MemoryBlobStore } from "../../src/storage/blobs/memory.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
@@ -2223,5 +2233,257 @@ test("concurrent rotate-key calls produce exactly one replacement", async (t) =>
     );
   } finally {
     db.close();
+  }
+});
+
+test("disable-project hides every project path until enable-project restores it", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const speakerId = run(["create-speaker", "--account", accountId, "--name", "Codex"], env)
+    .stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+  assert.equal(
+    run(["add-member", "--project", projectId, "--speaker", speakerId], env).status,
+    0,
+  );
+  const token = run(["issue-key", "--speaker", speakerId, "--project", projectId], env)
+    .stdout.trim();
+
+  const { db, deps } = await openDeps(dataDir, env);
+  try {
+    const principal = await authenticateBearer(deps, `Bearer ${token}`);
+    const inventoryHasProject = async (): Promise<boolean> => {
+      const inventory = await listOwnedSpeakerCredentials(
+        deps,
+        sessionAccountPrincipal({ sessionId: "ses_test", accountId }),
+        speakerId,
+      );
+      return inventory.credentials.some((credential) =>
+        credential.projects.some((grant) => grant.id === projectId),
+      );
+    };
+    const text = "containment test body";
+    const digest = `sha256:${createHash("sha256").update(text).digest("hex")}`;
+    const sent = await sendMessage(deps, principal, projectId, "before-disable", {
+      summary: text,
+      type: "request",
+      language: "en",
+      text,
+      bodyDigest: digest,
+    });
+    // The baseline: every path below succeeds while the project is active.
+    await authorizeProject(deps, principal, projectId, "message.read");
+    assert.equal((await listMessages(deps, principal, projectId)).messages.length, 1);
+    assert.equal((await listProjects(deps, principal)).projects.length, 1);
+    await resolveSessionViewer(
+      deps,
+      { sessionId: "ses_test", accountId },
+      projectId,
+      "message.read",
+    );
+    assert.equal(
+      (await listConsentCandidates(deps, accountId, ["message.read"])).some(
+        (candidate) => candidate.projectId === projectId,
+      ),
+      true,
+    );
+    assert.equal(await inventoryHasProject(), true);
+
+    const disabled = run(["disable-project", "--project", projectId], env);
+    assert.equal(disabled.status, 0, disabled.stderr);
+    assert.equal(disabled.stdout.trim(), `project disabled: ${projectId}`);
+    assert.equal(
+      (await db.first<{ status: string }>("SELECT status FROM projects WHERE id = ?", [projectId]))
+        ?.status,
+      "disabled",
+    );
+
+    const notFound = (error: unknown): boolean => {
+      assert.ok(error instanceof AppError, `expected AppError, got ${String(error)}`);
+      assert.equal(error.code, "NOT_FOUND");
+      return true;
+    };
+    // Send, read, receipt, credential/grant resolution, bearer project listing
+    // (the MCP list), dashboard session resolution, and OAuth consent all fail
+    // closed with the same NOT_FOUND as an unknown project.
+    await assert.rejects(
+      sendMessage(deps, principal, projectId, "after-disable", {
+        summary: text,
+        type: "request",
+        language: "en",
+        text,
+        bodyDigest: digest,
+      }),
+      notFound,
+    );
+    await assert.rejects(listMessages(deps, principal, projectId), notFound);
+    await assert.rejects(markRead(deps, principal, projectId, sent.messageId), notFound);
+    await assert.rejects(authorizeProject(deps, principal, projectId, "message.read"), notFound);
+    assert.equal((await listProjects(deps, principal)).projects.length, 0);
+    await assert.rejects(
+      resolveSessionViewer(
+        deps,
+        { sessionId: "ses_test", accountId },
+        projectId,
+        "message.read",
+      ),
+      notFound,
+    );
+    assert.equal(
+      (await listConsentCandidates(deps, accountId, ["message.read"])).some(
+        (candidate) => candidate.projectId === projectId,
+      ),
+      false,
+    );
+    // The dashboard credential inventory omits the disabled project's grant, so
+    // its remove-grant control is hidden; grant addition is denied, while grant
+    // removal, revocation, and rotation remain available through the CLI/service
+    // (and the POST route) for containment.
+    assert.equal(await inventoryHasProject(), false);
+
+    // Idempotent: a second disable succeeds, prints a no-op line, and adds no
+    // second audit row.
+    const disabledAgain = run(["disable-project", "--project", projectId], env);
+    assert.equal(disabledAgain.status, 0, disabledAgain.stderr);
+    assert.equal(disabledAgain.stdout.trim(), `project already disabled: ${projectId}`);
+
+    const unknown = run(["disable-project", "--project", "proj_missing"], env);
+    assert.equal(unknown.status, 1);
+    assert.equal(unknown.stdout.trim(), "");
+    assert.match(unknown.stderr, /project not found: proj_missing/);
+
+    const disableAudits = await db.all<{
+      actor_account_id: string | null;
+      actor_speaker_id: string | null;
+      project_id: string | null;
+      operation: string;
+      outcome: string;
+      request_id: string | null;
+      detail: string | null;
+    }>(
+      `SELECT actor_account_id, actor_speaker_id, project_id, operation, outcome,
+              request_id, detail
+         FROM audit_events WHERE operation IN ('project.disable', 'project.enable')`,
+    );
+    assert.equal(disableAudits.length, 1);
+    assert.deepEqual(disableAudits[0], {
+      actor_account_id: null,
+      actor_speaker_id: null,
+      project_id: projectId,
+      operation: "project.disable",
+      outcome: "success",
+      request_id: null,
+      detail: null,
+    });
+
+    const enabled = run(["enable-project", "--project", projectId], env);
+    assert.equal(enabled.status, 0, enabled.stderr);
+    assert.equal(enabled.stdout.trim(), `project enabled: ${projectId}`);
+    const enabledAgain = run(["enable-project", "--project", projectId], env);
+    assert.equal(enabledAgain.status, 0, enabledAgain.stderr);
+    assert.equal(enabledAgain.stdout.trim(), `project already enabled: ${projectId}`);
+    const unknownEnable = run(["enable-project", "--project", "proj_missing"], env);
+    assert.equal(unknownEnable.status, 1);
+    assert.match(unknownEnable.stderr, /project not found: proj_missing/);
+
+    // Re-enable restores every path.
+    await authorizeProject(deps, principal, projectId, "message.read");
+    assert.equal((await listMessages(deps, principal, projectId)).messages.length, 1);
+    assert.equal((await listProjects(deps, principal)).projects.length, 1);
+    await resolveSessionViewer(
+      deps,
+      { sessionId: "ses_test", accountId },
+      projectId,
+      "message.read",
+    );
+    assert.equal(await inventoryHasProject(), true);
+
+    const audits = await db.all<Record<string, unknown>>(
+      `SELECT actor_account_id, actor_speaker_id, project_id, operation, outcome,
+              request_id, detail
+         FROM audit_events WHERE operation IN ('project.disable', 'project.enable')
+        ORDER BY created_at ASC, rowid ASC`,
+    );
+    assert.deepEqual(
+      audits.map((row) => row.operation),
+      ["project.disable", "project.enable"],
+    );
+    for (const row of audits) {
+      assert.equal(row.actor_account_id, null);
+      assert.equal(row.actor_speaker_id, null);
+      assert.equal(row.project_id, projectId);
+      assert.equal(row.outcome, "success");
+      assert.equal(row.request_id, null);
+      assert.equal(row.detail, null);
+    }
+    const serialized = JSON.stringify(audits);
+    assert.equal(serialized.includes(token), false);
+    assert.equal(serialized.includes("owner@example.test"), false);
+    assert.equal(serialized.includes(secrets.CORKBOARD_CREDENTIAL_PEPPER ?? ""), false);
+  } finally {
+    db.close();
+  }
+});
+
+test("disable-project keeps the committed transition and exits 1 when its audit insert fails", async (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  const init = run(["init", "--data-dir", dataDir, "--secrets-file", join(root, "secrets.env")]);
+  assert.equal(init.status, 0, init.stderr);
+  const secrets = parseSecrets(readFileSync(join(root, "secrets.env"), "utf8"));
+  const env: Record<string, string> = {
+    ...process.env,
+    ...secrets,
+    CORKBOARD_DATA_DIR: dataDir,
+  };
+  const accountId = run(["bootstrap-owner", "--email", "owner@example.test"], env).stdout.trim();
+  const projectId = run(["create-project", "--account", accountId, "--title", "Ops"], env)
+    .stdout.trim();
+
+  const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    await db.exec(
+      `CREATE TRIGGER fail_project_disable_audit BEFORE INSERT ON audit_events
+       WHEN NEW.operation = 'project.disable'
+       BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`,
+    );
+  } finally {
+    db.close();
+  }
+
+  const result = run(["disable-project", "--project", projectId], env);
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout.trim(), `project disabled: ${projectId}`);
+  assert.match(
+    result.stderr,
+    /project\.disable audit event could not be written; the status change was committed/,
+  );
+
+  const after = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
+  try {
+    assert.equal(
+      (await after.first<{ status: string }>("SELECT status FROM projects WHERE id = ?", [projectId]))
+        ?.status,
+      "disabled",
+    );
+    assert.equal(
+      (await after.first<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM audit_events WHERE operation = 'project.disable'",
+      ))?.n,
+      0,
+    );
+  } finally {
+    after.close();
   }
 });

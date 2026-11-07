@@ -612,9 +612,9 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   `Cookie`, `X-CSRF-Token`, passwords or password hashes, session tokens, CSRF values,
   email addresses, MCP session ids, or password material.
 - `audit_events` records credential issuance/revocation, credential-project
-  grant/revocation, membership grant/removal, body-integrity failures, and successful
-  body expiry (`message.expire`), with identifiers and outcome only and no body
-  content. The optional `detail` column holds sanitized JSON (granted project IDs and
+  grant/revocation, membership grant/removal, project disable/enable, body-integrity
+  failures, and successful body expiry (`message.expire`), with identifiers and outcome
+  only and no body content. The optional `detail` column holds sanitized JSON (granted project IDs and
   scope lists); it never holds tokens, keys, or message text.
 - Authentication, OAuth lifecycle, and operator retention events are written through the
   shared `src/service/audit.ts` helper so the column convention is uniform. Every row is
@@ -633,11 +633,20 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   | `oauth.refresh.reuse` | `detected` | none | `client_id`, internal `credential_id` |
   | `oauth.revoke` | `success` | none | `client_id`, internal `credential_id`, `token_type`; only when ownership is proven |
   | `retention.prune` | `success` | system (null account and speaker) | `graceHours`, `limit`, and the deleted-row counts `sessions`, `authorizationCodes`, `refreshTokens`, `tokenClients`, `oauthCredentials` |
+  | `project.disable` | `success` | system (null account and speaker) | none; `project_id` column only |
+  | `project.enable` | `success` | system (null account and speaker) | none; `project_id` column only |
 
   `retention.prune` is operator-only and is written once per `prune` run that deletes
   at least one row; a run that deletes nothing writes no row. Counts are per table and
   bounded by `limit`; the row carries no ids, prefixes, verifiers, session ids, IPs,
   free text, or row contents.
+
+  `project.disable` and `project.enable` are operator-only CLI transitions of
+  `projects.status` and are written once per actual transition; an idempotent repeat on
+  an already-disabled/enabled project writes no row. The row is a system actor (null
+  account and speaker) with the project id in `project_id` and no `detail`, account,
+  speaker, email, token, or body. The status change commits before the audit insert;
+  a failed insert leaves the change committed, and the command warns and exits 1.
 
   `detail` values are bounded by construction (200 characters per string, 32 array
   elements, 2,048 characters for the whole document; an oversized document is

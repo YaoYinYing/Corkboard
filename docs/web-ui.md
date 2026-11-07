@@ -1045,8 +1045,9 @@ bounded form before checking CSRF.
   arbitrary chosen speaker. It never writes a receipt.
 - Replay offers bounded previous/next pages plus "jump to latest"; there is no
   time scrubber, date filter, infinite scroll, or client-side history.
-- No attachments, file previews, or image rendering; no project deletion/status
-  change, no speaker creation, no registration, email verification, password reset, or
+- No attachments, file previews, or image rendering; no project deletion or project
+  status control (operator CLI `disable-project`/`enable-project` only), no speaker
+  creation, no registration, email verification, password reset, or
   account settings. The directory shows active project grants only; the credential
   inventory shows non-secret credential metadata and grant rows, never tokens or
   prefixes.

@@ -1960,3 +1960,19 @@ prevented regression; when to remove the advice.
   work.
 - **Remove when:** the session viewer carries a membership-derived capability set
   that the service re-checks per write, instead of one pre-resolved scope.
+
+## 2026-11-07 — audit the transition, not the invocation
+
+- **Failure avoided:** auditing every `disable-project`/`enable-project` invocation
+  would make an idempotent no-op look like a second containment action in incident
+  evidence, and auditing before the update would record events that never happened.
+- **Reproducer:** run `disable-project` twice; a naive implementation writes two
+  `project.disable` rows even though only one status change occurred.
+- **Rule:** an operator transition that may be a no-op audits only when the guarded
+  `UPDATE ... WHERE status = <source>` changed a row, and the durable change is
+  authoritative: insert the sanitized row after the update and, on insert failure,
+  warn and exit non-zero rather than rolling back a containment action.
+- **Prevents:** duplicated or phantom audit evidence and a failed audit sink silently
+  undoing an emergency containment step.
+- **Remove when:** transitions and audit rows are written atomically in one
+  transaction with a retryable outbox, so no committed transition can lack its row.

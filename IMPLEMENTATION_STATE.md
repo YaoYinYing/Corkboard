@@ -182,7 +182,7 @@ opaque keys, and no blob/fileserver route exists;
 `tests/integration/cli.test.ts` sends and decrypts a body through `LocalBlobStore`.
 Scope caveat recorded in `TODO.md`: local adapter only; no R2.
 
-**Left unchecked (31 boxes).** A short reason is appended to every unchecked item in
+**Left unchecked (30 boxes).** A short reason is appended to every unchecked item in
 `TODO.md`. Groups and the missing clause:
 
 - D1/Workers/R2 absent or unexecuted: 317, 318, 322, 325, 362, 368, 482, 485. 317 has
@@ -194,7 +194,6 @@ Scope caveat recorded in `TODO.md`: local adapter only; no R2.
 - No staging or production environment (separate deployment secrets are policy only):
   311.
 - Root-key/pepper rotation and deletion behavior absent: 333.
-- Emergency project-disable absent: 347.
 - Hard impersonation boundary absent: 351 (no credential broker or OS-level
   separation; the documented threat limitation stands).
 - Project deletion absent (operator `prune` audit row superseded by the later
@@ -3218,3 +3217,49 @@ Do not infer any of these from local MCP behavior or from another plan.
   SDK surfaces as a tool-result error (HTTP 200, `isError: true`) instead of the
   Corkboard `VALIDATION_ERROR` envelope. Only cursor and semantic (service-level)
   violations are asserted.
+
+## Checkpoint (2026-11-07) — emergency project disable (TODO 347)
+
+Branch `project-disable`, base `0441d351884a6ab32c49307cfede8bcb16ead930`. Implements
+the remaining clause of TODO 347: an operator-only local `disable-project --project
+<id>` / `enable-project --project <id>` pair that flips `projects.status` between
+`active` and `disabled`. No schema migration was needed (`projects.status` is free-form
+TEXT with a default; `migrations/001_init.sql`). No HTTP, dashboard, or MCP route was
+added. Paths that authorize access to project data already require
+`p.status = 'active'`, so a disabled project fails closed as uniform `NOT_FOUND` for
+bearer REST send/read/body/receipt, MCP tools (same service functions), dashboard
+session resolution and timeline, and owner/member editors; project listings omit the
+project, indistinguishable from an inaccessible project. The dashboard
+credential inventory and OAuth consent candidate listing omit a disabled project rather
+than exposing it. Two corrections followed independent audit: the
+dashboard credential-grant inventory now also filters `p.status = 'active'` so a
+disabled project's id/title is hidden, and OAuth authorization-code issuance denies a
+disabled project and an unknown project with the same non-enumerable `FORBIDDEN` rather
+than `NOT_FOUND`. Credential revocation, atomic rotation, and grant removal remain
+available while a project is disabled through the CLI and service/POST paths so
+containment can proceed; the dashboard inventory omission hides its remove-grant
+control.
+
+Semantics: unknown project exits 1 with `corkboard: project not found: <id>` on stderr
+and empty stdout; a repeat transition
+succeeds as a no-op (`project already disabled` / `project already enabled`) and writes
+no audit row; each actual transition writes exactly one sanitized system-actor audit
+row (`project.disable` / `project.enable`, null account and speaker, project id in
+`project_id`, null `detail`) through the shared `writeAudit` helper. The status update
+commits before the audit insert; an insert failure prints a stderr warning, exits 1,
+and does not roll back the containment action (the same authoritative-transition policy
+as `prune`, documented in `docs/security-operations.md`). Re-enabling restores access
+for existing credentials and sessions because nothing is revoked.
+
+Evidence: `tests/integration/cli.test.ts` `disable-project hides every project path
+until enable-project restores it` exercises the real CLI, real SQLite adapter, audit
+shape/count, unknown project, idempotency, uniform `NOT_FOUND` for
+send/read/receipt/dashboard-session, project-listing omission, OAuth consent-candidate
+omission, dashboard credential-inventory hide/restore, and re-enable restore; `disable-project keeps the committed transition and exits 1 when its
+audit insert fails` covers the fail-open audit policy with a trigger; and
+`tests/integration/audit.test.ts` asserts disabled/unknown OAuth code-issuance parity.
+Docs updated:
+`docs/incident-response.md` item 5, `docs/runbook.md` §2.6 plus command lists, known
+limits, and §7.2; `docs/deployments.md` command table; `docs/security-operations.md`
+audit coverage. TODO 347 is checked; TODO 413's stale "no supported project-disable"
+phrase is corrected. No API behavior changed; `docs/api.md` wording reconciled.

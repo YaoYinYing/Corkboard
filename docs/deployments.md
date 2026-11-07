@@ -228,6 +228,9 @@ node dist/scripts/corkboard.js grant-key-project --credential <credential_id> --
 node dist/scripts/corkboard.js revoke-key-project --credential <credential_id> --project <project_id>
 node dist/scripts/corkboard.js revoke-key --credential <credential_id>
 node dist/scripts/corkboard.js remove-member --project <project_id> --speaker <speaker_id>
+# emergency containment: disable/re-enable one existing project (local CLI only)
+node dist/scripts/corkboard.js disable-project --project <project_id>
+node dist/scripts/corkboard.js enable-project --project <project_id>
 ```
 
 `issue-key` requires at least one `--project`; the credential receives one grant per
@@ -239,6 +242,25 @@ membership but never restores grants, so grant it again explicitly. If granting 
 key fails mid-issuance, the new credential and its grants are removed rather than left
 partially provisioned. Existing pre-release credentials have no grants and lose access
 until granted explicitly.
+
+`disable-project --project <project_id>` and `enable-project --project <project_id>`
+are operator-only local containment commands (no HTTP or dashboard route) that flip
+`projects.status` between `active` and `disabled`. Paths that authorize access to
+project data fail closed as uniform `NOT_FOUND` while disabled (REST/MCP sends, reads,
+bodies and receipts, and dashboard pages/session resolution); project listings omit the
+project, indistinguishable from an inaccessible project; the dashboard credential
+inventory and OAuth consent candidates omit it (hiding the inventory remove-grant
+control); OAuth authorization-code issuance uses the same non-enumerable `FORBIDDEN` for
+a disabled and an unknown project. Credential revocation, rotation, and project-grant
+removal remain available during a disable through the CLI and service/POST paths for
+containment.
+Credentials and sessions are not revoked
+and resume working when re-enabled. Repeat invocations are idempotent no-ops. Each
+actual transition appends one sanitized system-actor
+`project.disable`/`project.enable` audit row with the project id; an audit-insert failure
+does not roll back the committed status change, and the command warns and exits 1. An
+unknown project exits 1 with `corkboard: project not found: <id>` on stderr and empty
+stdout.
 
 `rotate-key --credential <credential_id> [--expires-at <RFC3339>]` atomically replaces
 one active non-OAuth credential with a new credential for the same speaker,

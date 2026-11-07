@@ -695,6 +695,7 @@ export async function listOwnedSpeakerCredentials(
        JOIN accounts a ON a.id = s.owner_account_id
        JOIN projects p ON p.id = g.project_id
       WHERE c.speaker_id = ? AND s.owner_account_id = ? AND a.status = 'active'
+        AND p.status = 'active'
       ORDER BY p.created_at ASC, p.id ASC`,
     [speakerId, accountId],
   );

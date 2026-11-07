@@ -455,3 +455,51 @@ test("audit detail is bounded by construction", () => {
   assert.ok(bounded.length <= MAX_AUDIT_DETAIL_CHARS);
   assert.equal(bounded.includes("x".repeat(201)), false);
 });
+
+test("OAuth code issuance is non-enumerable FORBIDDEN for disabled and unknown projects", async (t) => {
+  const fx = await createServiceFixture();
+  t.after(() => fx.close());
+  await fx.addAccount("acct_a");
+  await fx.addSpeaker("spk_a", "acct_a");
+  await fx.addProject("proj_active", "acct_a");
+  await fx.addProject("proj_disabled", "acct_a", "disabled");
+  await fx.addMembership("proj_active", "spk_a", ["message.read"]);
+  await fx.addMembership("proj_disabled", "spk_a", ["message.read"]);
+  const client = await registerClient(fx.deps, {
+    clientName: CLIENT_NAME,
+    redirectUris: [REDIRECT_URI],
+    grantTypes: ["authorization_code"],
+    responseTypes: ["code"],
+  });
+  const verifier = "w".repeat(43);
+  const selection = {
+    sessionId: "ses_test",
+    accountId: "acct_a",
+    clientId: client.clientId,
+    redirectUri: REDIRECT_URI,
+    state: null,
+    codeChallenge: await s256Challenge(verifier),
+    resource: BASE,
+    scopes: ["message.read"] as const,
+    speakerId: "spk_a",
+  };
+
+  const errorFor = async (projectId: string): Promise<AppError> => {
+    try {
+      await issueAuthorizationCode(fx.deps, { ...selection, scopes: ["message.read"], projectId });
+      assert.fail("code issuance unexpectedly succeeded");
+    } catch (error) {
+      assert.ok(error instanceof AppError, `expected AppError, got ${String(error)}`);
+      return error;
+    }
+  };
+  const disabled = await errorFor("proj_disabled");
+  const unknown = await errorFor("proj_missing");
+  // Both are the same non-enumerable denial: a disabled project is not
+  // distinguishable from a project that never existed.
+  assert.equal(disabled.code, "FORBIDDEN");
+  assert.equal(unknown.code, "FORBIDDEN");
+  assert.deepEqual(disabled, unknown);
+  const codes = await fx.db.all("SELECT id FROM oauth_authorization_codes");
+  assert.equal(codes.length, 0);
+});

@@ -90,11 +90,12 @@ set +a
 ### 2.3 Provision the first owner, project, speaker, and credential
 
 Important CLI behavior: `init` accepts `--data-dir`, but the in-database provisioning
-commands (`bootstrap-owner`, `create-project`, `create-speaker`, `add-member`,
-`remove-member`, `issue-key`, `rotate-key`, `grant-key-project`, `revoke-key-project`,
-`revoke-key`) read `CORKBOARD_DATA_DIR` from the environment. Passing `--data-dir` to those commands
-is accepted by the parser but does not select the directory. Source the secrets file as
-above, or export `CORKBOARD_DATA_DIR` explicitly.
+commands (`bootstrap-owner`, `create-project`, `disable-project`, `enable-project`,
+`create-speaker`, `add-member`, `remove-member`, `issue-key`, `rotate-key`,
+`grant-key-project`, `revoke-key-project`, `revoke-key`) read `CORKBOARD_DATA_DIR` from
+the environment. Passing `--data-dir` to those commands is accepted by the parser but
+does not select the directory. Source the secrets file as above, or export
+`CORKBOARD_DATA_DIR` explicitly.
 
 ```sh
 # Owner password comes only from the environment, never argv. Omit it for a
@@ -199,6 +200,35 @@ Rules and defaults:
   once, old row revoked in the same transaction) and in the operator CLI `rotate-key`.
   The dashboard also supports issuance, soft revocation, and one-project-at-a-time
   grant add/remove. Per-credential expiry selection remains CLI-only.
+
+### 2.6 Disable or re-enable a project (emergency containment)
+
+```sh
+# Stop all access to one project without revoking credentials or sessions.
+node dist/scripts/corkboard.js disable-project --project "$PROJECT"
+# Restore access after the incident is resolved.
+node dist/scripts/corkboard.js enable-project --project "$PROJECT"
+```
+
+This operator-only local action flips `projects.status` between `active` and
+`disabled`; no HTTP or dashboard route exposes it. Paths that authorize access to
+project data require an active project: sends, reads, bodies, receipts, and dashboard
+session resolution fail closed as uniform `NOT_FOUND`; project listings omit the
+project, indistinguishable from an inaccessible project. The dashboard credential
+inventory stops showing the disabled project's grant (and therefore hides its
+remove-grant control), and OAuth consent candidates omit it. OAuth
+authorization-code issuance denies a disabled project with the same non-enumerable
+`FORBIDDEN` as an unknown project. Credential revocation/atomic rotation and
+project-grant removal remain available while disabled through the CLI and service/POST
+paths, for containment. Credentials and sessions
+remain valid and resume working when the project is re-enabled; this is a containment
+switch, not revocation. Re-running a transition is an idempotent no-op
+(it prints `project already disabled` / `project already enabled` and writes no audit
+row). Each real transition writes one sanitized system-actor `project.disable` or
+`project.enable` audit row with the project id and no account, speaker, email, token,
+or body. The status change commits before that audit insert; if the insert fails the
+command warns on stderr, exits 1, and does not roll the change back. An unknown project
+exits 1 and prints `corkboard: project not found: <id>` on stderr with empty stdout.
 
 ## 3. Start, stop, and health
 
@@ -488,7 +518,8 @@ Dashboard authority is account ownership for speakers/credentials and project
 ownership for membership/project edits; a uniform `404` covers foreign and unknown
 objects. Credential rotation is available in the dashboard inventory and through the
 CLI (`rotate-key`); the timeline can expire one ready body. There is no expiry editor,
-listing, or cleanup UI, and no project deletion or admin action in the UI.
+listing, or cleanup UI, and no project deletion or project status control in the UI
+(disable/enable is operator CLI only).
 
 ## 5. Messages
 
@@ -691,7 +722,9 @@ live on-call rotation. This section is the short credential path:
    dashboard inventory action and issue a replacement. Revocation is checked on every
    request and MCP request.
 2. If the speaker is compromised or no longer needed, `remove-member` from affected
-   projects, which also deletes that speaker's grants.
+   projects, which also deletes that speaker's grants. To stop all access to one project
+   without revoking credentials, `disable-project --project <id>` (re-enable with
+   `enable-project`); see §2.6.
 3. Preserve request logs and audit records without copying bodies or secrets.
 4. Deliver the replacement token through the agent's own environment, never a prompt,
    issue, or message.
@@ -728,8 +761,9 @@ live on-call rotation. This section is the short credential path:
 - **Rate limiting and login limiting are process-local;** per-IP and volumetric limits
   are the reverse proxy's job.
 - **Not end-to-end encrypted.** The server holds keys and can decrypt.
-- **No project deletion/status change, registration, email verification, or password
-  reset; the timeline's read-receipt display has no separate administration UI.**
+- **No project deletion, registration, email verification, or password reset.** Project
+  disable/enable is an operator CLI action only (no dashboard route) and is reversible;
+  the timeline's read-receipt display has no separate administration UI.
   Credential rotation is implemented in the dashboard inventory and as the operator
   CLI `rotate-key` for non-OAuth credentials; OAuth-issued access credentials use
   their OAuth flow. Message expiry is the timeline's single-body action; there is no

@@ -12,6 +12,7 @@ import { hashPassword } from "../src/auth/password.ts";
 import { SCOPES, type Scope } from "../src/domain/authz.ts";
 import { normalizeEmail, validateLoginPassword } from "../src/domain/validation.ts";
 import { startServer } from "../src/platforms/node/main.ts";
+import { writeAudit } from "../src/service/audit.ts";
 import {
   BackupError,
   BackupInspectError,
@@ -330,6 +331,64 @@ async function createProjectCommand(values: Values): Promise<void> {
     ),
   );
   console.log(projectId);
+}
+
+// Local operator containment: flip an existing project between `active` and
+// `disabled`. Data-access paths require `p.status = 'active'`, so a disabled
+// project fails closed as NOT_FOUND and is omitted from project listings; OAuth
+// authorization-code issuance denies with non-enumerable FORBIDDEN. Credential
+// revocation/rotation and grant removal are deliberately unaffected. Idempotent,
+// and one system-actor audit row per actual transition. The status change
+// commits before the audit insert; a failed insert warns and exits 1 without
+// rollback.
+async function setProjectStatusCommand(
+  values: Values,
+  target: "active" | "disabled",
+): Promise<void> {
+  const projectId = singleProject(values.project);
+  const from = target === "disabled" ? "active" : "disabled";
+  const operation = target === "disabled" ? "project.disable" : "project.enable";
+  const transitioned = await withDb(async (db) => {
+    const result = await db.run(
+      `UPDATE projects SET status = ?, updated_at = ?
+        WHERE id = ? AND status = ?`,
+      [target, new Date().toISOString(), projectId, from],
+    );
+    if (result.changes === 0) {
+      const current = await db.first<{ status: string }>(
+        "SELECT status FROM projects WHERE id = ?",
+        [projectId],
+      );
+      if (current === undefined) throw new Error(`project not found: ${projectId}`);
+      if (current.status !== target) {
+        throw new Error(`project status cannot be changed: ${projectId}`);
+      }
+      return false;
+    }
+    const audited = await writeAudit(
+      { db, now: () => new Date() },
+      {
+        operation,
+        outcome: "success",
+        actorAccountId: null,
+        actorSpeakerId: null,
+        projectId,
+      },
+    );
+    if (!audited) {
+      console.error(
+        `corkboard: ${operation} audit event could not be written; the status change was committed`,
+      );
+      process.exitCode = 1;
+    }
+    return true;
+  });
+  const state = target === "disabled" ? "disabled" : "enabled";
+  console.log(
+    transitioned
+      ? `project ${state}: ${projectId}`
+      : `project already ${state}: ${projectId}`,
+  );
 }
 
 async function createSpeakerCommand(values: Values): Promise<void> {
@@ -1001,6 +1060,10 @@ async function main(): Promise<void> {
       return bootstrapOwnerCommand(values);
     case "create-project":
       return createProjectCommand(values);
+    case "disable-project":
+      return setProjectStatusCommand(values, "disabled");
+    case "enable-project":
+      return setProjectStatusCommand(values, "active");
     case "create-speaker":
       return createSpeakerCommand(values);
     case "add-member":
@@ -1034,7 +1097,7 @@ async function main(): Promise<void> {
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|create-speaker|add-member|remove-member|issue-key|rotate-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|backup|verify|restore|serve> [options]; backup accepts --data-dir and --out; verify accepts --backup; restore accepts --backup and --data-dir; all three accept --json; init accepts --data-dir and optional --secrets-file; issue-key accepts one or more --project and --scopes <comma-separated>; rotate-key accepts --credential and optional --expires-at (default preserves the old expiry); prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|disable-project|enable-project|create-speaker|add-member|remove-member|issue-key|rotate-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|backup|verify|restore|serve> [options]; backup accepts --data-dir and --out; verify accepts --backup; restore accepts --backup and --data-dir; all three accept --json; init accepts --data-dir and optional --secrets-file; disable-project and enable-project accept exactly one --project; issue-key accepts one or more --project and --scopes <comma-separated>; rotate-key accepts --credential and optional --expires-at (default preserves the old expiry); prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }
