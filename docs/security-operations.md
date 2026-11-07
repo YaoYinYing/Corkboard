@@ -154,9 +154,10 @@ operator-facing rules are:
   existing grant is an idempotent no-op.
 - The credential inventory is account-owner-only and shows only non-secret metadata:
   credential ID, created time, expiry, revoked state, and project grants. It never
-  selects or renders the token, public prefix, or verifier; the service does select
-  the non-secret `scope_json` column and returns parsed scope identifiers, but the
-  inventory page does not render them (the owner-only policy matrix does). The revoke
+  renders or logs the token, public prefix, or verifier; the service selects
+  `public_prefix` only to derive the OAuth-issued flag (not exposed) and selects the
+  non-secret `scope_json` column, returning parsed scope identifiers that the
+  inventory page does not render (the owner-only policy matrix does). The revoke
   route is speaker-scoped, so a credential ID belonging to another speaker is a
   uniform `404`, and the write re-reads the speaker's ownership and the active
   account inside its transaction. A successful transition writes a sanitized
@@ -464,9 +465,9 @@ or as authority to act as a speaker.
   owner's session survives). The registry is capped at 1024 sessions with
   least-recently-used eviction and a lazy 30-minute idle TTL swept on the next
   authenticated `/mcp` request; eviction closes the transport/server. There is no
-  cross-process persistence. `/mcp` shares the per-credential rate-limit bucket with
-  REST, and an over-limit request returns HTTP `429 RATE_LIMITED` before any session is
-  created.
+  cross-process persistence. `/mcp` shares the per-prefix rate-limit bucket with
+  REST; the check runs before authentication, and an over-limit request returns HTTP
+  `429 RATE_LIMITED` before any session is created.
 - Every `/mcp` response, including SDK JSON and protocol errors, carries
   `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 - Every tool reuses the service authorization path and per-request credential/grant/
@@ -888,21 +889,28 @@ What data is stored, logged, and retained is in [`privacy.md`](./privacy.md).
 
 ## Rate limiting and abuse controls
 
-- Authenticated `/api/v1` and `/mcp` requests are limited per credential with an
-  in-memory token bucket: default 120 requests/minute with burst 30. Configure with
+- `/api/v1` and `/mcp` bearer requests are limited with an in-memory token bucket:
+  default 120 requests/minute with burst 30. Configure with
   `CORKBOARD_RATE_LIMIT_PER_MINUTE` (`0` disables) and `CORKBOARD_RATE_LIMIT_BURST`
-  (1–1000); invalid values stop startup. Limiting happens after authentication and
-  before body parsing, so an over-limit request creates no MCP session and no handler
-  effect.
+  (1–1000); invalid values stop startup. The check runs **before authentication** and
+  before body parsing, keyed by the presented credential's stable public prefix from
+  the shared `parseBearerToken` helper, with exactly one decision per request. Only a
+  below-limit request reaches the credential SELECT, HMAC verification, and
+  `last_used_at` write; an over-limit request creates no MCP session and no handler
+  effect. Absent, malformed, non-`Bearer`, too-short, or duplicate/combined
+  Authorization values are unkeyed and fail authentication; a syntactically valid
+  unknown prefix is keyed and then fails authentication.
 - Limits are **process-local and not shared** across processes or Workers isolates.
   Each process enforces its own buckets; a restart resets them. This is not distributed
   rate limiting. If you run several processes, the effective aggregate limit is roughly
   the per-process limit times the process count.
-- Tracked credentials are bounded (10,000); an entry idle for 2 minutes is evicted.
-- Unauthenticated requests are not keyed. Bearer tokens are 256-bit random values, so
-  token guessing is impractical; apply **per-IP connection/request limits, body-size
-  limits, and volumetric abuse controls at the reverse proxy** instead. The application
-  does not trust forwarding headers or enforce IP limits itself.
+- Tracked prefixes are bounded (10,000); an entry idle for 2 minutes is evicted and the
+  oldest entry is evicted at the cap. Eviction means unauthenticated junk prefixes that
+  pass the syntax check can displace a bucket and reset capacity.
+- Because of that eviction, this limiter is process-local **additional denial**, not a
+  volumetric or per-IP control. Apply **per-IP connection/request limits, body-size
+  limits, timeouts, and volumetric abuse controls at the reverse proxy**. The
+  application does not trust forwarding headers or enforce IP limits itself.
 - A `429` carries only `RATE_LIMITED`, a `request_id`, and `Retry-After`; no token,
   body, summary, or credential verifier is logged or returned. Request logs record the
   actor ids and stable error code already described under **Logging and audit**.
@@ -938,8 +946,8 @@ What data is stored, logged, and retained is in [`privacy.md`](./privacy.md).
   bodies, query strings, raw pathnames, project/message/speaker/account IDs, or IPs.
   `/mcp` requests are counted under the `/mcp` label; tool names and arguments are not
   read.
-- `GET /metrics` does not authenticate a speaker and is not keyed by the per-credential
-  rate limiter; it neither consumes nor affects user buckets. Protect it with the token
+- `GET /metrics` does not authenticate a speaker and is not keyed by the bearer
+  public-prefix rate limiter; it neither consumes nor affects user buckets. Protect it with the token
   and network policy (bind to loopback or the reverse proxy); it is operator-only, not a
   public health endpoint.
 - Metrics are **process-local and in-memory**. They reset on restart, are not shared
@@ -994,8 +1002,9 @@ shows no traffic or error summary, because there is no per-tenant source. See
   without a transaction, so a concurrent `remove-member` can leave a stale grant for a
   removed membership. It grants nothing while removed but could revive the credential
   on reactivation. Operator-only; see **Membership and grant CLI semantics**.
-- Rate limiting is per-process and per-credential; there is no distributed/global
-  limiter and no application-level per-IP limiting (delegated to the reverse proxy).
+- Rate limiting is per-process and keyed by the presented credential's public prefix;
+  there is no distributed/global limiter and no application-level per-IP limiting
+  (delegated to the reverse proxy).
 - Metrics are per-process in-memory counters with no persistence or aggregation. The
   request histogram measures HTTP duration and the separate queue-to-commit histogram
   measures message finalization delay; per-project counts require an authorized

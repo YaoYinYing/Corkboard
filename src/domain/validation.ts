@@ -170,6 +170,57 @@ export function validateLanguage(value: unknown): string {
   return single;
 }
 
+// Untrusted client metadata, bounded so an arbitrary string cannot be echoed
+// through list/get responses. The server clock remains authoritative.
+export const MAX_CLIENT_SENT_AT_CHARS = 64;
+const ISO_8601_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+export function validateClientSentAt(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    throw new AppError("VALIDATION_ERROR", "client_sent_at must be a string");
+  }
+  if (value.length > MAX_CLIENT_SENT_AT_CHARS) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `client_sent_at must be at most ${MAX_CLIENT_SENT_AT_CHARS} characters`,
+    );
+  }
+  const match = ISO_8601_TIMESTAMP.exec(value);
+  if (match === null) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "client_sent_at must be a valid RFC 3339/ISO 8601 timestamp",
+    );
+  }
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[7] === undefined ? 0 : Number(match[7]);
+  const offsetMinute = match[8] === undefined ? 0 : Number(match[8]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth(Number(match[1]), month) ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59 ||
+    Number.isNaN(Date.parse(value))
+  ) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "client_sent_at must be a valid RFC 3339/ISO 8601 timestamp",
+    );
+  }
+  return value;
+}
+
 export function validateIdempotencyKey(value: unknown): string {
   const key = requireString(value, "Idempotency-Key");
   if (!PRINTABLE_ASCII.test(key)) {

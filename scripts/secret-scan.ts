@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // Scans staged and untracked-but-not-ignored files for high-signal secrets.
-// Reads staged index blobs (not the worktree) for tracked files, and falls back
-// to the worktree for intent-to-add entries. Repo-wide even when invoked from a
-// subdirectory. Prints only file, line, and pattern name — never the value.
-// Fails closed on unreadable or oversized inputs.
+// Tracked files are checked in both the staged index blob and the worktree, so
+// a secret written but not staged is caught before commit. Every worktree and
+// untracked read is stat'ed first and an oversized input fails closed without
+// being read; index blobs come from `git show` and are size-checked after that
+// read. Repo-wide even when invoked from a subdirectory. Prints only file,
+// line, and pattern name — never the value. Fails closed on unreadable inputs.
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -73,6 +75,37 @@ function isForbiddenPath(file: string): boolean {
   return basename(file).toLowerCase() === "original_design.md";
 }
 
+// Stats before reading so an oversized file is never loaded. A tracked file
+// deleted from the worktree has no content to leak; any other read failure
+// still fails closed.
+function scanWorktreeFile(root: string, file: string, missingIsOk: boolean): number {
+  const path = join(root, file);
+  let info;
+  try {
+    info = statSync(path);
+  } catch (error) {
+    // Only a tracked file deleted from the worktree is safe to skip; an
+    // unreadable path still fails closed.
+    if (missingIsOk && (error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    console.error(`${file}: unreadable file; refusing to skip`);
+    return 1;
+  }
+  if (!info.isFile()) {
+    console.error(`${file}: not a regular file; refusing to skip`);
+    return 1;
+  }
+  if (info.size > MAX_BYTES) {
+    console.error(`${file}: larger than ${MAX_BYTES} bytes; refusing to skip`);
+    return 1;
+  }
+  try {
+    return scanBytes(file, readFileSync(path));
+  } catch {
+    console.error(`${file}: unreadable file; refusing to skip`);
+    return 1;
+  }
+}
+
 function scanBytes(path: string, bytes: Uint8Array): number {
   if (bytes.length > MAX_BYTES) {
     console.error(`${path}: larger than ${MAX_BYTES} bytes; refusing to skip`);
@@ -122,14 +155,9 @@ function main(): void {
       continue;
     }
     findings += scanBytes(file, bytes);
-    if (bytes.length === 0) {
-      // Intent-to-add (`git add -N`) stages an empty blob; scan the worktree too.
-      try {
-        findings += scanBytes(file, readFileSync(join(root, file)));
-      } catch {
-        // No worktree content exists; there is nothing to leak.
-      }
-    }
+    // Scan the worktree as well: the pre-commit gate must catch a secret
+    // written into a tracked file that has not been staged yet.
+    findings += scanWorktreeFile(root, file, true);
   }
   for (const file of untracked) {
     if (isForbiddenPath(file)) {
@@ -137,15 +165,7 @@ function main(): void {
       findings++;
       continue;
     }
-    let bytes: Buffer;
-    try {
-      bytes = readFileSync(join(root, file));
-    } catch {
-      console.error(`${file}: unreadable file; refusing to skip`);
-      findings++;
-      continue;
-    }
-    findings += scanBytes(file, bytes);
+    findings += scanWorktreeFile(root, file, false);
   }
 
   if (findings > 0) {

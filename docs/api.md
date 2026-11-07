@@ -130,6 +130,12 @@ credential and one grant per project; if a grant write fails the credential is d
 This is how an operator issues the `project.edit` credential used by the expire
 endpoint. `grant-key-project --credential <id> --project <id>` and
 `revoke-key-project --credential <id> --project <id>` manage grants after issuance.
+The CLI `grant-key-project`, the dashboard grant editor, and the service grant write
+all apply the same OAuth exclusion as `rotate-key`: an OAuth-issued credential (the
+`cb_oat_` prefix or an `oauth_token_clients` association) is rejected for grant
+addition and the dashboard hides its add-grant form, so only a fresh OAuth consent can
+widen a live access token. Grant removal and whole-credential revocation remain
+available.
 
 The operator CLI `rotate-key --credential <id> [--expires-at <RFC3339>]` atomically
 replaces one active credential for the same speaker with exactly the old credential's
@@ -172,13 +178,15 @@ and code `NOT_FOUND`.
 
 ## Rate limits
 
-Limiting is **additional denial only**: it runs after successful authentication and
-before request-body parsing or handler work, and it never changes authentication or
-authorization semantics.
+Limiting is **additional denial only**: the bearer check runs before authentication and
+before request-body parsing or handler work. Below the limit it never changes
+authentication or authorization semantics.
 
-- Applies to authenticated `/api/v1/...` and `/mcp` requests (including `initialize`
-  and tool calls), keyed by the authenticated `credentialId`. REST and MCP share one
-  bucket per credential.
+- Applies to `/api/v1/...` and `/mcp` requests (including `initialize` and tool calls)
+  that present a syntactically valid credential value. The key is the presented
+  credential's stable public prefix, derived by the shared `parseBearerToken` helper
+  from the same `cb_`-prefixed token used for lookup; it is not a database id. REST
+  and MCP share one bucket per prefix.
 - Defaults: **120 requests/minute sustained, burst 30**. `CORKBOARD_RATE_LIMIT_PER_MINUTE`
   (integer; `0` disables) and `CORKBOARD_RATE_LIMIT_BURST` (integer 1–1000) override them.
   Invalid values fail startup with a configuration error.
@@ -193,14 +201,23 @@ authorization semantics.
   The body contains no token, message content, or summary. An over-limit `/mcp`
   request returns this HTTP envelope before any MCP protocol handling or session
   creation, and no `mcp-session-id`.
-- `GET /healthz`, `GET /readyz`, `GET /metrics`, and unauthenticated requests are
-  **not keyed**. Bearer tokens are 256-bit random values, so guessing one is not a
-  practical attack; per-IP limiting for unauthenticated traffic and volumetric abuse is
-  deferred to the reverse proxy. The operator-only `GET /metrics` never reads or consumes a credential bucket.
+- An `Authorization` header that is absent, not exactly one `Bearer` value, malformed,
+  not `cb_`-prefixed, too short to carry a public prefix, or a duplicate/combined header
+  is **not keyed**; the request proceeds to authentication and fails `401
+  UNAUTHENTICATED`. A syntactically valid token with an unknown prefix is keyed and
+  then fails authentication below the limit. Exactly one bucket decision is made per
+  request.
+- `GET /healthz`, `GET /readyz`, and `GET /metrics` never read or consume a bucket.
+  The operator-only `GET /metrics` remains operator-token protected.
 - Limits are **process-local**: buckets live in memory, are not shared across
   processes or Workers isolates, and reset on restart. The key map is bounded to 10,000
-  credentials, with entries idle for 2 minutes evicted. This is not distributed or
-  global rate limiting.
+  prefixes, with entries idle for 2 minutes evicted and the oldest entry evicted at the
+  cap. Because eviction can free a bucket, unauthenticated junk prefixes that pass the
+  syntax check can displace entries and reset a credential's capacity. This is
+  process-local **additional denial**, not a volumetric or per-IP control: apply
+  per-IP request/connection limits, timeouts, and volumetric abuse controls at the
+  reverse proxy. The application does not trust forwarding headers or enforce IP
+  limits. This is not distributed or global rate limiting.
 
 ### Login attempts
 
@@ -250,14 +267,14 @@ documented in full in [`web-ui.md`](./web-ui.md).
 | `/projects/:projectId/members` | `GET` | Active membership list and add form; requires the signed-in account to own the project (not merely `project.edit`) and is otherwise the same uniform `404`. |
 | `/projects/:projectId/members` | `POST` | Form-encoded add of an active speaker owned by the session account with an explicit capability set; requires project ownership plus the session CSRF check. `303` to the list. |
 | `/projects/:projectId/members/:speakerId/remove` | `POST` | Form-encoded removal; soft-deletes the membership and its credential grants. Requires project ownership plus the session CSRF check. `303` to the list. |
-| `/projects/:projectId/policy` | `GET` | Read-only, project-owner-only policy matrix. Active members (bounded to 100) are rows against the seven scope identifiers, with a capability summary; credential rows (at most 100, considering at most 100 owned speakers) show only the session account's owned-speaker credentials with a grant on this project: credential ID, derived state, and stored scope identifiers. Never the prefix, verifier, or token. A non-owner member (even with `project.edit`), foreign/unknown/inactive project, or bearer-only request is denied (`404`, or the dashboard's login redirect when unauthenticated). No form, CSRF token, write, or non-`lang` query parameter. |
+| `/projects/:projectId/policy` | `GET` | Read-only, project-owner-only policy matrix. Active members (bounded to 100) are rows against the seven scope identifiers, with a capability summary; credential rows (at most 100, considering at most 100 owned speakers) show only the session account's owned-speaker credentials with a grant on this project: credential ID, derived state, and stored scope identifiers. The inventory it reuses selects `public_prefix` only to derive the OAuth-issued flag; that value is neither rendered nor logged, and the verifier and raw token are never selected or rendered. A non-owner member (even with `project.edit`), foreign/unknown/inactive project, or bearer-only request is denied (`404`, or the dashboard's login redirect when unauthenticated). No form, CSRF token, write, or non-`lang` query parameter. |
 | `/projects/:projectId/messages/new` | `GET` | Compose form for a project the session account can read. Sender choices are active speakers owned by the account with an active membership carrying `message.send`. |
 | `/projects/:projectId/messages/new` | `POST` | Form-encoded send as the selected owned speaker. Requires the session CSRF check and every existing message validation limit. The server computes the plaintext digest; a per-render hidden `idempotency_key` makes retries idempotent and different content under the same key a `409`. `303` to the timeline. |
 | `/projects/:projectId/messages/:messageId/body` | `GET` | Explicit body reveal; no body appears in the timeline. |
 | `/speakers` | `GET` | Speakers owned by the session account only, with status and active project grants. |
 | `/speakers/:speakerId/key` | `GET` | Credential issuance form for an active owned speaker. |
 | `/speakers/:speakerId/key` | `POST` | Form-encoded issuance for explicitly selected projects and scopes; requires the session CSRF check. The raw token is displayed once in a `no-store` `200` response and is never placed in a URL, state, or log. |
-| `/speakers/:speakerId/credentials` | `GET` | Non-secret credential inventory for a speaker owned by the session account: credential ID, created time, expiry (or no expiry), derived active/expired/revoked/unknown state, and project grants. Active credentials of active speakers also receive an add-grant form listing the speaker's active, account-readable projects and a remove form per grant. The token, public prefix, and verifier are never selected or rendered. The service selects stored scope identifiers for the read-only policy matrix; the inventory page does not render them. Foreign and unknown speakers are the uniform `404`. |
+| `/speakers/:speakerId/credentials` | `GET` | Non-secret credential inventory for a speaker owned by the session account: credential ID, created time, expiry (or no expiry), derived active/expired/revoked/unknown state, and project grants. Active credentials of active speakers also receive an add-grant form listing the speaker's active, account-readable projects and a remove form per grant. The service selects `public_prefix` only to derive the OAuth-origin flag; it is never rendered or logged, and the verifier and token are never selected or rendered. The service selects stored scope identifiers for the read-only policy matrix; the inventory page does not render them. Foreign and unknown speakers are the uniform `404`. |
 | `/speakers/:speakerId/credentials/:credentialId/revoke` | `POST` | Form-encoded soft revocation with the CLI `revoke-key` semantics: one `revoked_at` assignment, grants and the credential row retained, idempotent. Requires account ownership, the credential must belong to the path speaker, and the session CSRF check is required. Uniform `404` for a foreign/unknown speaker or a credential of another speaker; `303` to the inventory. |
 | `/speakers/:speakerId/credentials/:credentialId/grants` | `POST` | Form-encoded add of one explicit `project_id` grant, with the CLI `grant-key-project` rules plus account read access: the speaker must be active and owned by the session account, the credential must belong to that speaker and be active, and the project must have an active speaker membership the account can read. Existing grants are an idempotent no-op (`?grant=exists`). Uniform `404` for every ineligible target; `303` to the inventory. |
 | `/speakers/:speakerId/credentials/:credentialId/grants/remove` | `POST` | Form-encoded removal of one `project_id` grant with the CLI `revoke-key-project` SQL, scoped to the path speaker's active credential. Returns the same `303` (`?grant=removed`) whether or not a row existed and audits only a real deletion. Uniform `404` for a foreign/unknown speaker or a credential of another speaker. |
@@ -685,7 +702,13 @@ Body:
   writing a blob, or committing metadata. The verified digest is encrypted inside the
   payload and verified again after decryption; it is not in the AAD or outer header.
 - `reply_to_id`: optional; must exist in the same project (tombstones allowed).
-- `client_sent_at`: optional untrusted metadata, stored for diagnostics only.
+- `client_sent_at`: optional untrusted metadata, stored for diagnostics only. At most
+  64 characters, accepting only this uppercase RFC 3339 subset: four-digit year,
+  two-digit month and day, `T`, `HH:MM:SS`, an optional `.` plus 1–9 fractional
+  digits, then either uppercase `Z` or a numeric `±HH:MM` offset. The date must be a
+  real calendar date; hours are 00–23 and minutes and seconds are 00–59 (leap seconds
+  are rejected). Other values are `VALIDATION_ERROR`. It is never authoritative:
+  `received_at` and `committed_at` always come from the server clock.
 - `body_expires_at`: optional strict RFC 3339 **UTC** timestamp. Accepted form: four-digit
   year, two-digit month and day, `T`, `HH:MM:SS`, an optional `.` plus 1–3 fractional
   digits, and `Z`; the date must be a real calendar date, hours are 00–23, and
@@ -888,7 +911,7 @@ OAuth registration is limited to 10 requests/minute (burst 5, process-local, glo
 key), token exchange to 60 requests/minute (burst 20, process-local, keyed by
 `client_id`) plus a global 300/minute (burst 60) endpoint bucket, and revocation to
 60 requests/minute (burst 20, process-local, global key). These are additional denial
-only and are separate from the per-credential API bucket.
+only and are separate from the bearer public-prefix API bucket.
 
 ## Validation limits summary
 

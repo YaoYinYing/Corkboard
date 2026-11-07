@@ -8,7 +8,7 @@ as the work it describes.
 
 | Field | Value |
 | --- | --- |
-| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) at `48b5a86`/state `5ca3067`, audit fix `4110a43` (tree `31d84ac`), final docs/tests `499a772` on `main`; supply-chain audit/license/SBOM (slice Z) pushed on `main` at `f7e62be` (tree `06f664e`); the docs/state amendment is `1dfa284` (tree `bc6a82b`), which was `origin/main` before slice AA; dashboard credential inventory and revocation (slice AA) pushed on `main` at `dbb2a46` (tree `837ee76`); authorized account service overview (slice AB) pushed on `main` at `058e34f` (tree `4ae5dfa`), with the docs/state tail `30cf884` as `origin/main`; dashboard message send (slice AC) pushed on `main` at `2a17a75` (tree `4d5117f`); the slice-AC docs/state tail `b26b2fa` (tree `8a98be4`) precedes slice AD; blank message summary/text rejection (slice AD) pushed on `main` at `7812505` (tree `d0fb133`); Phase 8 operator runbook and acceptance report (docs deliverable) pushed on `main` at `a95e156` (tree `feec245`); bounded local load/soak harness (slice AE) pushed on `main` at `fcaf6a0` (tree `a6a121f`); local Docker Compose installation (TODO 368 local half) pushed on `main` at `6a50a71` (tree `4f7fffc`); dashboard credential project-grant editing (slice AF) pushed on `main` at `ee9606a` (tree `720c8c8`); atomic CLI credential rotation (slice AG) pushed on `main` at `e9065c1` (tree `0071dc6`); durable issue-sync timer pushed on `main` at `bf88c03` (tree `4a9271a`); missing-object/uncertain-retry/authorization-matrix security hardening pushed at `f39890f` with its docs/state tail `7747c93`; Issue #9 issue-comment paging fix (`since` + incomplete-scan exit `6`) pushed on `main` at `a4d6a85` (tree `b3cc95c`); at-least-once polling client (TODO 380) pushed on `main` at `534b5bf` (tree `9cb33d3`); read-only project policy matrix (TODO 388) pushed on `main` at `7322232` (tree `692e034`); self-hosted readiness probe (TODO 360) pushed on `main` at `39499ae` (tree `3e3527e`), with the docs/state tail `2a8ab88` (tree `d2aaa15`); reproducible-build manifest proof (TODO 407) pushed on `main` at `b2e89d3` (tree `40cb763`); release-hardening documentation/CORS test (TODO 411) pushed on `main` at `e59f367` (tree `4ae315d`) |
+| Phase | 0 complete; vertical slices A–R implemented and pushed (slice O `f06c4ac`, UI design tokens `58e548f`, observability `48c52bc`); slice-S filter fix pushed as `704d115`; dashboard project create/edit (slice T) at `f1b13c9`; backup in-progress-temp snapshot fix (slice U, Issue #7) at `01538a0`; dashboard form adapter fix (slice V) merged at `4b1ba53`; Issue #8 atomic project creation (slice W) pushed on `origin/main` at `0f81877` (tree `b7a1653`); speaker directory and project-scoped credential issuance (slice X) pushed on `main` at `15cdf62` (tree `3260e71`); project membership editor (slice Y) at `48b5a86`/state `5ca3067`, audit fix `4110a43` (tree `31d84ac`), final docs/tests `499a772` on `main`; supply-chain audit/license/SBOM (slice Z) pushed on `main` at `f7e62be` (tree `06f664e`); the docs/state amendment is `1dfa284` (tree `bc6a82b`), which was `origin/main` before slice AA; dashboard credential inventory and revocation (slice AA) pushed on `main` at `dbb2a46` (tree `837ee76`); authorized account service overview (slice AB) pushed on `main` at `058e34f` (tree `4ae5dfa`), with the docs/state tail `30cf884` as `origin/main`; dashboard message send (slice AC) pushed on `main` at `2a17a75` (tree `4d5117f`); the slice-AC docs/state tail `b26b2fa` (tree `8a98be4`) precedes slice AD; blank message summary/text rejection (slice AD) pushed on `main` at `7812505` (tree `d0fb133`); Phase 8 operator runbook and acceptance report (docs deliverable) pushed on `main` at `a95e156` (tree `feec245`); bounded local load/soak harness (slice AE) pushed on `main` at `fcaf6a0` (tree `a6a121f`); local Docker Compose installation (TODO 368 local half) pushed on `main` at `6a50a71` (tree `4f7fffc`); dashboard credential project-grant editing (slice AF) pushed on `main` at `ee9606a` (tree `720c8c8`); atomic CLI credential rotation (slice AG) pushed on `main` at `e9065c1` (tree `0071dc6`); durable issue-sync timer pushed on `main` at `bf88c03` (tree `4a9271a`); missing-object/uncertain-retry/authorization-matrix security hardening pushed at `f39890f` with its docs/state tail `7747c93`; Issue #9 issue-comment paging fix (`since` + incomplete-scan exit `6`) pushed on `main` at `a4d6a85` (tree `b3cc95c`); at-least-once polling client (TODO 380) pushed on `main` at `534b5bf` (tree `9cb33d3`); read-only project policy matrix (TODO 388) pushed on `main` at `7322232` (tree `692e034`); self-hosted readiness probe (TODO 360) pushed on `main` at `39499ae` (tree `3e3527e`), with the docs/state tail `2a8ab88` (tree `d2aaa15`); reproducible-build manifest proof (TODO 407) pushed on `main` at `b2e89d3` (tree `40cb763`); release-hardening documentation/CORS test (TODO 411) pushed on `main` at `e59f367` (tree `4ae315d`); TODO 409 review remediation (`review-remediation` branch, base `959ce37` (tree `67734ba`); candidate commit `3187501` (tree `191549a`), amended in place with the final tree in the `Tree-SHA` trailer) covers the pre-auth rate limiter, OAuth grant widening, bounded `client_sent_at`, same-origin web hrefs, loopback-only poll HTTP, deployment doc drift, and secret-scan worktree/oversize gaps; not pushed |
 | Last pushed checkpoint | Current `origin/main` is `da6eba930eda217c225c28fcc4456b58f3d3a04b` (Issue #10 polling receipt semantics, tree `f8401c20a1cf84aa0cd645de43a05d64bdc0a186`; audited candidate `f499342416c8c74feb505256642bb67303bef443`, same tree; security PASS + contract PASS on the exact final tree; CI for `da6eba9` concluded success, run ID redacted in this environment), which follows the docs/state tail `b92f5cce3013ac30ad448fccb7674f6db3114010` (tree `8ec42e3fd2e28ad91ba06f201b40cb650a3f85e6`), which follows the Slice AM feature commit `5e6bccf0130c55adcc0fea1f6356d3b7a8216030` (Slice AM / TODO 352 adversarial probe suite, tree `c2244abef8f6267c4598954a153f20d25d77cad1`; audited candidate `6c527df188363288f34430df3b9cc7aa3c2ff4ae`, same tree; security PASS + contract PASS on the exact final tree; CI for `5e6bccf` concluded success, run ID redacted in this environment), which follows the docs/state tail `f8ed99a07a42b6d4e822c78db97030db0a60aff8` (tree `8270e6fd548dda44776ff7abf7aa51aeb5e71406`), which follows the Slice AL feature commit `e59f367` (release-hardening documentation and CORS test, tree `4ae315d145fa84fb19f82ee11e09e7bad6333ad4`; audited candidate `bcaae455055b35d384391b3a5e647214ab944a39`, same tree; security PASS + contract PASS; CI for `e59f367` concluded success, run ID redacted in this environment). The preceding docs/state tail is `9c454f2` (tree `66b6ae9d8d62d2d2a15100d3a6b136b1c748328c`); the last feature checkpoint before this one is `b2e89d3` (Slice AK reproducible-build proof, tree `40cb76373c2c872f76817fb9b679274495643030`; audited candidate `3b1fd9c2b4922a8024165a8ef17252fce0dd6d7b`, same tree; security PASS + contract PASS; CI run 42295914205 success). The preceding docs/state tail is `2a8ab88` (tree `d2aaa15156b46221a5deb80aedd4ef0ae2259df6`); the prior feature checkpoint is `39499ae` (Slice AJ self-hosted readiness probe, tree `3e3527ec17cadfc086b82f3f5a6895307a87fcd2`); audited candidate `69f9100d98b12114746397c61f657eec6c4394aa` (same tree); security PASS + contract PASS; CI run 42283303074 success. It follows `7322232` (Slice AI read-only project policy matrix, tree `692e034ca171a4de1459e00bf2725247babf4d30`; audited candidate `16f4e27`, security PASS + contract PASS, CI run 42277606959 success), which follows `8db3a82` (docs(state): record Slice AH polling checkpoint and audits, tree `632768ec287c9c4912d7e16c942500c172cbc2da`), which follows `534b5bf` (Slice AH / TODO 380 at-least-once polling client, tree `9cb33d37d53887e6a6cdbe117c7ee94aa6e4f78`; audited candidate `cd1b79e689239ae677974a01b333d26b6e1875c6`, same tree; security PASS + contract PASS; CI run 42265698250 success). Before it, `3a03613` records the Issue #9 comment-paging checkpoint and audits (tree `d33409df9398a422f81590b107310e53ada6a116`); that tail follows `a4d6a85` (Issue #9 comment-paging fix, tree `b3cc95c`), whose audit record is quoted next: audited candidate `e30f330`, security PASS (delta audits on the code tree `3410d53`) + contract PASS on the final tree; CI run 42247813848 success; `7747c93` (docs(state): record security-hardening checkpoint and audits, tree `9ae16b4`) precedes it; the code checkpoint `f39890f` (security-hardening tests and authorization matrix, tree `e98ccba`) passed security + contract audits, then a docs-only delta audit PASS after the resource-wording correction on tree `e98ccba`; CI run 42234602066 success. `981c761` (TODO reconciliation docs/state, tree `6b3e5b6`) precedes it; its push was verified with `git ls-remote`; a first CI lookup failed on transient GitHub API TLS handshake timeouts, and a later `gh run list`/`gh run view` verified CI run 42224714186 success on `981c761`. `bf88c03` (durable issue-sync timer, tree `4a9271abe9096247ac960bb272b0be825b9d064b`) precedes it; security PASS + contract PASS on `21d9dda` (tree `edc038f`) with a docs-only delta PASS on `7b5f9ee` (tree `4a9271a`); CI run 42219197589 success; `e9065c1` (slice AG atomic CLI credential rotation, tree `0071dc6ad82d43a53e267f85df84ed626b45a797`) precedes it; `a174377` (docs/state: record grant-UI checkpoint and audits, tree `c73be9f4af931db0b969477074e0ea2cc6ba4165`) precedes it; `ee9606a` (slice AF dashboard credential project-grant editing, tree `720c8c848db2b5530ed20c062f8095b331aa657b`) precedes it; `317ffa0` (docs/state: record Docker checkpoint, audits, and P2 debt, tree `7030886d2bb02f21cd4bdef8a1ac2f385966ee8a`) precedes it; `6a50a71` (local Docker Compose installation, TODO 368 local half, tree `4f7fffc0dd33568038e5dcd44b69b3536b5f9e71`) precedes it; `fcaf6a0` (slice AE bounded local load/soak harness, tree `a6a121fc512cd67cf1df8b0c9b33397580547f56`) precedes it; `57dbf3b` is the first slice-AE commit; `a95e156` (Phase 8 operator runbook and acceptance report, tree `feec245a803c8e5f63b503609071561add7237ae`) precedes it; `7812505` (slice AD blank message summary/text rejection, tree `d0fb133c6d979fcd031eaae91939c22c9fe214ac`) precedes it; `b26b2fa` is the slice-AC docs/state tail (tree `8a98be4db51775f189a63068d6769c17f0f529ee`), following `2a17a75` (slice AC dashboard message send, tree `4d5117f2cac9e367a1dfa79a4d9cea326a636160`); `30cf884` is the slice-AB docs/state tail and slice-AB code is `058e34f` (authorized account service overview, tree `4ae5dfa5b7a99e2f44b1eddb2da397ae92204194`); `dbb2a46` (slice AA dashboard credential inventory and revocation, tree `837ee765298a921eae5b2d9430cdf07c800e2bbc`) precedes it; the slice-Z docs/state amendment is `1dfa284` (tree `bc6a82b`) and slice-Z code is `f7e62be` (supply-chain audit/license/SBOM, tree `06f664e5bca840ce7719cdb5ff31daa5b85d9c51`). Earlier pushed checkpoints include `499a772` (slice-Y membership-editor docs/tests, tree `fe60450`), `15cdf62` (slice X speaker directory and project-scoped credential issuance, tree `3260e71`), `0f81877` (slice W atomic project creation, tree `b7a1653`), `01538a0` (slice U Issue #7 backup snapshot in-progress-temp fix, tree `08fc0d9`), `704d115` (slice S dashboard filter blank-value fix, tree `7a13790e6585a608fddbad71ec6fa24ec7446689`), `48c52bc` (slice R queue-to-commit histogram and authorized per-project counts, tree `dba3fab`), `58e548f` (UI design tokens, tree `09e3153`), and `f06c4ac` (slice O, tree `496e9ae`) |
 | Pushed-trailer correction | `3a03613`'s trailer fields are swapped: it records `Tree-SHA: 6b40b94afa11b3563ea1804cff6eb8ae29ed9951` (actually the pre-amend candidate commit) and `Candidate-SHA: d33409df9398a422f81590b107310e53ada6a116` (actually the tree). The correct values are tree `d33409df9398a422f81590b107310e53ada6a116` and pre-amend candidate commit `6b40b94afa11b3563ea1804cff6eb8ae29ed9951`. The docs/state-only tail content and both commits are unchanged; history was not rewritten because force-pushing is forbidden. |
 | Branch | `origin/main` at `da6eba930eda217c225c28fcc4456b58f3d3a04b` (Issue #10 feature commit, tree `f8401c20a1cf84aa0cd645de43a05d64bdc0a186`), which follows the previous docs/state tail `b92f5cce3013ac30ad448fccb7674f6db3114010` (tree `8ec42e3fd2e28ad91ba06f201b40cb650a3f85e6`), which follows the Slice AM feature commit `5e6bccf0130c55adcc0fea1f6356d3b7a8216030` (tree `c2244abef8f6267c4598954a153f20d25d77cad1`), which follows the previous docs/state tail `f8ed99a07a42b6d4e822c78db97030db0a60aff8` (tree `8270e6fd548dda44776ff7abf7aa51aeb5e71406`), which follows `e59f367` (tree `4ae315d145fa84fb19f82ee11e09e7bad6333ad4`), whose preceding docs/state tail is `9c454f2` (tree `66b6ae9d8d62d2d2a15100d3a6b136b1c748328c`) and whose prior feature checkpoint is `b2e89d3` (tree `40cb76373c2c872f76817fb9b679274495643030`), whose preceding docs/state tail is `2a8ab88` (tree `d2aaa15156b46221a5deb80aedd4ef0ae2259df6`) and whose prior feature checkpoint is `39499ae`; completed slice branches remain locally, including squashed variants shown by `git branch --no-merged main`; none was rewritten or deleted |
@@ -2122,6 +2122,81 @@ the final amend is message-only, so that candidate and the final commit share on
   bearer revocation window after the final re-check and before its `UPDATE` remains
   open and is not simulated as passing.
 
+## TODO 409 review remediation (branch `review-remediation`, base `959ce37`)
+
+Status: implemented and tested locally; **not pushed**; independent review is pending
+and not pre-recorded. The fresh independent review ran at `959ce37` (tree `67734ba`)
+with no P0/P1 and produced the P2/P3/deployment findings below. The candidate SHA is
+this checkpoint's `Candidate-SHA` trailer (left `pending` on the amended commit); the
+final tree is the `Tree-SHA` trailer.
+
+- **P2 rate-limit placement.** Bearer requests are limited before authentication,
+  keyed by the parsed token's stable public prefix. The limiter remains bounded and
+  idle-evicted, and there is one bucket decision per request (the post-auth check is
+  folded in). An over-limit request returns the same `429 RATE_LIMITED` +
+  `Retry-After` without the credential SELECT, HMAC verification, or
+  `last_used_at` UPDATE. Malformed/absent/non-`Bearer`/duplicate/too-short values are
+  unkeyed and still fail `401 UNAUTHENTICATED`; an unknown well-formed token below the
+  limit fails the same way. Authoritative contracts (`docs/api.md`,
+  `docs/architecture.md`, `docs/runbook.md`, `docs/security-operations.md`,
+  `docs/mcp.md`) now describe the pre-auth key/order and the bounded-map eviction
+  trade-off.
+- **P3 OAuth consent widening.** `grantOwnedSpeakerCredentialProject` now selects the
+  `cb_oat_` prefix and `oauth_token_clients` association and rejects OAuth-issued
+  credentials with the same shared predicate/message as `rotateSpeakerCredential`.
+  The operator CLI `grant-key-project` uses the same shared predicate and rejects the
+  row with the same message. The inventory exposes `oauthIssued` (selecting
+  `public_prefix` only to derive that flag, never rendering or logging it); the
+  dashboard hides the add-grant form while grant removal and whole-credential
+  revocation remain available. Documented in `docs/oauth.md`,
+  `docs/authorization.md`, and `docs/api.md`.
+- **P3 `client_sent_at` amplification.** `validateClientSentAt` requires a real
+  RFC 3339/ISO 8601 timestamp (calendar-valid date, `Z` or `±HH:MM`, optional 1–9
+  fractional digits) of at most 64 characters, retains the value unchanged, and
+  rejects oversized/malformed/non-string values with `VALIDATION_ERROR` before any
+  write. It remains untrusted diagnostic metadata; the server clock is authoritative.
+  Documented in `docs/api.md`.
+- **P3 protocol-relative web links.** `hrefWithParams` collapses only duplicate
+  leading slashes so language-switch, pager, and jump links remain same-origin;
+  interior paths are unchanged.
+- **Deployment F2.** `parseBaseUrl` rejects cleartext `http:` unless the host is
+  `127.0.0.1`, `::1`, or `localhost`; HTTPS is always accepted.
+  `docs/polling.md` states the rule.
+- **Deployment F1/F4/F9 docs.** `docs/deployments.md` uses
+  `npm ci --ignore-scripts`; `docs/supply-chain.md` replaces the unpinned SBOM
+  fallback with `@cyclonedx/cyclonedx-npm@6.0.1` and states honestly that it requires
+  network and is not lockfile-consistent; `docs/acceptance-report.md` is marked as of
+  its `e79d60e` revision, no longer claims there are no deployment artifacts, and
+  names the existing `Dockerfile`, `compose.yaml`, and `ops/systemd/*` artifacts as
+  independently unreviewed.
+- **Deployment F5/F6 secret scan.** Every worktree/untracked read is stat'ed first and
+  an oversized file fails closed without being read; tracked files are scanned in
+  both the staged index blob and the worktree, so an unstaged secret is caught. The
+  staged-index scan, history scan, and existing findings are unchanged.
+
+Tests added/extended: `tests/integration/rate-limit.test.ts` (over-limit makes no
+`last_used_at` change, another credential is unaffected, unknown token still 401);
+`tests/integration/speakers-web.test.ts` (OAuth grant rejected at the service and a
+crafted dashboard POST with no row/audit, form hidden, ordinary credential still
+works); `tests/integration/cli.test.ts` (`grant-key-project` rejects an OAuth row with
+no grant write while the ordinary credential grant succeeds); `tests/unit/validation.test.ts` and `tests/integration/messages.test.ts`
+(`client_sent_at` oversized/malformed/impossible-date rejection and retained valid
+value); `tests/integration/web.test.ts` (double-slash requests produce same-origin
+links); `tests/unit/poll.test.ts` (loopback HTTP accepted, non-loopback HTTP rejected,
+HTTPS accepted); `tests/security/secret-scan-cli.test.ts` (oversized untracked file
+fails closed unread; unstaged tracked-worktree secret caught).
+
+Recorded debt (explicitly out of scope): session/dashboard per-credential rate
+limiting (P3-1), OAuth endpoint limiter ordering (P3-4), runtime history scan (F7),
+systemd hardening (F11), container readiness healthcheck (F8), CI Docker/nginx
+validation, bounded-map eviction churn (unauthenticated junk prefixes can reset a
+bucket; the documented trade-off is accepted for this process-local limiter),
+duplicate secret-scan findings when a secret is present in both the index and the
+worktree, and no `git cat-file -s` precheck before reading a staged index blob.
+
+Evidence: `npm run check` exit 0 (secret scans, license report, typecheck, 663 tests:
+662 pass, 1 skipped live-D1, 0 fail) and `npm run build` exit 0 at the candidate tree.
+
 ## Implemented and verified at this tree
 
 - [x] Repository hygiene: `.gitignore` excludes the unredacted archive, secrets, keys,
@@ -2434,8 +2509,10 @@ Do not infer any of these from local MCP behavior or from another plan.
   unconsumed request streams on non-body routes are drained by Node, so concurrent large
   unauthenticated uploads still add memory pressure. A reverse-proxy body limit remains
   recommended.
-- `language` and `client_sent_at` lack tight length/format caps beyond the request-body
-  limit; an authenticated sender can inflate stored/echoed metadata.
+- `language` lacks a tight length cap beyond the request-body limit, so an
+  authenticated sender can still inflate that stored/echoed metadata.
+  `client_sent_at` is now bounded to 64 characters and validated as an RFC 3339
+  timestamp.
 - Node timeout enforcement is quantized by the default 30s connection-check interval.
 - Adapter-generated 413s bypass the request logger; `revoke-key` audits success even if
   the credential was already revoked.

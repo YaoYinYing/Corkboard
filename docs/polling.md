@@ -110,9 +110,10 @@ Environment alternatives: `CORKBOARD_BASE_URL`, `CORKBOARD_PROJECT_ID` and
 The credential file form requires a **regular file, not a symlink, with mode exactly
 `0600`** and one non-empty token. Credential and cursor reads open the path with
 `O_NOFOLLOW` and `fstat` the opened handle (POSIX), so a path swapped after the open
-cannot redirect the read. The base URL must be an origin (`http://` or `https://`)
-with no embedded credentials, path, query, or fragment. Use TLS outside loopback
-development.
+cannot redirect the read. The base URL must be an origin (`https://`, or `http://`
+only for loopback development on `127.0.0.1`, `::1`, or `localhost`) with no embedded
+credentials, path, query, or fragment. A cleartext `http://` URL for any other host is
+rejected at startup because every request carries the bearer credential; use TLS.
 
 The credential must carry `message.read` and `receipt.write`, and the speaker must be
 an active project member with a credential-to-project grant. The client calls
@@ -251,7 +252,7 @@ no cursor advance) when:
   the headers arrive, for identity, list, **body**, and `mark_read`. Every response
   body is streamed through a **1 MiB hard cap**; exceeding it aborts the stream and
   fails closed. A server that sends headers and then stalls is aborted at the deadline.
-- The server's per-credential rate limit still applies. A numeric `Retry-After`
+- The server's bearer public-prefix rate limit still applies. A numeric `Retry-After`
   (seconds) on a `mark_read` `429`/`5xx` is honored up to a 5-second bound; a
   non-numeric value falls back to 250 ms × attempt. Body fetches are not retried.
 - Exit codes:

@@ -139,6 +139,61 @@ test("send -> list -> body -> read receipt roundtrip", async (t) => {
   assert.equal(unreadAfter.messages.length, 0);
 });
 
+test("client_sent_at is bounded to a valid timestamp and retained as metadata", async (t) => {
+  const fx = await withFixture(t);
+  const alice = await addActor(fx, "alice");
+  await addProject(fx, "proj_1", alice, [alice]);
+
+  const valid = "2026-11-04T12:00:00.000Z";
+  const sent = await send(fx, alice.principal, "proj_1", "valid", "body", {
+    clientSentAt: valid,
+  });
+  const stored = await fx.db.first<{ client_sent_at: string | null }>(
+    "SELECT client_sent_at FROM messages WHERE id = ?",
+    [sent.messageId],
+  );
+  assert.equal(stored?.client_sent_at, valid);
+  const listed = await listMessages(fx.deps, alice.principal, "proj_1");
+  assert.equal(listed.messages[0]?.clientSentAt, valid);
+
+  // Offset timestamps are RFC 3339 too.
+  const offset = await send(fx, alice.principal, "proj_1", "offset", "body", {
+    clientSentAt: "2026-11-04T12:00:00+02:00",
+  });
+  assert.equal(
+    (
+      await fx.db.first<{ client_sent_at: string | null }>(
+        "SELECT client_sent_at FROM messages WHERE id = ?",
+        [offset.messageId],
+      )
+    )?.client_sent_at,
+    "2026-11-04T12:00:00+02:00",
+  );
+
+  const before = (
+    await fx.db.all<{ id: string }>("SELECT id FROM messages")
+  ).length;
+  for (const [key, bad] of [
+    ["oversized", `${valid}${" ".repeat(50)}`],
+    ["not-a-timestamp", "yesterday"],
+    ["date-only", "2026-11-04"],
+    ["impossible-date", "2026-02-30T00:00:00Z"],
+    ["bad-offset", "2026-11-04T12:00:00+24:00"],
+    ["non-string", 123],
+  ] as const) {
+    await expectCode(
+      send(fx, alice.principal, "proj_1", key, "body", {
+        clientSentAt: bad as unknown as string,
+      }),
+      "VALIDATION_ERROR",
+    );
+  }
+  assert.equal(
+    (await fx.db.all<{ id: string }>("SELECT id FROM messages")).length,
+    before,
+  );
+});
+
 test("cross-project and non-member access returns NOT_FOUND", async (t) => {
   const fx = await withFixture(t);
   const alice = await addActor(fx, "alice");

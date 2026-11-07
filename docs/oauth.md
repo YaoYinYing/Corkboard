@@ -409,13 +409,16 @@ is never removed while a refresh row references the credential. See
 - Rate limits and registration/token state are process-local and reset on restart.
 - The Node adapter enforces the same 64 KiB body cap for OAuth POSTs.
 - One consent is expected to leave exactly one `credential_project_grants` row on its
-  access credential. If an operator manually adds another grant to that credential
-  (the CLI `grant-key-project` does not know about OAuth), the live access token may
-  work in that project until it expires, and the next refresh fails closed (`invalid_grant`)
-  and revokes the family. Do not manage OAuth-issued credentials with the CLI grant
-  commands, and do not rotate them with `rotate-key` (it rejects OAuth-issued rows,
-  identified by the `cb_oat_` token prefix or an `oauth_token_clients` association;
-  their credential IDs are `cred_oat_*`); use the OAuth refresh/revocation flow.
+  access credential. OAuth-issued credentials cannot be widened through any supported
+  grant path: `grant-key-project`, `grantOwnedSpeakerCredentialProject` (the dashboard
+  and a crafted POST), and the dashboard add-grant form all reject grant addition
+  using the same predicate and message as `rotate-key` (the `cb_oat_` token prefix or
+  an `oauth_token_clients` association; their credential IDs are `cred_oat_*`), and
+  the dashboard hides the form. Do not rotate them with `rotate-key`, which uses the
+  same predicate; use the OAuth refresh/revocation flow. Revocation and grant removal
+  remain available. If the database is edited directly to add a grant, the live access
+  token may work in that project until it expires, and the next refresh fails closed
+  (`invalid_grant`) and revokes the family.
 - D1/Workers parity, real ChatGPT, and browser testing are not verified.
 - OAuth consent, code issuance, token minting, rotation, and revocation are not
   written to `audit_events` in this slice; request logs still record route/status/

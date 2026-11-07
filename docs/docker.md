@@ -328,7 +328,7 @@ is lost. The full procedure is in [`runbook.md`](./runbook.md#9-upgrade-and-roll
 - **Cloudflare Workers/D1/R2:** no adapter, no deployment, no test. Not claimed.
 - **ChatGPT Web installation/linking:** not implemented or verified.
 - **TLS, per-IP rate limiting, and volumetric limits:** host reverse-proxy
-  responsibility; the application only has process-local per-credential limits.
+  responsibility; the application only has process-local bearer public-prefix limits.
 - **Credential rotation UI, message-expiry management, registration,
   email verification, and password reset:** no UI. Atomic credential rotation is
   available as the operator CLI `rotate-key`; per-credential expiry selection is

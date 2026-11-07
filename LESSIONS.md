@@ -3,6 +3,41 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-06 — a limiter after authentication still pays the authentication cost
+
+- **Failure avoided:** The per-credential bucket was checked after the bearer
+  credential SELECT, keyed HMAC verification, and unconditional `last_used_at`
+  UPDATE. A compromised but over-limit key therefore kept causing serialized DB
+  writes while the API reported `429`.
+- **Reproducer:** Fill a credential's burst, advance the injected clock, then send one
+  more request; the response is `429` but `last_used_at` still changes.
+- **Rule:** Put the limiter in front of every expensive or state-changing step it is
+  meant to bound. Derive a stable, bounded key from the presented credential (its
+  public prefix) without a DB read or HMAC, make one bucket decision per request, and
+  keep the map bounded and idle-evicted.
+- **Prevents:** A "rate limited" response whose side effects still scale with request
+  volume.
+- **Remove when:** the authentication path has no mutable side effects and is cheap
+  enough that limiting after it is indistinguishable.
+
+## 2026-11-06 — moving a security mechanism invalidates every doc that names its key
+
+- **Failure avoided:** The limiter moved before authentication and switched its key
+  from the credential id to the presented token's public prefix, but five authoritative
+  documents still said "after authentication", "keyed by credentialId", and
+  "unauthenticated requests are not keyed". A contract audit blocked on the
+  contradiction; the code was never wrong, the contract was.
+- **Reproducer:** `grep -rn "credentialId\\|after authentication\\|not keyed" docs/`
+  after changing `authenticate()`; every hit that describes the limiter is now stale.
+- **Rule:** When a security mechanism's ordering, key, or trust boundary changes, treat
+  every doc that names those details as part of the same change. State the new
+  trade-off (here, bounded-map eviction means this is not volumetric control) rather
+  than deleting the old caveat.
+- **Prevents:** An implementation and its normative contract silently describing two
+  different mechanisms.
+- **Remove when:** mechanism ordering and keys are generated from one authoritative
+  source that docs consume.
+
 ## 2026-11-06 — a receipt is an assertion about content, so fetch the content first
 
 - **Failure avoided:** The reference poller passed list metadata to a no-op callback,

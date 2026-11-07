@@ -126,6 +126,59 @@ test("credentials have independent buckets", async (t) => {
   assert.equal((await call(app, "/api/v1/me", { token: b.token })).status, 200);
 });
 
+test("an over-limit request performs no credential read or last_used_at update", async (t) => {
+  let limiterNow = 1_000_000;
+  const { fx, app } = await withApp(t, {
+    rateLimit: { perMinute: 60, burst: 1 },
+    rateLimitNow: () => limiterNow,
+  });
+  const a = await addActor(fx, "preauth_a");
+  const b = await addActor(fx, "preauth_b");
+  await fx.setNow(new Date("2026-11-03T12:00:00.000Z"));
+
+  assert.equal((await call(app, "/api/v1/me", { token: a.token })).status, 200);
+  const firstUsed = await fx.db.first<{ last_used_at: string | null }>(
+    "SELECT last_used_at FROM credentials WHERE id = ?",
+    [a.credentialId],
+  );
+  assert.equal(firstUsed?.last_used_at, "2026-11-03T12:00:00.000Z");
+
+  // A later clock value makes any post-auth UPDATE observable.
+  await fx.setNow(new Date("2026-11-03T12:05:00.000Z"));
+  const limited = await call(app, "/api/v1/me", { token: a.token });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "1");
+  const body = await jsonBody(limited);
+  assert.equal(body.error.code, "RATE_LIMITED");
+  assert.equal(
+    (
+      await fx.db.first<{ last_used_at: string | null }>(
+        "SELECT last_used_at FROM credentials WHERE id = ?",
+        [a.credentialId],
+      )
+    )?.last_used_at,
+    "2026-11-03T12:00:00.000Z",
+  );
+
+  // The over-limit credential's bucket is independent of another credential.
+  assert.equal((await call(app, "/api/v1/me", { token: b.token })).status, 200);
+  assert.equal(
+    (
+      await fx.db.first<{ last_used_at: string | null }>(
+        "SELECT last_used_at FROM credentials WHERE id = ?",
+        [b.credentialId],
+      )
+    )?.last_used_at,
+    "2026-11-03T12:05:00.000Z",
+  );
+
+  // A well-formed unknown token still fails authentication below the limit.
+  const unknown = `cb_${"z".repeat(40)}`;
+  const rejected = await call(app, "/api/v1/me", { token: unknown });
+  assert.equal(rejected.status, 401);
+  assert.equal((await jsonBody(rejected)).error.code, "UNAUTHENTICATED");
+});
+
 test("REST and MCP share the credential bucket; over-limit MCP creates no session", async (t) => {
   const { fx, app } = await withApp(t, {
     rateLimit: { perMinute: 60, burst: 1 },

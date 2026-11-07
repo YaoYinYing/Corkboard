@@ -1074,6 +1074,22 @@ test("i18n defaults to English, selects Chinese, falls back safely, and preserve
   assert.ok(timeline.html.includes('href="/projects/proj_a?lang=en"'));
 });
 
+test("duplicate leading slashes never produce scheme-relative navigation links", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicProject(fx);
+  const { cookie } = await loginAs(app, "a@example.test", "correct horse");
+
+  for (const [path, expected] of [
+    ["//", 'href="/?lang=zh"'],
+    ["//projects/proj_a", 'href="/projects/proj_a?lang=zh"'],
+  ] as const) {
+    const page = await getPage(app, path, cookie);
+    assert.equal(page.status, 200, path);
+    assert.equal(page.html.includes('href="//'), false, path);
+    assert.ok(page.html.includes(expected), path);
+  }
+});
+
 test("login requires a matching double-submit CSRF value and rejects unsafe return_to", async (t) => {
   const { fx, app } = await withApp(t);
   await basicProject(fx);

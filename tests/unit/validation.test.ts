@@ -4,6 +4,7 @@ import { AppError, httpStatusFor, type ErrorCode } from "../../src/domain/errors
 import { digestsEqual, parseSha256Digest, sha256Hex } from "../../src/domain/digest.ts";
 import {
   validateBodyDigest,
+  validateClientSentAt,
   validateIdempotencyKey,
   validateLanguage,
   validateMessageSummary,
@@ -204,6 +205,37 @@ test("validateBodyDigest delegates to the canonical parser", () => {
   const valid = "sha256:" + "ab".repeat(32);
   assert.equal(validateBodyDigest(valid), valid);
   assert.throws(() => validateBodyDigest("sha256:short"), hasCode("VALIDATION_ERROR"));
+});
+
+test("validateClientSentAt accepts bounded RFC 3339 timestamps and retains the value", () => {
+  assert.equal(validateClientSentAt(undefined), null);
+  assert.equal(validateClientSentAt(null), null);
+  for (const valid of [
+    "2026-11-04T12:00:00Z",
+    "2026-11-04T12:00:00.000Z",
+    "2026-11-04T12:00:00.123456789Z",
+    "2026-11-04T12:00:00+02:00",
+    "2024-02-29T23:59:59-05:30",
+  ]) {
+    assert.equal(validateClientSentAt(valid), valid);
+  }
+  for (const invalid of [
+    "",
+    "yesterday",
+    "2026-11-04",
+    "2026-11-04 12:00:00Z",
+    "2026-02-30T00:00:00Z",
+    "2026-11-04T24:00:00Z",
+    "2026-11-04T12:60:00Z",
+    "2026-11-04T12:00:60Z",
+    "2026-11-04T12:00:00+24:00",
+    "2026-11-04T12:00:00.Z",
+    "2026-11-04T12:00:00",
+    `${"2026-11-04T12:00:00Z"}${"x".repeat(50)}`,
+  ]) {
+    assert.throws(() => validateClientSentAt(invalid), hasCode("VALIDATION_ERROR"), invalid);
+  }
+  assert.throws(() => validateClientSentAt(123), hasCode("VALIDATION_ERROR"));
 });
 
 test("verifySenderDigest accepts the matching UTF-8 digest and rejects mismatches", async () => {

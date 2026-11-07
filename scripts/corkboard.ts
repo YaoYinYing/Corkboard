@@ -27,7 +27,11 @@ import {
   pruneRetention,
   validateRetentionOptions,
 } from "../src/service/retention.ts";
-import { rotateSpeakerCredential } from "../src/service/speakers.ts";
+import {
+  OAUTH_ISSUED_CREDENTIAL_ERROR,
+  isOAuthIssuedCredential,
+  rotateSpeakerCredential,
+} from "../src/service/speakers.ts";
 import { LocalBlobStore } from "../src/storage/blobs/local.ts";
 import { openSqliteDatabase, type SqlDatabase } from "../src/storage/db.ts";
 
@@ -609,11 +613,25 @@ async function grantKeyProjectCommand(values: Values): Promise<void> {
   const credentialId = requireValue(values.credential, "--credential");
   const projectId = singleProject(values.project);
   await withDb(async (db) => {
-    const credential = await db.first<{ speaker_id: string }>(
-      "SELECT speaker_id FROM credentials WHERE id = ?",
+    const credential = await db.first<{
+      speaker_id: string;
+      public_prefix: string;
+      oauth_associated: number;
+    }>(
+      `SELECT c.speaker_id, c.public_prefix,
+              EXISTS (SELECT 1 FROM oauth_token_clients t
+                       WHERE t.credential_id = c.id) AS oauth_associated
+         FROM credentials c
+        WHERE c.id = ?`,
       [credentialId],
     );
     if (credential === undefined) throw new Error(`credential not found: ${credentialId}`);
+    // An OAuth access credential is bound to the project selected at consent.
+    // Reject widening it through the operator path with the same shared
+    // predicate and message used by rotation and the dashboard.
+    if (isOAuthIssuedCredential(credential.public_prefix, credential.oauth_associated)) {
+      throw new Error(`${OAUTH_ISSUED_CREDENTIAL_ERROR}: ${credentialId}`);
+    }
     if ((await activeMembershipCapabilities(db, projectId, credential.speaker_id)) === undefined) {
       throw new Error("an active project membership is required to grant a project");
     }

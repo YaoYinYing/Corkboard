@@ -60,6 +60,29 @@ const BEARER_RE = /^Bearer ([A-Za-z0-9_-]+)$/;
 const TOKEN_PREFIX = "cb_";
 const PUBLIC_PREFIX_LENGTH = 12;
 
+export interface ParsedBearerToken {
+  token: string;
+  /** Stable database prefix; safe to use as a limiter key before any DB read. */
+  publicPrefix: string;
+}
+
+// Shared by authentication and the pre-authentication rate limiter so both
+// accept exactly the same header shapes and derive the same prefix.
+export function parseBearerToken(
+  authorizationHeader: string | undefined,
+): ParsedBearerToken | undefined {
+  const match = authorizationHeader === undefined ? null : BEARER_RE.exec(authorizationHeader);
+  const token = match?.[1];
+  if (
+    token === undefined ||
+    !token.startsWith(TOKEN_PREFIX) ||
+    token.length <= PUBLIC_PREFIX_LENGTH
+  ) {
+    return undefined;
+  }
+  return { token, publicPrefix: token.slice(0, PUBLIC_PREFIX_LENGTH) };
+}
+
 function isScope(value: string): value is Scope {
   return (SCOPES as readonly string[]).includes(value);
 }
@@ -105,13 +128,9 @@ export async function authenticateBearer(
   deps: ServiceDeps,
   authorizationHeader: string | undefined,
 ): Promise<Principal> {
-  const match = authorizationHeader === undefined ? null : BEARER_RE.exec(authorizationHeader);
-  const token = match?.[1];
-  if (token === undefined || !token.startsWith(TOKEN_PREFIX) || token.length <= PUBLIC_PREFIX_LENGTH) {
-    throw new AppError("UNAUTHENTICATED");
-  }
-
-  const publicPrefix = token.slice(0, PUBLIC_PREFIX_LENGTH);
+  const parsed = parseBearerToken(authorizationHeader);
+  if (parsed === undefined) throw new AppError("UNAUTHENTICATED");
+  const { token, publicPrefix } = parsed;
   const rows = await deps.db.all<CredentialRow>(
     `SELECT c.id, c.speaker_id, c.secret_verifier, c.scope_json, c.expires_at, c.revoked_at,
             s.status AS speaker_status, s.owner_account_id, a.status AS account_status

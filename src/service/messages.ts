@@ -13,6 +13,7 @@ import {
   normalizeBodyExpiresAt,
   validateBodyDigest,
   validateBodyExpiresAtWindow,
+  validateClientSentAt,
   validateIdempotencyKey,
   validateLanguage,
   validateMessageSummary,
@@ -469,10 +470,7 @@ export async function sendMessage(
   if (replyToId !== null && (typeof replyToId !== "string" || replyToId === "")) {
     throw new AppError("VALIDATION_ERROR", "reply_to_id must be a message reference");
   }
-  const clientSentAt = input.clientSentAt ?? null;
-  if (clientSentAt !== null && typeof clientSentAt !== "string") {
-    throw new AppError("VALIDATION_ERROR", "client_sent_at must be a string");
-  }
+  const clientSentAt = validateClientSentAt(input.clientSentAt);
   if (replyToId !== null) {
     // Tombstones (seq retained) are allowed; provisional rows are not visible.
     const reply = await deps.db.first<{ id: string }>(

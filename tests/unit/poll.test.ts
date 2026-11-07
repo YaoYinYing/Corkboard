@@ -17,6 +17,7 @@ import {
   PollError,
   loadCursorState,
   main,
+  parseBaseUrl,
   pollPass,
   redact,
   run,
@@ -509,6 +510,31 @@ test("a 0600 credential file is accepted and a looser mode is rejected without e
   assert.equal(rejected, 2);
   assert.equal(errors.join("\n").includes(TOKEN), false);
   assert.match(errors.join("\n"), /mode 0600/);
+});
+
+test("base URL requires TLS outside loopback and accepts loopback HTTP", () => {
+  assert.equal(parseBaseUrl("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
+  assert.equal(parseBaseUrl("http://[::1]:8080"), "http://[::1]:8080");
+  assert.equal(parseBaseUrl("http://localhost:8080"), "http://localhost:8080");
+  assert.equal(parseBaseUrl("https://board.example"), "https://board.example");
+  assert.equal(parseBaseUrl("https://127.0.0.1:8443"), "https://127.0.0.1:8443");
+
+  for (const raw of [
+    "http://board.example",
+    "http://board.example:8080",
+    "http://192.168.1.10:8080",
+    "http://[2001:db8::1]",
+    "http://localhost.example",
+  ]) {
+    assert.throws(
+      () => parseBaseUrl(raw),
+      (error: unknown) =>
+        error instanceof PollError &&
+        error.code === "CONFIG" &&
+        /https outside loopback/.test(error.message),
+      raw,
+    );
+  }
 });
 
 test("redact replaces every occurrence and leaves other text alone", () => {

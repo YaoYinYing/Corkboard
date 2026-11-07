@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +49,30 @@ test("passes a clean repository", () => {
 test("fails closed outside a git repository", () => {
   withRepo((dir) => {
     assert.equal(run(dir).status, 2);
+  });
+});
+
+test("fails closed on an oversized untracked file without reading it", () => {
+  withRepo((dir) => {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "big.dat"), "");
+    truncateSync(join(dir, "big.dat"), (32 << 20) + 1);
+    const result = run(dir);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /larger than/);
+  });
+});
+
+test("catches a secret in the worktree of a tracked file before it is staged", () => {
+  withRepo((dir) => {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "notes.md"), "clean\n");
+    execFileSync("git", ["add", "notes.md"], { cwd: dir });
+    // Staged blob is clean; only the worktree copy holds the secret.
+    writeFileSync(join(dir, "notes.md"), "token " + "cb_" + "w".repeat(40) + "\n");
+    const result = run(dir);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /speaker-token/);
   });
 });
 

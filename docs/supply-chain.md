@@ -90,13 +90,15 @@ repeated install paths collapse and dev/optional entries follow npm's selector
 rather than the license report's lockfile listing. Use the license report when the
 runtime/dev split matters.
 
-If `npm sbom` is unavailable, the documented fallback requires network:
+If `npm sbom` is unavailable, the documented fallback requires network and is **not**
+lockfile-consistent: it installs one pinned tool version on demand rather than using
+the repository's `package-lock.json`. It is not used by CI because npm 11 provides
+the command; record the tool version with the generated artifact.
 
 ```sh
-npx --yes @cyclonedx/cyclonedx-npm --output-file reports/sbom.cdx.json
+npm exec --yes --package=@cyclonedx/cyclonedx-npm@6.0.1 -- \
+  cyclonedx-npm --output-file reports/sbom.cdx.json
 ```
-
-The fallback is not used by CI because npm 11 provides the command.
 
 ### Reproducible build proof
 
@@ -149,8 +151,9 @@ cap, temporary-directory cleanup on success and build failure, and the CLI exit 
 
 ## CI
 
-`.github/workflows/ci.yml` runs, in order: `npm ci --ignore-scripts`, the staged and
-history secret scans, `npm run licenses`, typecheck, tests, `npm run build`,
+`.github/workflows/ci.yml` runs, in order: `npm ci --ignore-scripts`, the
+staged-index-plus-worktree and history secret scans, `npm run licenses`, typecheck,
+tests, `npm run build`,
 `npm run build:repro`, `npm run sbom`, upload of `reports/` as the
 `supply-chain-reports` artifact, and finally `npm run audit` (network-dependent). The
 upload step uses a commit-pinned version of the standard GitHub artifact action.
@@ -189,3 +192,7 @@ artifact.
   still invoke `git` through `PATH`, so a dependency-declared `git` bin under
   `node_modules/.bin` could shadow it under `npm run`. This is recorded debt outside
   the `node`/`tsc`/`npm` guard.
+- `scripts/secret-scan.ts` stats worktree and untracked files before reading them, but
+  staged index blobs are read with `git show` and only then size-checked; there is no
+  `git cat-file -s` precheck. A secret present in both the index and the worktree is
+  reported once per source rather than deduplicated. Both are recorded debt.

@@ -425,18 +425,25 @@ never change authentication or authorization).
 
 | Bucket | Key | Default | Knob |
 | --- | --- | --- | --- |
-| Authenticated REST + MCP | credential id (shared) | 120/min, burst 30 | `CORKBOARD_RATE_LIMIT_PER_MINUTE` (`0` disables), `CORKBOARD_RATE_LIMIT_BURST` (1–1000) |
+| Bearer REST + MCP | presented credential public prefix (shared) | 120/min, burst 30 | `CORKBOARD_RATE_LIMIT_PER_MINUTE` (`0` disables), `CORKBOARD_RATE_LIMIT_BURST` (1–1000) |
 | Account login | SHA-256 of normalized email | 10/min, burst 5 | fixed |
 | OAuth registration | global | 10/min, burst 5 | fixed |
 | OAuth token exchange | `client_id`, plus global | 60/min burst 20; global 300/min burst 60 | fixed |
 | OAuth revocation | global | 60/min, burst 20 | fixed |
 
 An over-limit request returns `429` with code `RATE_LIMITED`, a `request_id`, and
-`Retry-After` in whole seconds (≥1); it contains no token, summary, or body. For
-authenticated routes the check runs after authentication and before body parsing. Never
-key unauthenticated traffic by token value in the application; put per-IP
-request/connection limits and timeouts at the proxy (see §3.1). With multiple processes,
-the aggregate limit is roughly the per-process limit times the process count.
+`Retry-After` in whole seconds (≥1); it contains no token, summary, or body. For bearer
+routes the check runs before authentication and before body parsing: the router parses
+the presented value with the shared `parseBearerToken` helper and makes exactly one
+decision keyed by the token's stable public prefix. An absent, malformed, non-`Bearer`,
+too-short, or duplicate/combined Authorization value is unkeyed and fails
+authentication; a syntactically valid unknown prefix is keyed and then fails
+authentication. Because the bounded map evicts its oldest entry at 10,000 prefixes,
+unauthenticated junk prefixes can displace a bucket and reset capacity. Treat this as
+process-local additional denial, not a volumetric control, and put per-IP
+request/connection limits, timeouts, and volumetric controls at the proxy (see §3.1).
+With multiple processes, the aggregate limit is roughly the per-process limit times the
+process count.
 
 **Resource quotas.** These bound a single request or field, not total project storage:
 

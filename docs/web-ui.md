@@ -332,9 +332,11 @@ matching the fail-closed authorization check that treats it as inactive. The
 speaker, credential, and grant reads are three independent parameterized SELECTs;
 each repeats the owner/active-account predicate. There is no read-snapshot claim:
 an ownership transfer between reads can only make a later read return empty, never
-add another account's rows. The inventory page never selects, renders, or logs the raw
-token, the public prefix, or the keyed verifier. The service selects the non-secret
-`scope_json` column and returns parsed stored scope identifiers for the read-only
+add another account's rows. The inventory page never renders or logs the raw token,
+the public prefix, or the keyed verifier; the service selects `public_prefix` only to
+derive the OAuth-issued flag and does not expose it. The service selects the
+non-secret `scope_json` column and returns parsed stored scope identifiers for the
+read-only
 [policy matrix](#policy-matrix); the inventory page does not render them. Credentials
 issued by the dashboard, the CLI, and the OAuth server are all ordinary `credentials`
 rows, so all of them for that speaker appear here. Revoking an OAuth-issued access
@@ -535,8 +537,9 @@ credential ID (not the public prefix), the derived `active`/`expired`/`revoked`/
 that still hold a grant are shown with that state; an inactive owned speaker's
 credentials are shown because neither the owner predicate nor the inventory requires
 speaker activity. A foreign account's speaker or credential, and an owned credential
-without a grant on this project, never appear. No token, public prefix, verifier,
-body, or summary is selected or rendered.
+without a grant on this project, never appear. `public_prefix` is selected only to
+derive the OAuth-origin flag and is never rendered or logged; the token, verifier,
+body, and summary are never selected or rendered.
 
 **Limits.** At most **100** active members are rendered; when more exist the page says
 the list is truncated. Credential rows consider at most **100** owned speakers and
@@ -934,8 +937,9 @@ bounded form before checking CSRF.
   speakers, and renders at most 100 credential rows, with a note when a bound is
   reached; a truncated empty credential result says it covers only the first 100
   owned speakers. It has no pagination, search, or filtering. It shows credential
-  IDs, states, and scope identifiers only; the public prefix, verifier, and raw token
-  are never selected or rendered. It performs one inventory read per considered
+  IDs, states, and scope identifiers only. The reused inventory selects `public_prefix`
+  solely to derive the OAuth-issued flag and never renders it; the verifier and raw
+  token are never selected or rendered. It performs one inventory read per considered
   owned speaker, so the bound limits rendered rows and reads, not scan cost.
 - Search covers message **summaries only**. There is no body search, full-text
   index, ranking, highlighting, saved search, or search across projects.

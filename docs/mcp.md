@@ -90,12 +90,20 @@ The endpoint is stateful and in-memory:
   again if the credential were reactivated first. Unauthenticated requests carry no
   trusted identity with which to close it early.
 
-No WebSocket transport is implemented. `/mcp` shares the per-credential rate-limit
-bucket with REST: after authentication and before any MCP protocol handling, an
-over-limit request returns HTTP `429` with the standard Corkboard envelope
-(`code: "RATE_LIMITED"`, a `request_id`), `Retry-After`, and `Cache-Control: no-store`,
-and **no `mcp-session-id` is created**. Limits default to 120 requests/minute with burst
-30 and are process-local; see [`api.md`](./api.md#rate-limits).
+No WebSocket transport is implemented. `/mcp` shares the per-prefix rate-limit bucket
+with REST. The check runs before authentication (keyed by the presented credential's
+stable public prefix through the shared `parseBearerToken` helper) and before any MCP
+protocol handling; an over-limit request returns HTTP `429` with the standard Corkboard
+envelope (`code: "RATE_LIMITED"`, a `request_id`), `Retry-After`, and
+`Cache-Control: no-store`, and **no `mcp-session-id` is created**. Absent, malformed,
+non-`Bearer`, too-short, or duplicate/combined Authorization values are unkeyed and
+fail authentication; a syntactically valid unknown prefix is keyed and then fails
+authentication under the limit. Limits default to 120 requests/minute with burst 30 and
+are process-local. The bounded bucket map (10,000 prefixes, 2-minute idle sweep,
+oldest-entry eviction at the cap) means unauthenticated junk prefixes that pass the
+syntax check can displace a bucket and reset a client's capacity, so treat `429` /
+`Retry-After` as backpressure and do not rely on this limiter for volumetric
+protection; see [`api.md`](./api.md#rate-limits).
 
 The optional process-local metrics registry counts every `/mcp` HTTP request
 (initialize, tool calls, `GET`, `DELETE`) under the single `/mcp` route label. It does

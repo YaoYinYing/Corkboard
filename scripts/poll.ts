@@ -941,7 +941,11 @@ export async function run(options: RunOptions): Promise<PollPassResult> {
   }
 }
 
-function parseBaseUrl(raw: string): string {
+// The bearer credential is sent on every request. Cleartext HTTP is allowed
+// only for local loopback development; any other host must use TLS.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
+
+export function parseBaseUrl(raw: string): string {
   let url: URL;
   try {
     url = new URL(raw);
@@ -950,6 +954,9 @@ function parseBaseUrl(raw: string): string {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new PollError(2, "CONFIG", "base URL must use http or https");
+  }
+  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) {
+    throw new PollError(2, "CONFIG", "base URL must use https outside loopback");
   }
   if (url.username !== "" || url.password !== "") {
     throw new PollError(2, "CONFIG", "base URL must not embed credentials");

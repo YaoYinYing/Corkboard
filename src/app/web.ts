@@ -632,6 +632,13 @@ function formatCommittedAt(locale: Locale, value: string): string {
   return `${DATE_FORMATTERS[locale].format(date)} UTC`;
 }
 
+// A request path can carry duplicate leading slashes (`//projects/x`), which a
+// browser resolves as a scheme-relative URL. Collapse only the leading run so
+// language, pager, and jump links stay same-origin; interior paths are intact.
+function sameOriginPath(pathname: string): string {
+  return `/${pathname.replace(/^\/+/, "")}`;
+}
+
 function hrefWithParams(
   url: URL,
   updates: Readonly<Record<string, string | null>>,
@@ -642,7 +649,8 @@ function hrefWithParams(
     else params.set(name, value);
   }
   const query = params.toString();
-  return query === "" ? url.pathname : `${url.pathname}?${query}`;
+  const path = sameOriginPath(url.pathname);
+  return query === "" ? path : `${path}?${query}`;
 }
 
 function localeSwitch(locale: Locale, url: URL): string {
@@ -2134,6 +2142,9 @@ ${options.inventory.credentials
     // service re-checks the credential state and speaker/account status.
     const editable =
       credential.state === "active" && options.inventory.speaker.status === "active";
+    // OAuth access credentials may only be widened through a fresh consent; the
+    // add-grant form is hidden. Revocation/removal stay available.
+    const grantEditable = editable && !credential.oauthIssued;
     const stateKey = credentialStateKey(credential.state);
     const projects =
       credential.projects.length === 0
@@ -2162,7 +2173,7 @@ ${options.inventory.credentials
 <input type="hidden" name="csrf_token" value="${escapeHtml(options.csrf)}">
 <p class="form-actions"><button type="submit">${escapeHtml(t(locale, "revokeCredentialAction"))}</button></p>
 </form>`;
-    const grantEdit = !editable
+    const grantEdit = !grantEditable
       ? `<p class="hint">${escapeHtml(t(locale, "credentialGrantReadOnly"))}</p>`
       : options.inventory.grantableProjects.length === 0
         ? `<p class="hint">${escapeHtml(t(locale, "credentialNoGrantableProjects"))}</p>`

@@ -31,7 +31,7 @@ Requirements: Node.js 24, a writable data directory, and HTTPS termination by a
 reverse proxy (Caddy, nginx, or the hosting platform).
 
 ```sh
-npm ci
+npm ci --ignore-scripts
 npm run build
 node dist/scripts/corkboard.js init --data-dir /var/lib/corkboard
 # writes secrets outside the data directory:
@@ -86,16 +86,20 @@ Environment:
 | `CORKBOARD_REQUIRE_PRIVATE_FS` | no | `1` enables the same verification without `NODE_ENV` |
 | `PORT` | no | defaults to `8787` |
 | `HOST` | no | listen host; default `127.0.0.1` |
-| `CORKBOARD_RATE_LIMIT_PER_MINUTE` | no | authenticated requests/minute per credential; default `120`, `0` disables |
+| `CORKBOARD_RATE_LIMIT_PER_MINUTE` | no | bearer requests/minute per presented credential public prefix; default `120`, `0` disables |
 | `CORKBOARD_RATE_LIMIT_BURST` | no | token-bucket burst size 1–1000; default `30` |
 | `CORKBOARD_METRICS_TOKEN` | no | enables operator-only `GET /metrics`; at least 32 characters, unset/empty disables |
 | `CORKBOARD_PUBLIC_BASE_URL` | for OAuth | public `https` origin used by OAuth discovery, resource, and endpoints; unset disables OAuth with `503`, invalid fails startup |
 | `CORKBOARD_BOOTSTRAP_PASSWORD` | no | owner bootstrap password, environment only |
 
-Rate limiting is per credential and **process-local**. Invalid limiter values stop
-startup. Because unauthenticated requests are not keyed, set per-IP request/connection
-limits, body-size limits, and volumetric abuse controls at the reverse proxy; the
-application does not read forwarding headers.
+Rate limiting is keyed by the presented credential's public prefix and is
+**process-local**. Invalid limiter values stop startup. Absent, malformed,
+non-`Bearer`, too-short, or duplicate/combined Authorization values are unkeyed and
+fail authentication; a syntactically valid unknown prefix is keyed. Because the bounded
+map evicts its oldest entry, unauthenticated junk prefixes can reset a bucket, so treat
+this as additional denial only. Set per-IP request/connection limits, body-size limits,
+timeouts, and volumetric abuse controls at the reverse proxy; the application does not
+read forwarding headers.
 
 ```sh
 CORKBOARD_RATE_LIMIT_PER_MINUTE=120 CORKBOARD_RATE_LIMIT_BURST=30 \
@@ -117,8 +121,9 @@ perform hashing, so timing may reveal whether the endpoint is enabled even thoug
 status and body are identical.
 
 The snapshot is process-local, resets on restart, and is not aggregated across processes
-or Workers; scrape it per process. The endpoint is not keyed by the per-credential rate
-limiter. Treat the token as a secret and rotate it by restarting with a new value.
+or Workers; scrape it per process. The endpoint is not keyed by the bearer
+public-prefix rate limiter. Treat the token as a secret and rotate it by restarting
+with a new value.
 
 The token must be exported into the environment of **both** the server and the scraper.
 Put it in the same `0600` secrets file used for the other secrets (the `set -a` source
@@ -463,8 +468,9 @@ authenticated `/mcp` request (lazy sweep, no timer). Eviction closes the transpo
 Sessions are lost on restart and are not shared across processes; clients must
 initialize again. There is no cross-process session persistence.
 
-`/mcp` shares the per-credential rate-limit bucket with REST. An over-limit request
-returns HTTP `429 RATE_LIMITED` with `Retry-After` before any MCP session is created.
+`/mcp` shares the per-prefix rate-limit bucket with REST. The check runs before
+authentication, and an over-limit request returns HTTP `429 RATE_LIMITED` with
+`Retry-After` before any MCP session is created.
 
 ## Cloudflare Workers (planned)
 

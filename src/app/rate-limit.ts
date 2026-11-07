@@ -1,7 +1,8 @@
 // Per-credential token-bucket request limiting. Core Web APIs only, with an
 // injected clock. Limits are process-local; they are not shared across
-// processes or Workers isolates. This is additional denial only: it runs
-// after authentication and never changes authentication or authorization.
+// processes or Workers isolates. This is additional denial only: bearer routes
+// check it before authentication using the presented token's public prefix and
+// never change authentication or authorization outcomes below the limit.
 
 export const DEFAULT_RATE_LIMIT_PER_MINUTE = 120;
 export const DEFAULT_RATE_LIMIT_BURST = 30;

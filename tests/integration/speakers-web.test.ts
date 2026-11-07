@@ -2251,6 +2251,118 @@ test("revoked, expired, and unknown-expiry credentials are read-only for grant e
   );
 });
 
+test("OAuth-issued credentials reject grant additions and hide the add form", async (t) => {
+  const { fx, app } = await withApp(t);
+  await basicSpeakerSetup(fx);
+  const oauth = await fx.addCredential({
+    id: "cred_oat_dashboard",
+    speakerId: "spk_a",
+    token: `cb_oat_${"A".repeat(40)}`,
+    autoGrantMemberships: false,
+    grantProjects: ["proj_a"],
+  });
+  const ordinary = await fx.addCredential({
+    speakerId: "spk_a",
+    autoGrantMemberships: false,
+  });
+
+  // Service boundary: a crafted request is rejected with the same predicate and
+  // message as rotation, and no grant row or audit is written.
+  await assert.rejects(
+    grantOwnedSpeakerCredentialProject(
+      fx.deps,
+      sessionPrincipal("acct_a"),
+      "spk_a",
+      oauth.credentialId,
+      "proj_b",
+    ),
+    (error: unknown) =>
+      error instanceof AppError &&
+      error.code === "FORBIDDEN" &&
+      error.message.includes("OAuth-issued"),
+  );
+  assert.deepEqual(
+    (
+      await fx.db.all<{ project_id: string }>(
+        "SELECT project_id FROM credential_project_grants WHERE credential_id = ? ORDER BY project_id",
+        [oauth.credentialId],
+      )
+    ).map((row) => row.project_id),
+    ["proj_a"],
+  );
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT id FROM audit_events WHERE operation = 'credential.project.grant'",
+      )
+    ).length,
+    0,
+  );
+
+  // An ordinary speaker credential is unaffected.
+  assert.equal(
+    await grantOwnedSpeakerCredentialProject(
+      fx.deps,
+      sessionPrincipal("acct_a"),
+      "spk_a",
+      ordinary.credentialId,
+      "proj_a",
+    ),
+    true,
+  );
+
+  // The dashboard exposes the OAuth flag, hides its add-grant form, and keeps
+  // removal available; an ordinary active credential keeps its add form.
+  const inventory = await listOwnedSpeakerCredentials(
+    fx.deps,
+    sessionPrincipal("acct_a"),
+    "spk_a",
+  );
+  assert.equal(
+    inventory.credentials.find((row) => row.id === oauth.credentialId)?.oauthIssued,
+    true,
+  );
+  assert.equal(
+    inventory.credentials.find((row) => row.id === ordinary.credentialId)?.oauthIssued,
+    false,
+  );
+
+  const { cookie, csrf } = await loginAsWithCsrf(app, "a@example.test", "account a secret");
+  const page = await getPage(app, "/speakers/spk_a/credentials", cookie);
+  assert.equal(page.status, 200);
+  assert.equal(
+    page.html.includes(`/credentials/${oauth.credentialId}/grants"`),
+    false,
+  );
+  assert.ok(
+    page.html.includes(`/credentials/${oauth.credentialId}/grants/remove`),
+  );
+  assert.ok(
+    page.html.includes(`/credentials/${ordinary.credentialId}/grants"`),
+  );
+
+  // A crafted POST still cannot widen the OAuth credential.
+  const forged = await postFormMulti(
+    app,
+    `/speakers/spk_a/credentials/${oauth.credentialId}/grants`,
+    cookie,
+    [
+      ["csrf_token", csrf],
+      ["project_id", "proj_b"],
+    ],
+  );
+  assert.equal(forged.status, 404);
+  assert.equal(
+    (
+      await fx.db.all(
+        "SELECT 1 FROM credential_project_grants WHERE credential_id = ? AND project_id = ?",
+        [oauth.credentialId, "proj_b"],
+      )
+    ).length,
+    0,
+  );
+});
+
 test("grant edits require session CSRF, reject bearers, and enforce body and method limits", async (t) => {
   const { fx, app } = await withApp(t);
   await basicSpeakerSetup(fx);

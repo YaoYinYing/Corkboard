@@ -36,6 +36,7 @@ import {
 import {
   authenticateBearer,
   authorizeProject,
+  parseBearerToken,
   type Principal,
   type ServiceDeps,
 } from "../service/auth.ts";
@@ -195,16 +196,21 @@ async function authenticate(
   context: RequestContext,
   limiter: RateLimiter,
 ): Promise<Principal> {
-  const principal = await authenticateBearer(
-    deps,
-    request.headers.get("authorization") ?? undefined,
-  );
+  const authorization = request.headers.get("authorization") ?? undefined;
+  // Limit before authentication, keyed by the presented credential's stable
+  // public prefix (parsed without a DB read or HMAC). An over-limit request
+  // never reaches the credential SELECT, verifier check, or last_used_at
+  // UPDATE, so a compromised key cannot force serialized writes while limited.
+  // The bucket map is bounded and idle-evicted; malformed or absent bearer
+  // values are not keyed and fail authentication unchanged below. One bucket
+  // decision per request: the post-authentication check is folded into this.
+  const parsed = parseBearerToken(authorization);
+  if (parsed !== undefined) {
+    const decision = limiter.check(parsed.publicPrefix);
+    if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
+  }
+  const principal = await authenticateBearer(deps, authorization);
   context.principal = principal;
-  // Limit only authenticated principals, after auth and before any handler or
-  // body parsing. Unauthenticated requests are never keyed; bearer tokens are
-  // 256-bit, so per-IP limiting is left to the reverse proxy.
-  const decision = limiter.check(principal.credentialId);
-  if (!decision.allowed) throw new RateLimitError(decision.retryAfterSeconds);
   return principal;
 }
 

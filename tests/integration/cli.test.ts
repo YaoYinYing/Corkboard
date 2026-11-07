@@ -1003,6 +1003,32 @@ test("issue-key records grants and grant/revoke take effect per request", async 
       0,
     );
 
+    // The operator grant path rejects an OAuth-issued access credential and
+    // writes no row; the ordinary credential grant above still succeeded.
+    const oauthCredentialId = "cred_oat_cli_grant";
+    await db.run(
+      `INSERT INTO credentials
+         (id, speaker_id, public_prefix, secret_verifier, scope_json,
+          expires_at, revoked_at, created_at)
+       VALUES (?, ?, ?, 'oauth-verifier', '["message.read"]', NULL, NULL, ?)`,
+      [oauthCredentialId, speakerId, "cb_oat_cli00", new Date().toISOString()],
+    );
+    const oauthGrant = run(
+      ["grant-key-project", "--credential", oauthCredentialId, "--project", projectB],
+      env,
+    );
+    assert.notEqual(oauthGrant.status, 0);
+    assert.match(oauthGrant.stderr, /OAuth-issued/);
+    assert.equal(
+      (
+        await db.all<{ project_id: string }>(
+          "SELECT project_id FROM credential_project_grants WHERE credential_id = ?",
+          [oauthCredentialId],
+        )
+      ).length,
+      0,
+    );
+
     // Audit rows are sanitized and carry the granted projects/scopes.
     const audits = await db.all<{ operation: string; detail: string | null }>(
       `SELECT operation, detail FROM audit_events

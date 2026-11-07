@@ -213,6 +213,12 @@ the active-account check; no bearer principal can reach either surface.
   `accountCanReadProject`: at least one active speaker owned by the session account
   holds an active membership on the active project carrying `project.read`. The
   membership rule and this read check are re-read inside the write transaction.
+- OAuth-issued credentials (`cb_oat_` token prefix or an `oauth_token_clients`
+  association) are excluded from grant addition by every supported path: the CLI
+  `grant-key-project`, the dashboard, and `grantOwnedSpeakerCredentialProject` all
+  reject the write with the same predicate and message as `rotate-key`, and the
+  dashboard hides the add-grant form. Only a fresh OAuth consent can widen such a
+  token; grant removal and whole-credential revocation remain available.
 - The CLI operator paths (`issue-key`, `grant-key-project`, `revoke-key`,
   `rotate-key`) act as the host operator, not as a bearer principal.
 

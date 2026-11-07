@@ -19,6 +19,16 @@ const MAX_SELECTED_PROJECTS = 100;
 // silent truncation.
 const MAX_AUDIT_PROJECT_IDS = 32;
 
+// OAuth access credentials are managed by their OAuth client. Reuse one
+// predicate and message for every administrative path (rotation and dashboard
+// grants) so a live access token cannot be widened or converted behind the
+// consent screen.
+export const OAUTH_ISSUED_CREDENTIAL_ERROR = "credential is OAuth-issued; use the OAuth flow";
+
+export function isOAuthIssuedCredential(publicPrefix: string, oauthAssociated: number): boolean {
+  return oauthAssociated !== 0 || publicPrefix.startsWith(OAUTH_ACCESS_PREFIX);
+}
+
 export interface SpeakerProject {
   id: string;
   title: string;
@@ -70,6 +80,8 @@ export interface OwnedCredential {
   /** Stored scope identifiers (a ceiling, not an inferred grant). */
   scopes: Scope[];
   projects: CredentialGrant[];
+  /** OAuth access credentials are managed by their client; grants are read-only. */
+  oauthIssued: boolean;
 }
 
 export interface OwnedSpeakerCredentials {
@@ -447,10 +459,8 @@ export async function rotateSpeakerCredential(
     // rotation and RFC 7009 revocation). Minting an operator credential for the
     // same speaker would drop the oauth_token_clients association and bypass
     // that flow, so reject both markers without writing.
-    if (source.oauth_associated !== 0 || source.public_prefix.startsWith(OAUTH_ACCESS_PREFIX)) {
-      throw new Error(
-        `credential is OAuth-issued; use the OAuth flow: ${input.credentialId}`,
-      );
+    if (isOAuthIssuedCredential(source.public_prefix, source.oauth_associated)) {
+      throw new Error(`${OAUTH_ISSUED_CREDENTIAL_ERROR}: ${input.credentialId}`);
     }
     if (source.revoked_at !== null) {
       throw new Error(`credential is revoked: ${input.credentialId}`);
@@ -643,8 +653,13 @@ export async function listOwnedSpeakerCredentials(
     expires_at: string | null;
     revoked_at: string | null;
     scope_json: string;
+    public_prefix: string;
+    oauth_associated: number;
   }>(
-    `SELECT c.id, c.created_at, c.expires_at, c.revoked_at, c.scope_json
+    `SELECT c.id, c.created_at, c.expires_at, c.revoked_at, c.scope_json,
+            c.public_prefix,
+            EXISTS (SELECT 1 FROM oauth_token_clients t
+                     WHERE t.credential_id = c.id) AS oauth_associated
        FROM credentials c
        JOIN speakers s ON s.id = c.speaker_id
        JOIN accounts a ON a.id = s.owner_account_id
@@ -688,6 +703,7 @@ export async function listOwnedSpeakerCredentials(
       state: credentialState(row.revoked_at, row.expires_at, nowMs),
       scopes: SCOPES.filter((scope) => parseScopeJson(row.scope_json).has(scope)),
       projects: grants.get(row.id) ?? [],
+      oauthIssued: isOAuthIssuedCredential(row.public_prefix, row.oauth_associated),
     })),
     grantableProjects: speakerProjects
       .filter((project) => readableProjectIds.has(project.id))
@@ -782,11 +798,26 @@ export async function grantOwnedSpeakerCredentialProject(
       [speakerId, accountId],
     );
     if (speaker === undefined) throw new AppError("NOT_FOUND");
-    const credential = await tx.first<{ revoked_at: string | null; expires_at: string | null }>(
-      "SELECT revoked_at, expires_at FROM credentials WHERE id = ? AND speaker_id = ?",
+    const credential = await tx.first<{
+      revoked_at: string | null;
+      expires_at: string | null;
+      public_prefix: string;
+      oauth_associated: number;
+    }>(
+      `SELECT c.revoked_at, c.expires_at, c.public_prefix,
+              EXISTS (SELECT 1 FROM oauth_token_clients t
+                       WHERE t.credential_id = c.id) AS oauth_associated
+         FROM credentials c
+        WHERE c.id = ? AND c.speaker_id = ?`,
       [credentialId, speakerId],
     );
     if (credential === undefined) throw new AppError("NOT_FOUND");
+    // An OAuth access credential is bound to the project granted at consent.
+    // Adding a grant here would widen a live token past that consent, so reject
+    // it with the same predicate and message as `rotateSpeakerCredential`.
+    if (isOAuthIssuedCredential(credential.public_prefix, credential.oauth_associated)) {
+      throw new AppError("FORBIDDEN", OAUTH_ISSUED_CREDENTIAL_ERROR);
+    }
     // Grant editing is an active-credential operation; revoked, expired, and
     // unparseable-expiry credentials are read-only.
     if (credentialState(credential.revoked_at, credential.expires_at, nowMs) !== "active") {
