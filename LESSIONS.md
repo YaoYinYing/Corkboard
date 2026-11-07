@@ -3,6 +3,24 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-06 — a receipt is an assertion about content, so fetch the content first
+
+- **Failure avoided:** The reference poller passed list metadata to a no-op callback,
+  called `mark_read`, and advanced its cursor without ever fetching the body. It
+  therefore asserted "content was fetched" for content it had not retrieved.
+- **Reproducer:** Run the default client over a project with one ready message; the
+  server records a receipt and the cursor advances, yet no `GET .../body` occurs.
+- **Fix:** Consumption is explicit (`--consume` or a programmatic callback). Before any
+  receipt the client fetches the body under the existing request context/deadline and
+  1 MiB streamed cap, requires the exact `message_id` and a canonical `sha256:` digest,
+  and recomputes the SHA-256 over the UTF-8 `text`. Only then does it invoke the
+  consumer, and acknowledge/advance only after the callback returns and `mark_read`
+  confirms. The default pass observes one metadata page and writes nothing.
+- **Prevents:** Treating "listed" as "delivered", and a durable cursor that records
+  unverified progress past messages the client never read.
+- **Remove when:** the receipt endpoint itself accepts and verifies proof of content
+  retrieval bound to the acknowledgment.
+
 ## 2026-11-06 — document the shipped adapter's error shape, not just the core's
 
 - **Failure avoided:** The runbook said an oversized `POST /mcp` returns JSON-RPC
@@ -1574,10 +1592,12 @@ prevented regression; when to remove the advice.
 - **Failure:** An at-least-once poller that refuses to advance on `410 BODY_EXPIRED`
   wedges forever: the server can never create a receipt for an expired body, so every
   restart retries the same message and re-invokes the consumer.
-- **Reproducer:** `tests/unit/poll.test.ts` "BODY_EXPIRED advances while other
-  definitive and transient failures do not" returns `410 BODY_EXPIRED` and asserts the cursor
-  advances; the same test asserts `401`/`403`/`404` and exhausted `5xx` retries do
-  not advance.
+- **Reproducer:** `tests/unit/poll.test.ts` "a body GET 410 BODY_EXPIRED advances
+  without a receipt while other body GET failures do not" returns `410 BODY_EXPIRED`
+  and asserts the cursor advances; the same test asserts `401`/`403`/`404`, `429`, and
+  other definitive failures do not advance. A separate test, "a mark_read 410
+  BODY_EXPIRED after a verified body advances without a receipt", covers the
+  body-fetch-succeeds / `mark_read`-expiry race.
 - **Fix:** Treat only the server's definitive `410` + `BODY_EXPIRED` as a consumed
   metadata tombstone: log an escaped status, advance the cursor, and create no
   receipt. Any other rejection or transient failure keeps the cursor unchanged.

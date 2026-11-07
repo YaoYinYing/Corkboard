@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdtempSync,
@@ -98,6 +99,24 @@ function receipt(messageId: string, speakerId = SPEAKER): Record<string, unknown
   };
 }
 
+function digestOf(text: string): string {
+  return `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
+}
+
+function bodyResponse(
+  messageId: string,
+  text: string,
+  overrides: Record<string, unknown> = {},
+): Response {
+  return jsonResponse({
+    message_id: messageId,
+    text,
+    compression: "none",
+    digest: digestOf(text),
+    ...overrides,
+  });
+}
+
 function identityResponse(speakerId = SPEAKER): Response {
   return jsonResponse({
     speaker: { id: speakerId, display_name: "Poller" },
@@ -135,6 +154,10 @@ function readUrl(call: Call): boolean {
   return call.method === "GET" && call.url.pathname.endsWith("/messages");
 }
 
+function bodyUrl(call: Call): boolean {
+  return call.method === "GET" && call.url.pathname.endsWith("/body");
+}
+
 function readMessageUrl(call: Call): boolean {
   return call.method === "POST" && call.url.pathname.endsWith("/read");
 }
@@ -153,11 +176,16 @@ const baseOptions = {
 test("the cursor advances only after a confirmed mark_read and stays private", async () => {
   const path = cursorPath("confirmed");
   let pageRequests = 0;
+  const bodies: string[] = [];
   const { fetchImpl, calls } = fakeFetch((call) => {
     if (readUrl(call)) {
       pageRequests += 1;
       if (pageRequests === 1) return jsonResponse(page([row(1), row(2)]));
       return jsonResponse(page([]));
+    }
+    if (bodyUrl(call)) {
+      const messageId = call.url.pathname.split("/").at(-2) ?? "";
+      return bodyResponse(messageId, `body for ${messageId}`);
     }
     if (readMessageUrl(call)) {
       const messageId = call.url.pathname.split("/").at(-2) ?? "";
@@ -173,11 +201,15 @@ test("the cursor advances only after a confirmed mark_read and stays private", a
     limit: 10,
     maxPages: 1,
     fetchImpl,
+    onMessage: (_message, body) => {
+      bodies.push(body);
+    },
   });
 
   assert.equal(result.processed, 2);
   assert.equal(result.pages, 1);
   assert.equal(result.afterSeq, 2);
+  assert.deepEqual(bodies, ["body for msg_1", "body for msg_2"]);
   assert.deepEqual(readCursor(path), {
     version: 1,
     project_id: PROJECT,
@@ -201,6 +233,10 @@ test("a rejected mark_read leaves the cursor at the previous confirmed message",
   const path = cursorPath("rejected");
   const { fetchImpl, calls } = fakeFetch((call) => {
     if (readUrl(call)) return jsonResponse(page([row(1), row(2)]));
+    if (bodyUrl(call)) {
+      const messageId = call.url.pathname.split("/").at(-2) ?? "";
+      return bodyResponse(messageId, `body for ${messageId}`);
+    }
     if (readMessageUrl(call)) {
       const messageId = call.url.pathname.split("/").at(-2) ?? "";
       if (messageId === "msg_2") {
@@ -212,7 +248,15 @@ test("a rejected mark_read leaves the cursor at the previous confirmed message",
   });
 
   await assert.rejects(
-    pollPass({ ...baseOptions, cursorPath: path, afterSeq: 0, limit: 10, maxPages: 1, fetchImpl }),
+    pollPass({
+      ...baseOptions,
+      cursorPath: path,
+      afterSeq: 0,
+      limit: 10,
+      maxPages: 1,
+      fetchImpl,
+      consume: true,
+    }),
     (error: unknown) => {
       assert.ok(error instanceof PollError);
       assert.equal(error.exitCode, 3);
@@ -232,9 +276,11 @@ test("a rejected mark_read leaves the cursor at the previous confirmed message",
 test("an uncertain mark_read is retried with the same request and reprocesses on restart", async () => {
   const path = cursorPath("at-least-once");
   const seen: PollMessage[] = [];
+  const seenBodies: string[] = [];
   let markReadCalls = 0;
   const { fetchImpl, calls } = fakeFetch((call) => {
     if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) return bodyResponse("msg_1", "first body");
     if (readMessageUrl(call)) {
       markReadCalls += 1;
       throw new Error("connection reset");
@@ -250,8 +296,9 @@ test("an uncertain mark_read is retried with the same request and reprocesses on
       limit: 10,
       maxPages: 1,
       fetchImpl,
-      onMessage: (message) => {
+      onMessage: (message, body) => {
         seen.push(message);
+        seenBodies.push(body);
       },
     }),
     (error: unknown) => {
@@ -271,10 +318,12 @@ test("an uncertain mark_read is retried with the same request and reprocesses on
   assert.equal(retried[0]?.url.pathname.endsWith("/msg_1/read"), true);
   assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
   assert.deepEqual(seen.map((message) => message.seq), [1]);
+  assert.deepEqual(seenBodies, ["first body"]);
 
   // A later process starts at the last durable cursor and processes seq 1 again.
   const retry = fakeFetch((call) => {
     if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) return bodyResponse("msg_1", "first body");
     if (readMessageUrl(call)) return jsonResponse(receipt("msg_1"));
     throw new Error("unexpected request");
   });
@@ -285,14 +334,16 @@ test("an uncertain mark_read is retried with the same request and reprocesses on
     limit: 10,
     maxPages: 1,
     fetchImpl: retry.fetchImpl,
-    onMessage: (message) => {
+    onMessage: (message, body) => {
       seen.push(message);
+      seenBodies.push(body);
     },
   });
 
   assert.equal(result.processed, 1);
   assert.equal(readCursor(path).after_seq, 1);
   assert.deepEqual(seen.map((message) => message.seq), [1, 1]);
+  assert.deepEqual(seenBodies, ["first body", "first body"]);
 });
 
 test("a foreign-project row fails closed before mark_read", async () => {
@@ -581,12 +632,13 @@ test("an oversized body fails closed, including an error body", async () => {
   );
 });
 
-test("BODY_EXPIRED advances while other definitive and transient failures do not", async () => {
+test("a body GET 410 BODY_EXPIRED advances without a receipt while other body GET failures do not", async () => {
   const expiredPath = cursorPath("expired");
   const statusLines: string[] = [];
   const expired = fakeFetch((call) => {
     if (readUrl(call)) return jsonResponse(page([row(1)]));
-    if (readMessageUrl(call)) return jsonResponse({ error: { code: "BODY_EXPIRED" } }, 410);
+    if (bodyUrl(call)) return jsonResponse({ error: { code: "BODY_EXPIRED" } }, 410);
+    if (readMessageUrl(call)) throw new Error("expired bodies must not be acknowledged");
     throw new Error("unexpected request");
   });
   const result = await pollPass({
@@ -596,25 +648,28 @@ test("BODY_EXPIRED advances while other definitive and transient failures do not
     limit: 10,
     maxPages: 1,
     fetchImpl: expired.fetchImpl,
+    consume: true,
     stdout: (line) => statusLines.push(line),
   });
   assert.equal(result.processed, 1);
   assert.equal(result.afterSeq, 1);
   assert.equal(readCursor(expiredPath).after_seq, 1);
   assert.match(statusLines.join("\n"), /status=BODY_EXPIRED/);
+  assert.equal(expired.calls.filter(readMessageUrl).length, 0);
 
   for (const variant of [
-    { status: 401, code: "FORBIDDEN", exitCode: 3 },
-    { status: 403, code: "FORBIDDEN", exitCode: 3 },
-    { status: 404, code: "NOT_FOUND", exitCode: 3 },
+    { status: 401, code: "UNAUTHORIZED", exitCode: 2 },
+    { status: 403, code: "FORBIDDEN", exitCode: 2 },
+    { status: 404, code: "NOT_FOUND", exitCode: 2 },
     // A 410 is only consumable with the exact BODY_EXPIRED code.
     { status: 410, code: "INTEGRITY_FAILURE", exitCode: 3 },
+    { status: 429, code: "RATE_LIMITED", exitCode: 1 },
     { status: 500, code: "UNAVAILABLE", exitCode: 1 },
   ] as const) {
     const path = cursorPath(`reject-${variant.status}-${variant.code}`);
     const failure = fakeFetch((call) => {
       if (readUrl(call)) return jsonResponse(page([row(1)]));
-      if (readMessageUrl(call)) {
+      if (bodyUrl(call)) {
         return jsonResponse({ error: { code: variant.code } }, variant.status);
       }
       throw new Error("unexpected request");
@@ -627,6 +682,7 @@ test("BODY_EXPIRED advances while other definitive and transient failures do not
         limit: 10,
         maxPages: 1,
         fetchImpl: failure.fetchImpl,
+        consume: true,
       }),
       (error: unknown) => {
         assert.ok(error instanceof PollError);
@@ -635,11 +691,38 @@ test("BODY_EXPIRED advances while other definitive and transient failures do not
       },
     );
     assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
-    assert.equal(
-      failure.calls.filter(readMessageUrl).length,
-      variant.exitCode === 1 ? 3 : 1,
-    );
+    assert.equal(failure.calls.filter(readMessageUrl).length, 0);
   }
+});
+
+test("a mark_read 410 BODY_EXPIRED after a verified body advances without a receipt", async () => {
+  const path = cursorPath("mark-read-expired-race");
+  const statusLines: string[] = [];
+  const { fetchImpl, calls } = fakeFetch((call) => {
+    if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) return bodyResponse("msg_1", "verified body");
+    if (readMessageUrl(call)) return jsonResponse({ error: { code: "BODY_EXPIRED" } }, 410);
+    throw new Error("unexpected request");
+  });
+
+  const result = await pollPass({
+    ...baseOptions,
+    cursorPath: path,
+    afterSeq: 0,
+    limit: 10,
+    maxPages: 1,
+    fetchImpl,
+    consume: true,
+    stdout: (line) => statusLines.push(line),
+  });
+
+  assert.equal(result.processed, 1);
+  assert.equal(result.afterSeq, 1);
+  assert.equal(readCursor(path).after_seq, 1);
+  assert.equal(calls.filter(bodyUrl).length, 1);
+  assert.equal(calls.filter(readMessageUrl).length, 1);
+  assert.match(statusLines.join("\n"), /status=BODY_EXPIRED consumed-without-receipt/);
+  assert.equal(statusLines.join("\n").includes("verified body"), false);
 });
 
 test("mark_read success must name the requested message and speaker", async () => {
@@ -650,6 +733,7 @@ test("mark_read success must name the requested message and speaker", async () =
     const path = cursorPath(`mismatch-${name.replaceAll(" ", "-")}`);
     const { fetchImpl } = fakeFetch((call) => {
       if (readUrl(call)) return jsonResponse(page([row(1)]));
+      if (bodyUrl(call)) return bodyResponse("msg_1", "body");
       if (readMessageUrl(call)) {
         return jsonResponse({ ...receipt("msg_1"), ...overrides });
       }
@@ -663,6 +747,7 @@ test("mark_read success must name the requested message and speaker", async () =
         limit: 10,
         maxPages: 1,
         fetchImpl,
+        consume: true,
       }),
       isPoll(3, "UNSAFE_RESPONSE"),
     );
@@ -715,6 +800,7 @@ test("transient mark_read retries honor a numeric Retry-After on 429 and 5xx", a
     let attempts = 0;
     const { fetchImpl, calls } = fakeFetch((call) => {
       if (readUrl(call)) return jsonResponse(page([row(1)]));
+      if (bodyUrl(call)) return bodyResponse("msg_1", "body");
       if (readMessageUrl(call)) {
         attempts += 1;
         if (attempts === 1) {
@@ -735,6 +821,7 @@ test("transient mark_read retries honor a numeric Retry-After on 429 and 5xx", a
       limit: 10,
       maxPages: 1,
       fetchImpl,
+      consume: true,
       sleep: async (ms) => {
         sleeps.push(ms);
       },
@@ -886,6 +973,7 @@ test("a consumer processing failure leaves no acknowledgement and no cursor adva
   const path = cursorPath("process-failed");
   const { fetchImpl, calls } = fakeFetch((call) => {
     if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) return bodyResponse("msg_1", "body");
     throw new Error("unexpected request");
   });
   await assert.rejects(
@@ -902,6 +990,7 @@ test("a consumer processing failure leaves no acknowledgement and no cursor adva
     }),
     isPoll(1, "PROCESS_FAILED"),
   );
+  assert.equal(calls.filter(bodyUrl).length, 1);
   assert.equal(calls.filter(readMessageUrl).length, 0);
   assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
 });
@@ -946,6 +1035,7 @@ test("an abort during mark_read retry backoff stops promptly", async () => {
   let markReadCalls = 0;
   const { fetchImpl } = fakeFetch((call) => {
     if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) return bodyResponse("msg_1", "body");
     if (readMessageUrl(call)) {
       markReadCalls += 1;
       return jsonResponse({ error: { code: "RATE_LIMITED" } }, 429, { "retry-after": "5" });
@@ -962,6 +1052,7 @@ test("an abort during mark_read retry backoff stops promptly", async () => {
     limit: 10,
     maxPages: 1,
     fetchImpl,
+    consume: true,
     signal: controller.signal,
   });
   assert.equal(result.stopped, true);
@@ -1008,4 +1099,313 @@ test("a control-character credential echoed in a summary is redacted", async () 
   assert.equal(printed.includes("synthetic-control-token"), false);
   assert.equal(printed.includes(String.fromCharCode(1)), false);
   assert.equal(printed.includes("[REDACTED]"), true);
+});
+
+test("a body GET precedes every receipt in transport-observed request order", async () => {
+  const path = cursorPath("body-order");
+  const { fetchImpl, calls } = fakeFetch((call) => {
+    if (readUrl(call)) return jsonResponse(page([row(1), row(2)]));
+    if (bodyUrl(call)) {
+      const messageId = call.url.pathname.split("/").at(-2) ?? "";
+      return bodyResponse(messageId, `body ${messageId}`);
+    }
+    if (readMessageUrl(call)) {
+      const messageId = call.url.pathname.split("/").at(-2) ?? "";
+      return jsonResponse(receipt(messageId));
+    }
+    throw new Error("unexpected request");
+  });
+
+  const result = await pollPass({
+    ...baseOptions,
+    cursorPath: path,
+    afterSeq: 0,
+    limit: 10,
+    maxPages: 1,
+    fetchImpl,
+    consume: true,
+  });
+
+  assert.equal(result.processed, 2);
+  assert.deepEqual(
+    calls.map((call) => `${call.method} ${call.url.pathname}`),
+    [
+      "GET /api/v1/projects/proj_1/messages",
+      "GET /api/v1/projects/proj_1/messages/msg_1/body",
+      "POST /api/v1/projects/proj_1/messages/msg_1/read",
+      "GET /api/v1/projects/proj_1/messages/msg_2/body",
+      "POST /api/v1/projects/proj_1/messages/msg_2/read",
+    ],
+  );
+});
+
+test("the default CLI observes metadata without receipts or a cursor write", async () => {
+  const path = cursorPath("observe-default");
+  writeFileSync(
+    path,
+    `${JSON.stringify({
+      version: 1,
+      project_id: PROJECT,
+      speaker_id: SPEAKER,
+      after_seq: 0,
+      updated_at: "2026-11-03T12:00:00.000Z",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  chmodSync(path, 0o600);
+  const before = readFileSync(path, "utf8");
+  const output: string[] = [];
+  const { fetchImpl, calls } = fakeFetch((call) => {
+    if (call.url.pathname === "/api/v1/me") return identityResponse();
+    if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call) || readMessageUrl(call)) {
+      throw new Error("the default pass must not consume");
+    }
+    throw new Error("unexpected request");
+  });
+
+  const code = await main(
+    [
+      "--base-url",
+      BASE,
+      "--project",
+      PROJECT,
+      "--cursor-file",
+      path,
+      "--once",
+      "--show-summary",
+    ],
+    { CORKBOARD_APIKEY: TOKEN },
+    {
+      fetchImpl,
+      stdout: (line) => output.push(line),
+      stderr: () => {},
+    },
+  );
+
+  assert.equal(code, 0);
+  assert.equal(readFileSync(path, "utf8"), before);
+  assert.equal(calls.filter(bodyUrl).length, 0);
+  assert.equal(calls.filter(readMessageUrl).length, 0);
+  const printed = output.join("\n");
+  assert.match(printed, /consumed=0/);
+  assert.match(printed, /no body fetched/);
+  assert.match(printed, /no receipt/);
+  assert.match(printed, /summary 1/);
+});
+
+test("a malformed body contract or digest mismatch fails closed without a receipt", async () => {
+  const variants = [
+    {
+      name: "wrong-message",
+      response: bodyResponse("msg_other", "text"),
+      exitCode: 3,
+      code: "UNSAFE_RESPONSE",
+    },
+    {
+      name: "missing-digest",
+      response: jsonResponse({ message_id: "msg_1", text: "text", compression: "none" }),
+      exitCode: 3,
+      code: "UNSAFE_RESPONSE",
+    },
+    {
+      name: "non-canonical-digest",
+      response: bodyResponse("msg_1", "text", { digest: "sha256:ABC" }),
+      exitCode: 3,
+      code: "UNSAFE_RESPONSE",
+    },
+    {
+      name: "missing-text",
+      response: jsonResponse({
+        message_id: "msg_1",
+        compression: "none",
+        digest: digestOf("text"),
+      }),
+      exitCode: 3,
+      code: "UNSAFE_RESPONSE",
+    },
+    {
+      name: "not-json",
+      response: new Response("not json", { status: 200 }),
+      exitCode: 3,
+      code: "UNSAFE_RESPONSE",
+    },
+    {
+      name: "digest-mismatch",
+      response: bodyResponse("msg_1", "tampered", { digest: digestOf("original") }),
+      exitCode: 3,
+      code: "INTEGRITY_FAILURE",
+    },
+  ] as const;
+
+  for (const variant of variants) {
+    const path = cursorPath(`body-${variant.name}`);
+    const { fetchImpl, calls } = fakeFetch((call) => {
+      if (readUrl(call)) return jsonResponse(page([row(1)]));
+      if (bodyUrl(call)) return variant.response;
+      throw new Error("unexpected request");
+    });
+    await assert.rejects(
+      pollPass({
+        ...baseOptions,
+        cursorPath: path,
+        afterSeq: 0,
+        limit: 10,
+        maxPages: 1,
+        fetchImpl,
+        consume: true,
+      }),
+      isPoll(variant.exitCode, variant.code),
+    );
+    assert.equal(calls.filter(readMessageUrl).length, 0);
+    assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+  }
+});
+
+test("an oversized or stalled body response fails closed before any receipt", async () => {
+  const oversized = fakeFetch((call) => {
+    if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) return bodyResponse("msg_1", "x".repeat(200));
+    throw new Error("unexpected request");
+  });
+  await assert.rejects(
+    pollPass({
+      ...baseOptions,
+      cursorPath: cursorPath("body-cap"),
+      afterSeq: 0,
+      limit: 10,
+      maxPages: 1,
+      fetchImpl: oversized.fetchImpl,
+      consume: true,
+      maxResponseBytes: 32,
+    }),
+    isPoll(3, "BODY_TOO_LARGE"),
+  );
+  assert.equal(oversized.calls.filter(readMessageUrl).length, 0);
+  assert.equal(
+    loadCursorState(cursorPath("body-cap"), PROJECT, SPEAKER, () => new Date()).after_seq,
+    0,
+  );
+
+  const stalled = fakeFetch((call) => {
+    if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          call.signal?.addEventListener(
+            "abort",
+            () => controller.error(new Error("aborted")),
+            { once: true },
+          );
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }
+    throw new Error("unexpected request");
+  });
+  await assert.rejects(
+    pollPass({
+      ...baseOptions,
+      cursorPath: cursorPath("body-stall"),
+      afterSeq: 0,
+      limit: 10,
+      maxPages: 1,
+      fetchImpl: stalled.fetchImpl,
+      consume: true,
+      requestTimeoutMs: 30,
+    }),
+    isPoll(1, "TIMEOUT"),
+  );
+  assert.equal(stalled.calls.filter(readMessageUrl).length, 0);
+  assert.equal(
+    loadCursorState(cursorPath("body-stall"), PROJECT, SPEAKER, () => new Date()).after_seq,
+    0,
+  );
+
+  const controller = new AbortController();
+  let bodyStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    bodyStarted = resolve;
+  });
+  const interrupted = fakeFetch((call) => {
+    if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) {
+      const stream = new ReadableStream<Uint8Array>({
+        start(streamController) {
+          streamController.enqueue(new TextEncoder().encode('{"message_id":"msg_1"'));
+          bodyStarted();
+          call.signal?.addEventListener(
+            "abort",
+            () => streamController.error(new Error("aborted")),
+            { once: true },
+          );
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }
+    throw new Error("unexpected request");
+  });
+  const pending = pollPass({
+    ...baseOptions,
+    cursorPath: cursorPath("body-signal"),
+    afterSeq: 0,
+    limit: 10,
+    maxPages: 1,
+    fetchImpl: interrupted.fetchImpl,
+    consume: true,
+    signal: controller.signal,
+    requestTimeoutMs: 10_000,
+  });
+  await started;
+  controller.abort();
+  const stopped = await pending;
+  assert.equal(stopped.stopped, true);
+  assert.equal(stopped.afterSeq, 0);
+  assert.equal(interrupted.calls.filter(readMessageUrl).length, 0);
+  assert.equal(
+    loadCursorState(cursorPath("body-signal"), PROJECT, SPEAKER, () => new Date()).after_seq,
+    0,
+  );
+});
+
+test("--consume never prints a fetched body or its digest", async () => {
+  const marker = "unique-body-marker";
+  const text = `${marker} ${TOKEN}`;
+  const output: string[] = [];
+  const errors: string[] = [];
+  const { fetchImpl, calls } = fakeFetch((call) => {
+    if (call.url.pathname === "/api/v1/me") return identityResponse();
+    if (readUrl(call)) return jsonResponse(page([row(1, { summary: "benign summary" })]));
+    if (bodyUrl(call)) return bodyResponse("msg_1", text);
+    if (readMessageUrl(call)) return jsonResponse(receipt("msg_1"));
+    throw new Error("unexpected request");
+  });
+
+  const code = await main(
+    [
+      "--base-url",
+      BASE,
+      "--project",
+      PROJECT,
+      "--cursor-file",
+      cursorPath("body-redaction"),
+      "--once",
+      "--consume",
+      "--show-summary",
+    ],
+    { CORKBOARD_APIKEY: TOKEN },
+    {
+      fetchImpl,
+      stdout: (line) => output.push(line),
+      stderr: (line) => errors.push(line),
+    },
+  );
+
+  assert.equal(code, 0);
+  const printed = [...output, ...errors].join("\n");
+  assert.equal(printed.includes(marker), false);
+  assert.equal(printed.includes(digestOf(text)), false);
+  assert.equal(printed.includes(TOKEN), false);
+  assert.equal(calls.filter(bodyUrl).length, 1);
+  assert.equal(calls.filter(readMessageUrl).length, 1);
 });

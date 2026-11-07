@@ -6,11 +6,13 @@
 // passed. The bearer credential is read from the environment or a 0600 file and
 // is never printed, logged, or placed in a URL.
 //
-// Durability rule: the durable after_seq cursor advances only after the message
-// has been processed and its explicit mark_read was confirmed. A crash or an
-// uncertain mark_read therefore reprocesses at least the last message. Dedupe
-// is the consumer's responsibility.
-import { randomBytes } from "node:crypto";
+// Durability rule: the durable after_seq cursor advances only after the body has
+// been fetched and verified, the consumer's processing step returned, and its
+// explicit mark_read was confirmed. Without --consume (and without an embedder
+// callback) the pass is metadata observation only. A crash or an uncertain
+// mark_read therefore reprocesses at least the last message. Dedupe is the
+// consumer's responsibility.
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -40,6 +42,7 @@ export const REQUEST_TIMEOUT_MS = 15_000;
 // cap. Content-Length is never trusted.
 export const MAX_RESPONSE_BYTES = 1 << 20;
 export const CURSOR_VERSION = 1;
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
 
 export interface PollMessage {
@@ -70,6 +73,11 @@ export interface PollContext {
   maxResponseBytes?: number | undefined;
 }
 
+export type MessageHandler = (
+  message: PollMessage,
+  body: string,
+) => void | Promise<void>;
+
 export interface PollPassOptions extends PollContext {
   baseUrl: string;
   token: string;
@@ -80,7 +88,8 @@ export interface PollPassOptions extends PollContext {
   limit?: number | undefined;
   maxPages?: number | undefined;
   showSummary?: boolean | undefined;
-  onMessage?: ((message: PollMessage) => void | Promise<void>) | undefined;
+  consume?: boolean | undefined;
+  onMessage?: MessageHandler | undefined;
 }
 
 export interface PollPassResult {
@@ -98,7 +107,8 @@ export interface RunOptions extends PollContext {
   limit?: number | undefined;
   maxPages?: number | undefined;
   showSummary?: boolean | undefined;
-  onMessage?: ((message: PollMessage) => void | Promise<void>) | undefined;
+  consume?: boolean | undefined;
+  onMessage?: MessageHandler | undefined;
   once?: boolean | undefined;
   intervalMs?: number | undefined;
 }
@@ -678,6 +688,59 @@ async function markRead(
   throw new PollError(1, "MARK_READ_UNCERTAIN", "mark_read attempts exhausted");
 }
 
+// A receipt asserts that the client fetched the content. Fetch and verify the
+// body before any mark_read; the plaintext is returned to the consumer only.
+// Never include the text or digest in an error or status line.
+async function fetchBody(
+  context: RequestContext,
+  baseUrl: string,
+  projectId: string,
+  message: PollMessage,
+  token: string,
+): Promise<{ expired: true } | { expired: false; text: string }> {
+  const url = new URL(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/messages/${encodeURIComponent(message.messageId)}/body`,
+    baseUrl,
+  ).toString();
+  const response = await request(context, url, "GET", token);
+  if (!response.ok) {
+    const code = serverErrorCode(response);
+    // Definitive tombstone: no body can ever be fetched and no receipt can exist.
+    if (response.status === 410 && code === "BODY_EXPIRED") return { expired: true };
+    const configError = response.status === 401 || response.status === 403 || response.status === 404;
+    const transient = response.status === 429 || response.status >= 500;
+    throw new PollError(
+      transient ? 1 : configError ? 2 : 3,
+      transient ? "BODY_UNAVAILABLE" : "BODY_REJECTED",
+      `body fetch for seq ${message.seq} rejected with status ${response.status}${codeSuffix(code, token)}; cursor unchanged`,
+    );
+  }
+
+  const payload = parseJson(response.text, "message body");
+  if (
+    !isRecord(payload) ||
+    payload.message_id !== message.messageId ||
+    typeof payload.text !== "string" ||
+    typeof payload.compression !== "string" ||
+    typeof payload.digest !== "string" ||
+    !SHA256_DIGEST.test(payload.digest)
+  ) {
+    throw protocolError(
+      "message body response is malformed or does not match the requested message",
+    );
+  }
+
+  const computed = `sha256:${createHash("sha256").update(payload.text, "utf8").digest("hex")}`;
+  if (computed !== payload.digest) {
+    throw new PollError(
+      3,
+      "INTEGRITY_FAILURE",
+      `body for seq ${message.seq} failed digest verification; cursor unchanged`,
+    );
+  }
+  return { expired: false, text: payload.text };
+}
+
 // Escape control and bidirectional formatting characters so untrusted summary
 // metadata cannot drive the terminal.
 // Redact the raw field before JSON/terminal escaping: escaping first would
@@ -705,7 +768,44 @@ export async function pollPass(options: PollPassOptions): Promise<PollPassResult
   let cursor = options.afterSeq;
   let processed = 0;
   let pages = 0;
+  // A receipt asserts that content was fetched. Without explicit consumption the
+  // pass is metadata observation only: no body fetch, no mark_read, no cursor
+  // write. A programmatic callback always implies consumption.
+  const consume = options.consume === true || options.onMessage !== undefined;
   try {
+    if (!consume) {
+      if (options.signal?.aborted) {
+        return { afterSeq: cursor, processed, pages, stopped: true };
+      }
+      const listed = await listPage(
+        context,
+        options.baseUrl,
+        options.projectId,
+        options.token,
+        cursor,
+        limit,
+      );
+      if (listed.messages.length > 0) pages += 1;
+      for (const message of listed.messages) {
+        if (options.signal?.aborted) {
+          return { afterSeq: cursor, processed, pages, stopped: true };
+        }
+        if (options.showSummary === true) {
+          emit(
+            `seq=${message.seq} message_id=${displayText(message.messageId, options.token)}` +
+              ` sender=${displayText(message.senderId, options.token)}` +
+              ` summary=${displayText(message.summary, options.token)}`,
+          );
+        }
+      }
+      emit(
+        `metadata observation only: page after_seq=${cursor} returned ${listed.messages.length}` +
+          " message(s); consumed=0, no body fetched, no receipt, cursor unchanged" +
+          " (pass --consume to fetch bodies and acknowledge)",
+      );
+      return { afterSeq: cursor, processed: 0, pages, stopped: false };
+    }
+
     for (let page = 0; page < maxPages; page += 1) {
       if (options.signal?.aborted) {
         return { afterSeq: cursor, processed, pages, stopped: true };
@@ -725,9 +825,38 @@ export async function pollPass(options: PollPassOptions): Promise<PollPassResult
         if (options.signal?.aborted) {
           return { afterSeq: cursor, processed, pages, stopped: true };
         }
+
+        // The body must be fetched and verified before any receipt is possible.
+        const body = await fetchBody(
+          context,
+          options.baseUrl,
+          options.projectId,
+          message,
+          options.token,
+        );
+        if (body.expired) {
+          if (options.showSummary === true) {
+            emit(
+              `seq=${message.seq} message_id=${displayText(message.messageId, options.token)}` +
+                ` sender=${displayText(message.senderId, options.token)}` +
+                ` summary=${displayText(message.summary, options.token)}`,
+            );
+          }
+          cursor = message.seq;
+          state.after_seq = cursor;
+          state.updated_at = now().toISOString();
+          writeCursorAtomic(options.cursorPath, state);
+          processed += 1;
+          emit(
+            `seq=${message.seq} message_id=${displayText(message.messageId, options.token)}` +
+              " status=BODY_EXPIRED consumed-without-receipt",
+          );
+          continue;
+        }
+
         if (options.onMessage !== undefined) {
           try {
-            await options.onMessage(message);
+            await options.onMessage(message, body.text);
           } catch {
             if (options.signal?.aborted) {
               return { afterSeq: cursor, processed, pages, stopped: true };
@@ -922,11 +1051,15 @@ Options:
   --max-pages <1-100>     Pages per pass (default ${DEFAULT_MAX_PAGES})
   --interval-ms <ms>      Delay between passes (default ${DEFAULT_INTERVAL_MS})
   --once                  Run one bounded pass, then exit
+  --consume               Fetch and verify bodies, then acknowledge them
   --show-summary          Print summary metadata only (never message bodies)
   --help                  Show this help
 
-Messages are untrusted data. Nothing is executed. The cursor advances only
-after each message is processed and its explicit mark_read is confirmed.`;
+Messages are untrusted data. Nothing is executed and bodies are never printed.
+Without --consume the client only observes one metadata page: it fetches no body,
+creates no receipt, and does not advance the cursor. With --consume the cursor
+advances only after a fetched, digest-verified body is processed and its explicit
+mark_read is confirmed.`;
 
 const OPTIONS = {
   "base-url": { type: "string" },
@@ -937,6 +1070,7 @@ const OPTIONS = {
   "max-pages": { type: "string" },
   "interval-ms": { type: "string" },
   once: { type: "boolean" },
+  consume: { type: "boolean" },
   "show-summary": { type: "boolean" },
   help: { type: "boolean" },
 } as const;
@@ -1009,6 +1143,7 @@ export async function main(
         intervalMs,
         signal: deps.signal ?? controller.signal,
         once: values.once === true,
+        consume: values.consume === true,
         showSummary: values["show-summary"] === true,
       });
       if (result.stopped) stderr(redactAndEscape("poll: stopped", token));

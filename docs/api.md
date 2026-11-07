@@ -790,7 +790,10 @@ Integrity lifecycle: before decrypting, the server verifies the stored ciphertex
 SHA-256 against its recorded ciphertext digest; after decrypting, it verifies the
 plaintext digest embedded inside the decrypted payload. Any mismatch returns
 `INTEGRITY_FAILURE` with no content, creates no read receipt, and is audited. A failed
-body fetch never marks a message read.
+body fetch never marks a message read. A conforming client fetches this endpoint,
+checks that `message_id` and the canonical `digest` match, and recomputes the SHA-256
+over the UTF-8 `text` **before** calling `mark_read`; see
+[`polling.md`](./polling.md).
 
 ### `POST /api/v1/projects/:projectId/messages/:messageId/read`
 
@@ -799,7 +802,9 @@ committed (`ready`) message whose body integrity verifies: expired, pending, cor
 inaccessible messages are not acknowledged and create no receipt (`BODY_EXPIRED`,
 `NOT_FOUND`, or `INTEGRITY_FAILURE`). Idempotent; stamps server time. Returns
 `{ "message_id", "speaker_id", "read_at" }`. A receipt is a client assertion that the
-content was fetched, not proof of understanding or execution.
+content was fetched, not proof of understanding or execution. The server cannot verify
+this ordering; the reference poller fetches and validates the body first (see
+[`polling.md`](./polling.md)).
 
 ### `POST /api/v1/projects/:projectId/messages/:messageId/expire`
 

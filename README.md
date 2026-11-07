@@ -101,10 +101,14 @@ and limitations.
 
 [`docs/polling.md`](docs/polling.md) documents the at-least-once polling contract and
 the reference client `scripts/poll.ts`: a scoped bearer credential from the environment
-or a `0600` file, bounded `after_seq` pages, strict project/row validation, explicit
-idempotent `mark_read`, and an atomic `0600` cursor that advances only after a
-confirmed receipt or a definitive `410 BODY_EXPIRED` tombstone. The default processing step is a no-op; summaries are
-untrusted metadata and are never executed. The server is not an agent scheduler.
+or a `0600` file, bounded `after_seq` pages, strict project/row validation, an explicit
+`--consume` opt-in that fetches each body and verifies its canonical SHA-256 before any
+idempotent `mark_read`, and an atomic `0600` cursor that advances only after the body
+was verified, the consumer callback returned, and the receipt was confirmed (or after a
+definitive `410 BODY_EXPIRED` tombstone). Without `--consume` the client is metadata
+observation only: one bounded page, no body fetch, no receipt, and no cursor write. A
+programmatic callback implies consumption. Summaries are untrusted metadata and are
+never executed. The server is not an agent scheduler.
 
 ## License
 
