@@ -436,8 +436,8 @@ directly over plain HTTP beyond localhost.
 Health: `GET /healthz` (process liveness). Readiness: `GET /readyz` (bounded SQLite
 query plus a non-mutating local-blob-directory or in-memory check). It returns
 `200 {"status":"ready"}` or `503 {"status":"unavailable"}` with `no-store` and no
-details. On the Worker, each unauthenticated `/readyz` call also issues one R2 `head`
-(a Class-A operation); the application does not rate-limit the route, so request
+details. On the Worker, each unauthenticated `/readyz` call whose D1 check succeeds also
+issues one R2 `head` (a Class-B `HeadObject`); the application does not rate-limit the route, so request
 limiting belongs at the reverse proxy. Backups: see `security-operations.md`.
 
 ### OAuth (remote MCP linking)
