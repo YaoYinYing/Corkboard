@@ -32,7 +32,10 @@ Out of scope and not claimed:
 
 - account self-registration (the application has no registration endpoint);
 - Cloudflare Workers and live D1/R2 (D1 and R2 adapters are contract-tested only
-  against structural doubles; no Workers adapter exists and live R2 is unverified);
+  against structural doubles; the Worker entrypoint is exercised against those doubles
+  with standard `Request`/`Response`, but there is no live Workers/workerd run, no
+  Cloudflare binding, no wrangler configuration or migration application, no deployment,
+  and `/readyz` probes D1 only);
 - attachments (text bodies only, 64 KiB request cap);
 - per-IP limits inside the application (the reverse proxy owns them);
 - multi-process or multi-host operation (SQLite and all in-process state are

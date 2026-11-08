@@ -2,9 +2,11 @@
 
 **Applies to:** the self-hosted Node.js 24 + SQLite + local-blob implementation in
 this repository. The D1 and R2 adapters pass their shared contracts against structural
-doubles, but the Cloudflare Workers adapter, live Cloudflare D1/R2, and wrangler
-migration application are not implemented, so the live D1/R2 variants of this
-procedure are inapplicable and are not simulated or claimed.
+doubles, and a Worker entrypoint exists and is exercised against those doubles with
+standard `Request`/`Response`; there is no live Workers/workerd run, no Cloudflare
+bindings, no wrangler configuration or migration application, and no deployment, so
+the live D1/R2 variants of this procedure are inapplicable and are not simulated or
+claimed.
 
 **Script:** [`scripts/disaster-rehearsal.ts`](../scripts/disaster-rehearsal.ts)
 **Related:** [`runbook.md`](./runbook.md) §6.1, [`incident-response.md`](./incident-response.md)
@@ -150,8 +152,10 @@ is exactly one object: `{ok:true, checks, summary}` on success, or
   in the runbook and preview checklist but remain unexecuted; cookie flags and
   container hardening have their own tests/documentation.
 - **Not live D1, Workers, or R2.** The D1 and R2 adapters exist and pass their shared
-  contracts against structural doubles, but no live D1/R2 fault injection or
-  portability claim is made; the Workers adapter does not exist.
+  contracts against structural doubles, and the Worker entrypoint runs against those
+  doubles with standard `Request`/`Response`; no live Workers/workerd run, Cloudflare
+  binding, wrangler migration application, deployment, or live D1/R2 fault injection
+  is made or claimed. `/readyz` on the Worker probes D1 only.
 - **Not root-key or pepper rotation.** Neither rotation is implemented. The script
   restores the same key set; regenerating it would make ciphertext unrecoverable.
 - **Not offsite key custody.** The "separate" key backup is a second file in the same

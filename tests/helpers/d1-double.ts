@@ -156,7 +156,7 @@ function now(): string {
   return new Date().toISOString();
 }
 
-async function applyMigrations(d1: D1Double): Promise<void> {
+export async function applyD1Migrations(d1: D1Double): Promise<void> {
   await d1.exec(
     "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
   );
@@ -200,7 +200,7 @@ export const createD1ContractStorage: ContractStorageFactory =
       let double: D1Double;
       try {
         double = openD1Double(path);
-        await applyMigrations(double);
+        await applyD1Migrations(double);
       } catch (error) {
         dispose();
         throw error;

@@ -8,8 +8,11 @@ Simplified Chinese), dashboard project create/edit (slice T), the operator
 observability slice (queue-to-commit histogram and authorized per-project
 counts), the authorized account service overview, and dashboard message send.**
 Cloudflare
-Workers/D1, the ChatGPT Web plugin experience, the remaining dashboard write/admin
-actions, and the "Planned, not implemented" section below are not implemented. See
+Workers/D1/R2 deployment (a Worker entrypoint exists but is exercised only against
+structural D1/R2 doubles, with no live Workers/workerd run, Cloudflare binding,
+wrangler application, or deployment), the ChatGPT Web plugin experience, the remaining
+dashboard write/admin actions, and the "Planned, not implemented" section below are not
+implemented. See
 `IMPLEMENTATION_STATE.md` for the current evidence,
 [`oauth.md`](./oauth.md) for the OAuth flows, and [`web-ui.md`](./web-ui.md) for the
 dashboard.

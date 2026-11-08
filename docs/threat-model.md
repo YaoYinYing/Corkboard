@@ -124,8 +124,9 @@ account operation that also requires an active owned speaker.
 - **Password storage.** PBKDF2-HMAC-SHA-256 with 600,000 iterations, a 16-byte random
   salt, and a 32-byte output. The iteration count is stored with the hash so it can be
   raised later. Legacy `scrypt$` hashes are accepted only by the Node adapter and are
-  never written; an unknown format fails closed. Password input is capped at 1024 UTF-8
-  bytes to bound KDF work.
+  never written; an unknown format fails closed, so a legacy hash cannot be verified
+  through the Workers entrypoint (which uses the portable PBKDF2 verifier). Password
+  input is capped at 1024 UTF-8 bytes to bound KDF work.
 - **Logging.** Request logs contain method, path, status, duration, and actor IDs only.
   They never include `Cookie`, `Authorization`, `X-CSRF-Token`, passwords, session
   tokens, CSRF values, or email addresses.

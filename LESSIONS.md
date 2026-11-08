@@ -2007,3 +2007,35 @@ prevented regression; when to remove the advice.
   silently reports ready without touching R2.
 - **Remove when:** a live R2 staging run executes the same blob contract and a
   sentinel-object readiness probe is implemented and exercised.
+
+## 2026-11-07 — a wired entrypoint still proves only the wiring
+
+- **Failure avoided:** calling a Worker module "Workers support" because its `fetch`
+  handler runs against D1/R2 doubles would hide that real bindings, workerd, wrangler
+  migrations, and a deployment are untested — and could let a legacy `scrypt$` login
+  look verifiable on Workers when only the Node adapter has that verifier.
+- **Rule:** name the doubles and the runtime gap in the file, tests, docs, state, and
+  TODO. Keep the entrypoint Web-standard (`node:`-free), reuse the core parsers
+  instead of shimming `Buffer`, fail closed on password formats the runtime cannot
+  verify, and return a secret-free `503` for configuration errors. Do not cache a
+  failed app build; let the next request retry.
+- **Prevents:** a local handler test being reported as platform verification, a
+  secret leaking through a startup error, and an isolate staying permanently broken
+  after a transient config fix.
+- **Remove when:** a live Workers staging run executes the same flow against real D1
+  and R2 bindings with wrangler-applied migrations.
+
+## 2026-11-07 — never run mutating reviewers concurrently on one worktree
+
+- **Failure observed:** the security and contract auditors ran mutation tests at the
+  same time in the same worktree. One auditor transiently saw the other's mutated
+  source — a temporary 503-leaking rewrite in `src/platforms/workers/main.ts` — and
+  reverted it to the HEAD blob before completing. The committed tree was unaffected
+  (verified against the record commit), but the review evidence was briefly ambiguous.
+- **Rule:** mutation-based or otherwise source-writing reviews must be serialized, or
+  each run in its own worktree. Do not start a second mutating reviewer against a
+  worktree another reviewer is editing; read-only reviewers may run concurrently.
+- **Prevents:** reviewers auditing a source state neither the author nor HEAD produced,
+  and transient security regressions being mistaken for committed behavior.
+- **Remove when:** reviews run in isolated worktrees by construction, so no mutation
+  can reach another reviewer's source.

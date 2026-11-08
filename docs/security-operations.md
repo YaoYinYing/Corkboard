@@ -2,7 +2,9 @@
 
 Status: implemented for the Node.js 24 + SQLite self-hosted deployment (vertical
 slices A and B, plus the human account session slice). Cloudflare-specific steps are
-planned.
+not provided: a Worker entrypoint exists but is exercised only against structural
+D1/R2 doubles, with no live Workers/workerd run, Cloudflare binding, wrangler
+application, or deployment.
 
 The complete actor/resource matrix and the exact bearer, session, project-owner, and
 OAuth predicates are in [`authorization.md`](authorization.md). It also lists roles

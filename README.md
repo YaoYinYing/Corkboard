@@ -25,9 +25,13 @@ editor, authorized account service overview, ascending timeline, explicit
 body reveal, dashboard message send as a selected owned speaker, English and
 Simplified Chinese), and an **OAuth 2.1
 authorization-server core** (dynamic public clients, PKCE, consent, rotating refresh
-tokens, revocation) are implemented and tested locally. Cloudflare Workers/D1/R2, the
-ChatGPT Web plugin installation/linking experience, and per-message hard deletion
-remain planned; dashboard credential inventory, soft revocation, atomic rotation (the
+tokens, revocation) are implemented and tested locally. Cloudflare Workers/D1/R2
+deployment, the ChatGPT Web plugin installation/linking experience, and per-message
+hard deletion
+remain planned; a Worker entrypoint exists but is exercised only against structural
+D1/R2 doubles with standard `Request`/`Response` (no live Workers/workerd run, Cloudflare
+binding, wrangler application, or deployment). Dashboard credential inventory, soft
+revocation, atomic rotation (the
 same non-OAuth service as the operator CLI `rotate-key`), and a single-body
 message-expiry action are implemented locally (OAuth clients keep their OAuth flow,
 and there is no expiry editor, listing, or cleanup UI).

@@ -4,8 +4,9 @@ Status: Node.js 24 + SQLite + local private blobs is **implemented** (vertical s
 A–E, including the bearer-authenticated MCP slice, read-only `doctor` diagnostics,
 human account sessions, and the OAuth 2.1 authorization-server core), and the commands
 below are runnable after `npm run build`. The D1 and R2 adapters exist and are
-contract-tested only against structural doubles; the Workers runtime, live Cloudflare
-execution, and the ChatGPT Web plugin experience remain unexecuted.
+contract-tested only against structural doubles; a Worker `fetch` entrypoint now wires
+them to the shared app, but the Workers runtime, live Cloudflare execution, wrangler,
+and the ChatGPT Web plugin experience remain unexecuted.
 
 Operator procedures are in [`runbook.md`](./runbook.md) (v1, 2026-11-05), and the
 verified/unverified criteria matrix is in [`acceptance-report.md`](./acceptance-report.md)
@@ -500,12 +501,45 @@ initialize again. There is no cross-process session persistence.
 authentication, and an over-limit request returns HTTP `429 RATE_LIMITED` with
 `Retry-After` before any MCP session is created.
 
-## Cloudflare Workers (planned)
+## Cloudflare Workers (entrypoint only; not deployed)
 
 Target: Worker + D1 + private R2. Requires D1-compatible SQL, R2 bindings, Worker
 secrets for the root key and pepper, and a real staging test. Local mocks are not
 evidence. Do not describe Workers support as complete until a live staging deployment
 passes the same contract tests and a live two-client exchange.
+
+`src/platforms/workers/main.ts` is a Web-standard Worker module entrypoint: its default
+export has `fetch(request, env)` and builds `ServiceDeps` lazily once per handler
+instance (once per isolate for the default export) from structural `DB` and
+`BLOB_BUCKET` bindings plus the `CORKBOARD_ROOT_KEY` and
+`CORKBOARD_CREDENTIAL_PEPPER` secrets. A missing or invalid configuration returns a
+generic `503` without echoing any value, and a failed build is not cached so a later
+request can retry. Password verification uses the portable core PBKDF2 verifier; the
+legacy `scrypt$` hashes accepted by the Node adapter cannot be verified on Workers and
+fail closed there. There is no `wrangler.toml`, no deployment configuration, and no
+Cloudflare binding; migrations are a deployment concern applied by the platform, not by
+this entrypoint.
+
+`tests/integration/workers.test.ts` exercises the handler with standard
+`Request`/`Response` over the D1-shaped SQLite double
+(`tests/helpers/d1-double.ts`) and the in-memory R2 double
+(`tests/helpers/r2-double.ts`): health/readiness, a seeded `/me`/send/read flow, the
+uniform bearer failure, a disabled project, configuration `503`s, and a static
+assertion that the entrypoint directory has no `node:` imports. That is wiring
+evidence on doubles, **not** a live Workers/workerd run, real D1/R2 binding semantics,
+`wrangler` migration application, or a deployment. Readiness still does not probe R2:
+the R2 adapter deliberately has no `checkReady`, so `GET /readyz` reports ready after
+the database probe alone.
+
+**Isolate lifetime and rotation.** The app is built once per handler instance (once per
+isolate for the default export) from the first successful env. Rotating
+`CORKBOARD_ROOT_KEY`, `CORKBOARD_CREDENTIAL_PEPPER`, or a binding does not affect a live
+isolate; the new value takes effect when the isolate is recycled or the Worker is
+redeployed. A failed build is not cached and is retried on the next request.
+
+The pepper decoder is Web-standard `atob` and therefore stricter than the Node
+adapter's `Buffer` parser: it accepts trimmed standard base64 (padded or unpadded) and
+exactly 32 decoded bytes, and rejects base64url or other junk with the generic `503`.
 
 `src/storage/d1.ts` implements the `SqlDatabase` port over a structural D1 API
 (`prepare`/`exec`/`batch`) and buffers write-only `transaction()` callbacks into one

@@ -180,14 +180,15 @@ directory and `0600` temp file with an atomic rename, `src/storage/blobs.ts` val
 opaque keys, and no blob/fileserver route exists;
 `tests/security/filesystem-permissions.test.ts` covers modes/symlinks and
 `tests/integration/cli.test.ts` sends and decrypts a body through `LocalBlobStore`.
-Scope caveat recorded in `TODO.md`: local adapter only; no R2.
+Scope caveat recorded in `TODO.md`: no production path selects D1 or R2; live Cloudflare storage is unexecuted.
 
 **Left unchecked (30 boxes).** A short reason is appended to every unchecked item in
 `TODO.md`. Groups and the missing clause:
 
-- D1/Workers/R2 absent or unexecuted: 317, 318, 322, 325, 362, 368, 482, 485. 317 has
-  all listed tables plus WAL/foreign keys but D1 compatibility is asserted, not run
-  (`tests/contract/storage.test.ts` skips D1); 322 also lacks orphan-blob garbage
+- D1/Workers/R2 adapters partly present but live execution absent or unexecuted: 317, 318, 322, 325, 362, 368, 482, 485. 317 has
+  all listed tables plus WAL/foreign keys, but D1 compatibility is run only against a
+  D1-shaped SQLite double (`tests/contract/storage.test.ts`); live Cloudflare D1 is
+  unexecuted; 322 also lacks orphan-blob garbage
   collection (`doctor` only reports `BLOB_ORPHANED`).
 - ChatGPT Web absent or untested: 378, 379, 380, 384.
 - Attachments/registration absent: 336, 346.
@@ -3134,7 +3135,7 @@ Do not infer any of these from local MCP behavior or from another plan.
   a restart drops sessions. A rejected request does not close a revoked credential's
   session; it remains until eviction and can be reused if the credential is reactivated.
 - Slice-E audit debt: `withoutCredentials` relies on `Request.clone()` mutability and is
-  not Workers-portable (Workers is unimplemented; would need headers-copy construction);
+  not verified on the Workers runtime (would need headers-copy construction);
   the cap-eviction test does not distinguish LRU from FIFO; the header test does not
   assert a benign sentinel survives; cache headers on 401/404/405/DELETE/413 and the
   Node-adapter MCP 413 envelope are manually verified but not all committed as tests;
@@ -3189,7 +3190,10 @@ Do not infer any of these from local MCP behavior or from another plan.
   only. It does not cover attachments/10 MiB, slow uploads, quotas, long-duration
   memory behavior, D1/Workers/R2, TLS/proxy, or multi-process aggregation. Latency
   numbers are machine-dependent and non-gating.
-- No Workers adapter.
+- Worker entrypoint/adapter exists (`src/platforms/workers/main.ts`) and is exercised
+  against structural D1/R2 doubles with standard `Request`/`Response`; there is no live
+  Workers/workerd run, no Cloudflare bindings, no wrangler configuration or migration
+  application, no deployment, and `/readyz` probes D1 only.
 - Slice-I audit debt (P2, non-blocking): login rate limiting is process-local and keyed
   by email digest (an attacker who knows an address can consume that bucket); failure
   timing is comparable but not identical across PBKDF2 and the Node-only legacy scrypt
@@ -3386,3 +3390,74 @@ candidate and the closure audit on tree `603d55e6` returned PASS and declared cl
 complete, with no adapter behavior change. Voided sibling candidate `4ae447e` shares
 base `a348a0c`; the pushed commit has the same tree as `1c9fd63`. CI run
 `42429642464` succeeded.
+
+## Checkpoint (2026-11-07) — Workers entrypoint over structural D1/R2 (TODO 362 partial)
+
+Branch `workers-entry`, base `f246a81a6634eaa320b05c9c0657ddb0df1ab161`. Adds
+`src/platforms/workers/main.ts`, a Web-standard Worker module entrypoint whose default
+export has `fetch(request, env)`. It builds `ServiceDeps` lazily once per handler
+instance (once per isolate for the default export) from structural `DB` (D1) and
+`BLOB_BUCKET` (R2) bindings, `CORKBOARD_ROOT_KEY`, and
+`CORKBOARD_CREDENTIAL_PEPPER`. It reuses `createD1Database`, `createR2BlobStore`,
+`keyProviderFromEnv`, and the core `verifyPasswordHash`; the pepper parser is the
+minimal Web-standard counterpart to the Node adapter's `Buffer` parser. It is
+stricter, not equivalent: it accepts trimmed standard base64 (padded or unpadded) and
+exactly 32 decoded bytes, while Node's parser also accepts base64url; rejected input
+surfaces only as the generic `503`. Legacy `scrypt$` hashes fail closed because their
+verifier needs `node:crypto`. A missing binding or invalid secret yields a
+generic `503` with no configuration detail; a failed build is not cached, so the next
+request can retry. The file has no `node:` imports, filesystem, streams, `process.env`,
+or request/header/token logging. No `wrangler.toml` or deployment configuration is
+added (TODO 362 stays unchecked).
+
+`tests/helpers/d1-double.ts` now exports its `applyD1Migrations` helper so the new
+`tests/integration/workers.test.ts` can apply the real migration files to the
+D1-shaped SQLite double. The tests drive the handler with standard `Request`/
+`Response` over that double and `tests/helpers/r2-double.ts`: `/healthz` and `/readyz`
+answer without message/idempotency writes; a seeded account/speaker/project/
+membership/grant exercises `/api/v1/me`, a bearer send, and a body read through the
+R2 adapter; an unknown bearer returns the uniform `401 UNAUTHENTICATED` and reads
+nothing; a disabled project returns `404 NOT_FOUND` before any write; missing or
+invalid configuration returns a generic `503` without echoing the value and the same
+handler then serves a valid env; and a static assertion proves the entrypoint
+directory contains no `node:` imports. Readiness does not probe R2, because the R2
+adapter deliberately has no `checkReady`.
+
+Evidence: `npm run check` exit 0 (774 tests: 774 pass, 0 skipped, 0 fail; secret and
+history scans green, license report green, strict typecheck clean), `npm run build`
+exit 0 (including `dist/src/platforms/workers/main.js`), and `npm run test:contract`
+exit 0 (76 tests: 76 pass, 0 skipped, 0 fail). **Not proven:** any live
+Workers/workerd run, real Cloudflare D1/R2 binding semantics, `wrangler` migration
+application, a Cloudflare deployment, an R2 readiness probe, or any production
+selection of the Worker/R2 path. The Node server still uses SQLite and
+`LocalBlobStore`. Independent review is not claimed in the commit trailers.
+
+Docs updated: `docs/architecture.md` (deployment bullet, scoped exception, module
+table, doctor note), `docs/deployments.md` (status and Cloudflare section renamed
+from "planned" to "entrypoint only; not deployed"), `docs/threat-model.md` (legacy
+scrypt is unverifiable through the Workers entrypoint), and `TODO.md` 362 (narrowed
+from "no Worker entrypoint" to entrypoint present and double-exercised, with live
+runtime deployment still absent). No dependency, lockfile, schema, migration, API, or
+service-behavior change; `src/app` and service logic are untouched.
+
+Git trailers: `Base-SHA: f246a81a6634eaa320b05c9c0657ddb0df1ab161`,
+`Candidate-SHA: pending`, and `Independent-review: NOT CLAIMED`; the commit message
+records the actual `Tree-SHA` from the final tree and the test commands.
+
+Review amendment (candidate `89dea00`): security PASS and contract PASS-WITH-P2; the
+closure audit of `a2b6763` returned PASS-WITH-P2. The P2 stale-docs sweep updated
+`docs/disaster-rehearsal.md`, `docs/runbook.md`, `docs/docker.md`,
+`docs/preview-deployment.md`, `docs/security-operations.md`, `docs/api.md`,
+`docs/acceptance-report.md`, and `README.md` to the precise entrypoint-present,
+live-runtime-absent state (including `/readyz` probing D1 only). The living
+`## Known limitations` entries that said "No Workers adapter" and "Workers is
+unimplemented" are now corrected with the same entrypoint-present wording. P3 fixes: the pepper comment
+and docs no longer claim Node parity (Workers use strict standard base64 and reject
+base64url), config-negative tests cover a valid root key with a valid pepper and a
+malformed/31-byte pepper plus missing bindings (including a missing `BLOB_BUCKET`
+reaching the binding check) without leaking values or names, the static purity
+assertion also rejects side-effect `import "node:..."`, and `docs/deployments.md`
+records isolate-lifetime/rotation semantics. No app, service, adapter, or binding
+behavior changed. Reviewers must not run mutating tests concurrently in one worktree;
+the transient mutated-source observation is recorded in `LESSIONS.md` and the
+committed tree was unaffected.

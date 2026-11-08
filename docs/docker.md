@@ -14,9 +14,10 @@ SQLite + local-blob service. This is the local half of `TODO.md` Phase 4 item 36
 
 This document does **not** provide or claim a Cloudflare Workers/D1/R2 deployment.
 D1 and R2 adapters exist and pass their shared contracts only against structural
-doubles; there is no Workers adapter, no live Cloudflare D1/R2/Workers execution, no
-wrangler migration application, and no Cloudflare access or test. That half of item 368
-remains external and unimplemented; the TODO item stays unchecked.
+doubles, and a Worker entrypoint exists and is exercised against those doubles with
+standard `Request`/`Response`; there is no live Workers/workerd run, no Cloudflare
+binding, no wrangler configuration or migration application, no deployment, and no
+Cloudflare access or test. `/readyz` on the Worker probes D1 only.
 
 The image is a single process. Rate limits, login limits, metrics, and MCP sessions are
 process-local; SQLite serializes writers. Do not run multiple replicas against the same
@@ -327,9 +328,11 @@ is lost. The full procedure is in [`runbook.md`](./runbook.md#9-upgrade-and-roll
 
 ## 8. Not provided
 
-- **Cloudflare Workers and live D1/R2:** no Workers adapter, no live Cloudflare
-  D1/R2/Workers run, no wrangler migration application, and no deployment. The D1 and
-  R2 adapters are contract-tested only against structural doubles. Not claimed.
+- **Cloudflare Workers and live D1/R2:** no live Workers/workerd run, no Cloudflare
+  D1/R2 binding, no wrangler configuration or migration application, and no deployment.
+  The D1 and R2 adapters are contract-tested only against structural doubles, and the
+  Worker entrypoint is exercised against those doubles with standard
+  `Request`/`Response`; `/readyz` probes D1 only. Not claimed.
 - **ChatGPT Web installation/linking:** not implemented or verified.
 - **TLS, per-IP rate limiting, and volumetric limits:** host reverse-proxy
   responsibility; the application only has process-local bearer public-prefix limits.

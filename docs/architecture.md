@@ -9,8 +9,10 @@ One TypeScript core, two deployment adapters:
 
 - **Self-hosted Node.js 24 LTS** with SQLite (WAL, foreign keys) and a private local
   blob directory.
-- **Cloudflare Workers** with D1 and private R2 adapters (the Workers runtime and
-  live Cloudflare execution remain unexecuted).
+- **Cloudflare Workers** with D1 and private R2 adapters. The Worker `fetch` entrypoint
+  (`src/platforms/workers/main.ts`) exists and is exercised locally with structural
+  D1/R2 doubles and standard `Request`/`Response`; the Workers runtime, live Cloudflare
+  execution, wrangler, and any deployment remain unexecuted.
 
 Adapters may differ in runtime concerns; they must not differ in authorization,
 validation, ordering, or encryption behavior.
@@ -26,7 +28,10 @@ against Memory, Local, and an in-memory R2-shaped double
 (`tests/helpers/r2-double.ts`). Real Cloudflare D1, R2, and Workers execution and
 wrangler migration application are still unexecuted (TODO 325/362), so a live staging
 run is required before Phase 1/vertical slice B can be called complete; it is not
-claimed by slice A.
+claimed by slice A. The Worker entrypoint (`src/platforms/workers/main.ts`) wires
+`createApp` to these structural D1/R2 ports and is exercised in
+`tests/integration/workers.test.ts` with standard `Request`/`Response`; that run proves
+the wiring on the doubles only.
 
 ## Trust boundaries
 
@@ -61,7 +66,7 @@ backups and storage artifacts, not the operator.
 | `src/crypto/` | AES-256-GCM envelope, key provider, AAD |
 | `src/app/` | Platform-neutral HTTP handlers and OAuth pages using Web `Request`/`Response` |
 | `src/platforms/node/` | `node:http` adapter, lifecycle, CLI |
-| `src/platforms/workers/` | Worker entrypoint (planned) |
+| `src/platforms/workers/` | Worker `fetch` entrypoint over structural D1/R2 bindings (no live Workers run) |
 | `src/mcp/` | Streamable HTTP endpoint and six tools over the same service layer (bearer auth) |
 
 There is no parallel authorization path. HTTP, MCP, and CLI call the same service
@@ -134,8 +139,8 @@ over SQLite; live Cloudflare D1 execution remains unexecuted (TODO 325/362).
 (`get`/`put`/`delete`): `get` maps a null object to `undefined`, `put` passes the
 supplied bytes unchanged, and `delete` is idempotent. It has no `checkReady` because R2
 has no side-effect-free store-level probe (`head`/`list` need a sentinel object or a
-scan); a future Workers readiness route must add a sentinel-object head probe before
-selecting this adapter. `tests/contract/blobs.test.ts` runs the shared blob contract
+scan); the Worker `/readyz` route therefore probes D1 only and must add a
+sentinel-object `head` probe before R2 is selected in production. `tests/contract/blobs.test.ts` runs the shared blob contract
 against the Memory, Local, and R2 implementations; the R2 run uses an in-memory
 structural double (`tests/helpers/r2-double.ts`). That proves the adapter and its byte
 handling on the double, not live Cloudflare R2 execution. The Node server still
@@ -635,7 +640,8 @@ measured are `null`; reconciliation internally reads all referenced storage keys
 `integrity_check` scans the database. A clean database with no WAL sidecars is opened `immutable` so the
 diagnostic cannot create `-wal`/`-shm` files; with both sidecars present it reads the live
 WAL. There is no repair mode; the D1 adapter exists and is contract-tested against a
-D1-shaped SQLite double, but there is no Workers implementation yet and live D1 is
+D1-shaped SQLite double, and a Worker entrypoint now wires it (and the R2 adapter) to
+`createApp`, but there is no live Workers runtime and live D1/R2 execution remains
 unexecuted.
 
 ## Backup, verification, and restore
