@@ -3582,3 +3582,61 @@ paragraph rewritten to mark debt closed, and the injection firing before the sec
 statement executes while the first-insert rollback proof stands). Residual debt from
 the prior checkpoint is marked closed. TODO 368 remains unchecked for the two-
 deployment-environment and live-runtime clauses. CI run `42458347347` succeeded.
+
+## Checkpoint (2026-11-07) — orphan-blob garbage collection (TODO 322 delivered scope)
+
+Scope: the last unmet clause of TODO 322. New operator command `gc-blobs`
+(`src/service/blob-gc.ts` + `scripts/corkboard.ts`), tests, and docs. No dependency,
+lockfile, schema, migration, API, blob-store-port, or send/read behavior change.
+
+Behavior: dry run by default; `--apply` unlinks selected files. It scans only
+`<CORKBOARD_DATA_DIR>/blobs`, ignores invalid names, directories, symlinks, and other
+non-regular entries, and never leaves the directory. An orphan is a regular file with a
+valid opaque key, mtime at least `--grace-hours` old (default 24, 1–8760), and no
+`body_objects.storage_key` reference in any state. `--limit` (default 1000, 1–10000)
+bounds files selected per run. The referenced-key set is read once. The real order is
+ciphertext `put` first and the `body_objects` row insert second, so GC protects that gap
+only by mtime plus grace: files within the grace window are skipped. Normal operation
+closes the gap within one local INSERT (SQLite `busy_timeout` 5000 ms), but a send
+stalled longer than the grace between those steps (SIGSTOP, VM pause, DB hang) could
+have its blob collected and then permanently fail reads; operators must keep grace
+comfortably above any expected send stall. A valid dry run may create/initialize the
+data directory and database and apply migrations; it deletes no blobs and writes no
+audit row.
+
+Deletion is per-file and not transactional: the summary reports `candidates`, `deleted`,
+`failed`, `skippedRecent`, and `skippedReferenced`; a per-file failure exits 1 without
+claiming rollback. A run that deletes at least one file appends one system-actor
+`blob.orphan_prune` audit row (`{graceHours, limit, deleted, failed}`, no
+paths/keys/contents); dry and zero-deletion runs write none; the insert is fail-open
+(deletions stand, warning, exit 1). Exit 1 covers a per-file delete failure (counts
+still printed; no rollback claim) and an audit-insert failure after deletions (warn;
+fail-open). Exit 2 covers argument validation and
+data-directory/open/blob-path/database-unusable failures, which print a generic message
+(never the path, a key, or OS text). TODO 322 is checked for the delivered scope:
+row-less local blob files are collected. Limits: a stale `body_objects` row without a
+remaining message still protects its blob (conservative retention, not data loss);
+`.tmp-<hex>` crash residue has an invalid key and is never collected; remote/R2 blob GC
+is out of scope. Live Cloudflare D1 remains the recorded external gap.
+
+Residuals (owner-only): the lstat/readdir/unlink sequence is subject to TOCTOU, which
+requires write access inside the 0700 data directory (such access already permits
+deleting the files directly); `readdir` and the referenced-key set are held in memory
+without a size bound, and `--limit` bounds deletions per run, not scan memory.
+
+Tests: `tests/integration/blob-gc.test.ts` (14 tests) covers dry run, apply, referenced
+old files, recent unreferenced files, custom grace thresholds, human and JSON output,
+fresh-directory dry-run initialization side effects (data dir/database/migrations, no
+audit, no blob deletion), invalid names/directories/symlinks, limit and rerun, all
+body-object states, exact audit shape/count, no audit on dry/zero runs, fail-open audit
+via trigger, delete failure via a read-only directory (exit 1, file intact, exact
+no-restoration summary), data-dir/blob-path failures exiting 2 with no path in output,
+unchanged message/receipt/body-object rows, and usage/config exit 2 before opening the
+database.
+
+Tests: `npm run check` exit 0 (800 tests: 800 pass, 0 fail, 0 skipped);
+`npm run test:contract` exit 0 (82 tests: 82 pass); `npm run build` exit 0.
+
+Not proven: live Cloudflare D1/R2 or Workers/workerd, and any remote blob store GC.
+No real crash/power-loss during a GC run; the failure path is a permission error, not a
+mid-run process kill. Independent review: NOT CLAIMED.

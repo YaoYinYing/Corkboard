@@ -627,6 +627,59 @@ not tamper-evident, so size and archive them out of band. Schedule externally, a
 backups. See
 [`deployments.md`](./deployments.md#retention-and-pruning).
 
+- `gc-blobs` collects **orphaned local blob files only**. It is separate from `prune`
+  and never changes message, receipt, body-object, or audit rows (apart from its one
+  audit row).
+
+```sh
+node dist/scripts/corkboard.js gc-blobs --data-dir /var/lib/corkboard --json
+node dist/scripts/corkboard.js gc-blobs --data-dir /var/lib/corkboard --json --apply
+```
+
+A run without `--apply` is a **dry run**: it reports how many eligible orphans it would
+delete and deletes nothing. A valid dry run still opens the database in the data
+directory, so it may create the directory, initialize `corkboard.sqlite`, and apply
+pending migrations; it deletes no blobs and writes no audit row. An orphan is a regular
+file in `<data-dir>/blobs` whose name is a valid opaque blob key, whose mtime is at least
+`--grace-hours` old (default 24, 1–8760), and whose key appears in no
+`body_objects.storage_key` row in **any** state (pending, ready, expired, failed, or
+null-state). Invalid names, directories, symlinks, and other non-regular entries are
+ignored and never followed. `--limit` bounds the files selected per run (default 1000,
+1–10000); a rerun continues with the remainder.
+
+Two limits are deliberate. A stale `body_objects` row that no longer has a message still
+counts as a reference, so its blob is retained — conservative retention, not data loss.
+A `.tmp-<hex>` file left by a crash mid-write has an invalid key, so it is never
+collected.
+
+The grace period is the concurrency safeguard, not a proof of impossibility. The real
+order is ciphertext `put` first and the `body_objects` row insert second, so a
+just-written file briefly lacks a row; GC protects that gap only by mtime plus grace,
+and skips any file within the grace window. Normal operation closes the gap within one
+local INSERT (SQLite `busy_timeout` 5000 ms), so the default grace covers it. A send
+stalled longer than the grace between those steps (for example SIGSTOP, a VM pause, or a
+DB hang) could have its blob collected and then permanently fail reads, so operators
+must keep grace comfortably above any expected send stall. The referenced-key set is
+read once per run, and new sends use fresh random keys; a file older than grace with no
+row is normally an abandoned send or an expiry-cleared object.
+Deletion is **not transactional**: each selected file is unlinked by exact path, and
+the summary separates `deleted` from `failed` plus the `skippedRecent` and
+`skippedReferenced` counts. If any unlink fails, the command prints the summary and
+exits 1; deletions that already succeeded are not rolled back. The summary (human or
+`--json`) contains no paths, keys, or file contents.
+
+`gc-blobs` writes exactly one system-actor `blob.orphan_prune` audit row
+(`detail: {graceHours, limit, deleted, failed}`) only when it actually deleted at
+least one file; a dry run and a zero-deletion run write none. The insert is fail-open
+and runs after the deletions: if it fails, the command warns on stderr and exits 1
+while the deletions stand. Exit `0` success. Exit `1` covers a per-file delete failure
+(counts are still printed; no rollback is claimed) and an audit-insert failure after
+deletions (warn on stderr; fail-open, deletions stand). Exit `2` covers argument
+validation and data-directory/open/blob-path/database-unusable failures; that message
+is generic and never contains the path, a blob key, or OS error text. It operates on
+the local blob directory only; R2 or other remote blob stores are **out of scope** for
+this Node-only command. Schedule it externally after backups, like `prune`.
+
 ## 6. Backup, verify, and restore
 
 The SQLite database and blob directory are one recovery unit. Backups contain

@@ -639,6 +639,7 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   | `oauth.refresh.reuse` | `detected` | none | `client_id`, internal `credential_id` |
   | `oauth.revoke` | `success` | none | `client_id`, internal `credential_id`, `token_type`; only when ownership is proven |
   | `retention.prune` | `success` | system (null account and speaker) | `graceHours`, `limit`, and the deleted-row counts `sessions`, `authorizationCodes`, `refreshTokens`, `tokenClients`, `oauthCredentials` |
+  | `blob.orphan_prune` | `success` | system (null account and speaker) | `graceHours`, `limit`, `deleted`, `failed` |
   | `project.disable` | `success` | system (null account and speaker) | none; `project_id` column only |
   | `project.enable` | `success` | system (null account and speaker) | none; `project_id` column only |
 
@@ -646,6 +647,12 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   at least one row; a run that deletes nothing writes no row. Counts are per table and
   bounded by `limit`; the row carries no ids, prefixes, verifiers, session ids, IPs,
   free text, or row contents.
+
+  `blob.orphan_prune` is operator-only and is written by `gc-blobs --apply` once per
+  run that deletes at least one local blob file; a dry run or a zero-deletion run
+  writes no row. `deleted` and `failed` are per-run file counts bounded by `limit`
+  (default 1000, 1–10000). The row carries no paths, blob keys, ciphertext, file
+  contents, or account/speaker/project identifiers.
 
   `project.disable` and `project.enable` are operator-only CLI transitions of
   `projects.status` and are written once per actual transition; an idempotent repeat on
@@ -737,6 +744,30 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   past grace, the credential, association, and grants are deleted together in the same
   run. The association is never removed while a refresh row still references the
   credential.
+- Orphaned local blob files are collected by the separate operator-run `gc-blobs`
+  command, which is a **dry run unless `--apply` is given**. It never changes message,
+  receipt, body-object, or other audit rows. An eligible orphan is a regular file in
+  `<data-dir>/blobs` with a valid opaque key, mtime at least `--grace-hours` old
+  (default 24, 1–8760), and no `body_objects.storage_key` reference in any state.
+  Invalid names, directories, symlinks, and other non-regular entries are ignored and
+  never followed; the scan never leaves the blob directory. The real send order is
+  ciphertext first and the `body_objects` row insert second; GC protects that gap only
+  by mtime plus grace, skipping files within the grace window. Normal operation closes
+  the gap within one local INSERT (SQLite `busy_timeout` 5000 ms), but a send stalled
+  longer than the grace between those steps (SIGSTOP, VM pause, DB hang) could have its
+  blob collected and then permanently fail reads; keep grace comfortably above any
+  expected send stall. A stale `body_objects` row with no message still protects its
+  blob (conservative retention, not data loss), and `.tmp-<hex>` crash residue has an
+  invalid key and is never collected. A valid dry run may still create/initialize the
+  data directory and database and apply migrations, but deletes no blobs and writes no
+  audit row. Deletion is not transactional: each
+  selected file is unlinked by exact path, and the summary reports `deleted`, `failed`,
+  `skippedRecent`, and `skippedReferenced`. A failed unlink exits 1 without claiming a
+  rollback. A run that deletes at least one file appends one system-actor
+  `blob.orphan_prune` audit row after the deletions; a dry or zero-deletion run writes
+  none, and an audit-insert failure is fail-open (deletions stand, warning and exit 1).
+  This command is local-directory-only; R2 and other remote blob stores are out of
+  scope.
 
 ## Environment separation
 
@@ -1036,7 +1067,10 @@ shows no traffic or error summary, because there is no per-tenant source. See
   revoked/expired OAuth access credential that still has a live refresh row is retained
   with its `oauth_token_clients` association and grants (so refresh and RFC 7009
   revocation remain effective), and is deleted with them once the refresh row is
-  pruned past grace. There is no automatic scheduling.
+  pruned past grace. There is no automatic scheduling. Orphan blob GC is the separate
+  explicit `gc-blobs` command: dry-run by default, local blob directory only, and
+  appends one system-actor `blob.orphan_prune` row only when at least one file was
+  deleted. R2/remote blob stores are not collected by it.
 - Hard deletion of metadata/backups is not implemented; expiry is a tombstone, not
   comprehensive erasure.
 - Residual CLI race: `grant-key-project` checks membership and inserts the grant

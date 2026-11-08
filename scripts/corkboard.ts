@@ -21,6 +21,12 @@ import {
   restoreBackup,
   verifyBackup,
 } from "../src/service/backup.ts";
+import {
+  BLOB_GC_DEFAULT_GRACE_HOURS,
+  BLOB_GC_DEFAULT_LIMIT,
+  pruneOrphanBlobs,
+  validateBlobGcOptions,
+} from "../src/service/blob-gc.ts";
 import { DoctorError, formatDoctorReport, runDoctor, sanitizeForTerminal } from "../src/service/doctor.ts";
 import { expireDueBodies } from "../src/service/expiry.ts";
 import {
@@ -63,6 +69,7 @@ const OPTIONS = {
   limit: { type: "string" },
   "grace-hours": { type: "string" },
   "stuck-minutes": { type: "string" },
+  apply: { type: "boolean" },
   json: { type: "boolean" },
 } as const;
 
@@ -823,6 +830,102 @@ async function pruneCommand(values: Values): Promise<void> {
   }
 }
 
+// Orphan-blob collection. Dry run by default; `--apply` unlinks files. Local
+// blob directory only (remote stores such as R2 are out of scope).
+class BlobGcCliError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BlobGcCliError";
+  }
+}
+
+function parseBlobGcGraceHours(raw: string | undefined): number {
+  if (raw === undefined) return BLOB_GC_DEFAULT_GRACE_HOURS;
+  if (!/^\d+$/.test(raw)) {
+    throw new BlobGcCliError("--grace-hours must be an integer 1-8760");
+  }
+  try {
+    return validateBlobGcOptions({ graceHours: Number(raw) }).graceHours;
+  } catch (error) {
+    throw new BlobGcCliError(
+      error instanceof Error ? error.message : "invalid --grace-hours",
+    );
+  }
+}
+
+function parseBlobGcLimit(raw: string | undefined): number {
+  if (raw === undefined) return BLOB_GC_DEFAULT_LIMIT;
+  if (!/^\d+$/.test(raw)) {
+    throw new BlobGcCliError("--limit must be an integer 1-10000");
+  }
+  try {
+    return validateBlobGcOptions({ limit: Number(raw) }).limit;
+  } catch (error) {
+    throw new BlobGcCliError(error instanceof Error ? error.message : "invalid --limit");
+  }
+}
+
+// Explicit, operator-run garbage collection. Prints counts only: never paths,
+// keys, or file contents. A dry run and a zero-deletion run write no audit row.
+async function gcBlobsCommand(values: Values): Promise<void> {
+  const graceHours = parseBlobGcGraceHours(values["grace-hours"]);
+  const limit = parseBlobGcLimit(values.limit);
+  const rawDir = values["data-dir"];
+  const dir =
+    rawDir === undefined || rawDir === ""
+      ? process.env.CORKBOARD_DATA_DIR
+      : rawDir;
+  if (dir === undefined || dir === "") {
+    throw new BlobGcCliError("--data-dir or CORKBOARD_DATA_DIR is required");
+  }
+  const apply = values.apply === true;
+
+  // Any data-directory, open, or blob-path failure exits 2 with a generic
+  // message: never echo the operator-supplied path, a blob key, or OS error
+  // text. Per-file unlink failures are counted in the summary instead of
+  // thrown, and the audit insert stays fail-open.
+  const summary = await withDb(
+    (db) =>
+      pruneOrphanBlobs(
+        { db, now: () => new Date() },
+        join(dir, "blobs"),
+        { graceHours, limit, apply },
+      ),
+    dir,
+  ).catch(() => {
+    throw new BlobGcCliError(
+      "data directory or database could not be opened or is not usable",
+    );
+  });
+
+  if (values.json === true) {
+    console.log(JSON.stringify(summary));
+  } else {
+    for (const line of [
+      `grace-hours: ${summary.graceHours}`,
+      `limit: ${summary.limit}`,
+      `mode: ${summary.dryRun ? "dry-run" : "apply"}`,
+      `orphan candidates: ${summary.candidates}`,
+      `deleted: ${summary.deleted}`,
+      `failed: ${summary.failed}`,
+      `skipped recent: ${summary.skippedRecent}`,
+      `skipped referenced: ${summary.skippedReferenced}`,
+    ]) {
+      console.log(line);
+    }
+  }
+
+  // Deletions are not transactional. Report failures and the missing audit row
+  // without hiding counts or implying a rollback.
+  if (summary.auditFailed === true) {
+    console.error(
+      "corkboard: blob GC audit event could not be written; deletions were committed",
+    );
+    process.exitCode = 1;
+  }
+  if (summary.failed > 0) process.exitCode = 1;
+}
+
 // Operator-run cleanup: no in-process timer exists, so schedule this command
 // externally. Prints exactly one JSON summary line.
 async function expireBodiesCommand(values: Values): Promise<void> {
@@ -1084,6 +1187,8 @@ async function main(): Promise<void> {
       return expireBodiesCommand(values);
     case "prune":
       return pruneCommand(values);
+    case "gc-blobs":
+      return gcBlobsCommand(values);
     case "doctor":
       return doctorCommand(values, positionals.length - 1);
     case "backup":
@@ -1097,7 +1202,7 @@ async function main(): Promise<void> {
       return;
     default:
       throw new Error(
-        "usage: corkboard.ts <init|bootstrap-owner|create-project|disable-project|enable-project|create-speaker|add-member|remove-member|issue-key|rotate-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|doctor|backup|verify|restore|serve> [options]; backup accepts --data-dir and --out; verify accepts --backup; restore accepts --backup and --data-dir; all three accept --json; init accepts --data-dir and optional --secrets-file; disable-project and enable-project accept exactly one --project; issue-key accepts one or more --project and --scopes <comma-separated>; rotate-key accepts --credential and optional --expires-at (default preserves the old expiry); prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
+        "usage: corkboard.ts <init|bootstrap-owner|create-project|disable-project|enable-project|create-speaker|add-member|remove-member|issue-key|rotate-key|grant-key-project|revoke-key-project|revoke-key|expire-bodies|prune|gc-blobs|doctor|backup|verify|restore|serve> [options]; backup accepts --data-dir and --out; verify accepts --backup; restore accepts --backup and --data-dir; all three accept --json; init accepts --data-dir and optional --secrets-file; disable-project and enable-project accept exactly one --project; issue-key accepts one or more --project and --scopes <comma-separated>; rotate-key accepts --credential and optional --expires-at (default preserves the old expiry); prune accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N>, --limit <N>, and --json; gc-blobs is a dry run unless --apply is given, and accepts --data-dir (or CORKBOARD_DATA_DIR), --grace-hours <N> (1-8760), --limit <N> (1-10000), and --json; doctor is read-only and accepts --data-dir, --stuck-minutes <N>, and --json; set CORKBOARD_BOOTSTRAP_PASSWORD in the environment (never argv) for an owner password",
       );
   }
 }
@@ -1149,8 +1254,10 @@ if (isEntryPoint()) {
       error instanceof DoctorCliError ||
       command === "doctor" ||
       error instanceof PruneCliError ||
+      error instanceof BlobGcCliError ||
       error instanceof BackupCliError ||
-      ((command === "prune" || backupCommandName) && parseFailure)
+      ((command === "prune" || command === "gc-blobs" || backupCommandName) &&
+        parseFailure)
         ? 2
         : 1;
     if (backupCommandName) {

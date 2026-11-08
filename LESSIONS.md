@@ -2080,3 +2080,19 @@ prevented regression; when to remove the advice.
 - **Remove when:** a staging run injects comparable faults against real Cloudflare D1
   and R2 (or the operating system) in two isolated environments and observes the same
   fail-closed and recovery behavior.
+
+## 2026-11-07 — blob GC must follow the real write order, not the assumed one
+
+- **Failure avoided:** documenting (or reasoning from) "the `body_objects` row is
+  inserted before the blob" when `commitBody` actually writes the ciphertext first and
+  inserts the row second. A GC that trusted the assumed order would call a fresh,
+  row-less file an orphan immediately and could delete an in-flight send's ciphertext.
+- **Rule:** a destructive filesystem sweeper must be justified by the code's actual
+  ordering, and its grace window is a timing margin, not a proof of impossibility: a
+  send stalled longer than grace between the blob write and the row insert can lose
+  its blob and fail reads permanently. Read the referenced-key set once, skip recent
+  files before considering them, ignore invalid names/symlinks/non-regular entries, and
+  report per-file successes and failures without claiming a transaction or rollback the
+  filesystem cannot provide.
+- **Remove when:** the send path changes to insert metadata before the blob and that
+  ordering is asserted by a test, at which point this rationale must be revisited.

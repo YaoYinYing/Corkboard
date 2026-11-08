@@ -201,6 +201,58 @@ only; it never prints row contents, tokens, or emails. See
 [`security-operations.md`](./security-operations.md#logging-and-audit) for the policy
 and grace rationale.
 
+Orphan blob collection is a separate explicit operator command. It is a dry run unless
+`--apply` is given. A valid dry run still opens the database in the data directory, so it
+may create the directory, initialize `corkboard.sqlite`, and apply pending migrations;
+it deletes no blobs and writes no audit row.
+
+```sh
+node dist/scripts/corkboard.js gc-blobs --data-dir /var/lib/corkboard --json
+node dist/scripts/corkboard.js gc-blobs --data-dir /var/lib/corkboard --json --apply
+# or: CORKBOARD_DATA_DIR=/var/lib/corkboard node dist/scripts/corkboard.js gc-blobs
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--data-dir <dir>` | `CORKBOARD_DATA_DIR` | Data directory containing `corkboard.sqlite` and `blobs/` |
+| `--grace-hours <N>` | `24` | Minimum file age before an unreferenced blob is eligible; integer 1–8760 |
+| `--limit <N>` | `1000` | Maximum orphan files selected per run; integer 1–10000 |
+| `--apply` | off | Actually unlink selected files; without it the run is a dry run |
+| `--json` | off | Print one JSON summary line instead of short count lines |
+
+It deletes only regular files in the local `<data-dir>/blobs` directory whose name is a
+valid opaque blob key, whose mtime is at least the grace period old, and whose key has
+no `body_objects.storage_key` reference in any state. Invalid names, directories,
+symlinks, and other non-regular entries are never followed or deleted, and the scan
+never leaves the blob directory. Two limits are deliberate: a stale
+`body_objects` row that no longer has a message still counts as a reference, so its
+blob is retained (conservative retention, not data loss); and a `.tmp-<hex>` file left
+by a crash mid-write has an invalid key, so it is never collected.
+
+The grace period is a timing margin, not a proof of impossibility. The real order is
+ciphertext `put` first and the `body_objects` row insert second, and GC protects that
+gap only by mtime plus grace: files within the grace window are skipped. Normal
+operation closes the gap within one local INSERT (SQLite `busy_timeout` 5000 ms), but a
+send stalled longer than the grace between those steps (for example SIGSTOP, a VM
+pause, or a DB hang) could have its blob collected and then permanently fail reads;
+keep grace comfortably above any expected send stall. The referenced-key set is read
+once per run; new sends use fresh random keys.
+
+Deletion is **not transactional**. The summary reports `candidates`, `deleted`,
+`failed`, `skippedRecent`, and `skippedReferenced` (plus `dryRun`); a failed unlink
+leaves the file in place, is counted as `failed`, and exits 1 after the summary. It
+never claims a rollback. A run that deletes at least one file appends one sanitized
+system-actor `blob.orphan_prune` audit row with `{graceHours, limit, deleted, failed}`;
+a dry run or zero-deletion run writes none. The insert is fail-open and runs after the
+deletions: on failure the deletions stand, and the command warns and exits 1. Exit
+codes: `0` success. Exit `1` covers a per-file delete failure (counts still printed; no
+rollback claimed) and an audit insert that failed after deletions (warn; fail-open,
+deletions stand). Exit `2` covers argument validation and
+data-directory/open/blob-path/database-unusable failures; that message is generic and
+never contains the path, a blob key, or OS error text. It prints counts only, never
+paths, keys, or file contents. This Node-only command operates on the local blob
+directory; R2 and other remote blob stores are out of scope.
+
 The slice-A server makes no outbound requests, so `HTTP_PROXY`/`HTTPS_PROXY` are not
 read. If a proxy is configured in the developer environment, never log its value.
 

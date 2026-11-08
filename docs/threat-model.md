@@ -30,6 +30,13 @@ history; audit records; administrative privilege; availability; metadata privacy
   documented in `security-operations.md`.
 - IP headers are trusted only behind a verified proxy; IP is never returned in message
   APIs.
+- The owner-only `gc-blobs` command has two bounded residuals. Its
+  `lstat`/`readdir`/`unlink` sequence is subject to TOCTOU, so an attacker who can write
+  inside the `0700` data directory could swap an entry between the scan and the unlink
+  (filesystem write access at that level already permits deleting the files directly).
+  `readdir` and the referenced-key set are held in memory without a size bound;
+  `--limit` bounds deletions per run, not scan memory. Neither is reachable by an
+  unauthenticated or project-scoped principal.
 
 ## Security invariants (executable gates)
 
