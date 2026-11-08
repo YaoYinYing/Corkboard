@@ -947,6 +947,10 @@ What data is stored, logged, and retained is in [`privacy.md`](./privacy.md).
   volumetric or per-IP control. Apply **per-IP connection/request limits, body-size
   limits, timeouts, and volumetric abuse controls at the reverse proxy**. The
   application does not trust forwarding headers or enforce IP limits itself.
+- The public `/healthz` and `/readyz` probes are unauthenticated and not rate-limited
+  by the application. On the Worker, each `/readyz` call issues one R2 `head` (a
+  Class-A operation), so per-IP/probe request limits and exposure policy belong at the
+  reverse proxy; do not publish the route more broadly than the operator needs.
 - A `429` carries only `RATE_LIMITED`, a `request_id`, and `Retry-After`; no token,
   body, summary, or credential verifier is logged or returned. Request logs record the
   actor ids and stable error code already described under **Logging and audit**.

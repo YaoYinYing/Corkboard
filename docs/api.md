@@ -499,8 +499,9 @@ headers. It probes the real dependencies on every request (never memoized):
 - SQLite answers one bounded statement (`SELECT 1`).
 - The configured blob store answers a non-mutating check: for the local backend the
   directory exists, is a directory, and is readable, writable, and searchable; the
-  in-memory backend is always ready. The check does not create the directory, scan
-  contents, or run an integrity check.
+  in-memory backend is always ready; the R2 backend performs one `head` of a reserved
+  sentinel key (connectivity and read permission only; an absent object is ready).
+  The check does not create the directory, scan contents, or run an integrity check.
 
 Success is `200` with `{ "status": "ready" }`. If either probe throws or the database is
 closed, the response is `503` with `{ "status": "unavailable" }`. Neither body carries

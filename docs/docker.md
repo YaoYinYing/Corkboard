@@ -17,7 +17,8 @@ D1 and R2 adapters exist and pass their shared contracts only against structural
 doubles, and a Worker entrypoint exists and is exercised against those doubles with
 standard `Request`/`Response`; there is no live Workers/workerd run, no Cloudflare
 binding, no wrangler configuration or migration application, no deployment, and no
-Cloudflare access or test. `/readyz` on the Worker probes D1 only.
+Cloudflare access or test. `/readyz` on the Worker probes D1 and R2; R2 readiness is a
+head of a reserved sentinel key (connectivity/permission only, no object creation).
 
 The image is a single process. Rate limits, login limits, metrics, and MCP sessions are
 process-local; SQLite serializes writers. Do not run multiple replicas against the same
@@ -332,7 +333,8 @@ is lost. The full procedure is in [`runbook.md`](./runbook.md#9-upgrade-and-roll
   D1/R2 binding, no wrangler configuration or migration application, and no deployment.
   The D1 and R2 adapters are contract-tested only against structural doubles, and the
   Worker entrypoint is exercised against those doubles with standard
-  `Request`/`Response`; `/readyz` probes D1 only. Not claimed.
+  `Request`/`Response`; `/readyz` probes D1 and R2, with R2 readiness a head of a
+  reserved sentinel key (connectivity/permission only, no object creation). Not claimed.
 - **ChatGPT Web installation/linking:** not implemented or verified.
 - **TLS, per-IP rate limiting, and volumetric limits:** host reverse-proxy
   responsibility; the application only has process-local bearer public-prefix limits.

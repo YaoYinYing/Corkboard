@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { BlobStore } from "../../src/storage/blobs.ts";
+import { isValidBlobKey } from "../../src/storage/blobs.ts";
 import { LocalBlobStore } from "../../src/storage/blobs/local.ts";
 import { MemoryBlobStore } from "../../src/storage/blobs/memory.ts";
 import {
   createR2BlobStore,
+  R2_READINESS_SENTINEL_KEY,
   type R2BucketLike,
 } from "../../src/storage/blobs/r2.ts";
 import { openMemoryR2Bucket } from "../helpers/r2-double.ts";
@@ -156,6 +158,14 @@ export function runBlobContract(
     assert.deepEqual(Array.from(loaded), Array.from(view));
   });
 
+  test(scenario("checkReady resolves for a usable store"), async (t) => {
+    const { store, dispose } = openStore();
+    t.after(dispose);
+    // Adapters with no external dependency may omit the probe entirely.
+    await store.checkReady?.();
+    assert.equal(await store.get(opaqueKey("after-readiness")), undefined);
+  });
+
   test(scenario("concurrent puts and gets stay isolated"), async (t) => {
     const { store, dispose } = openStore();
     t.after(dispose);
@@ -206,6 +216,7 @@ function bucket(
     get: async () => null,
     put: async () => undefined,
     delete: async () => undefined,
+    head: async () => null,
     ...overrides,
   };
 }
@@ -272,7 +283,7 @@ test("r2: put passes exactly the supplied bytes", async () => {
 
 test("r2: invalid keys never reach the bucket", async () => {
   const inner = openMemoryR2Bucket();
-  const calls = { get: 0, put: 0, delete: 0 };
+  const calls = { get: 0, put: 0, delete: 0, head: 0 };
   const counted: R2BucketLike = {
     get: async (key) => {
       calls.get += 1;
@@ -286,6 +297,10 @@ test("r2: invalid keys never reach the bucket", async () => {
       calls.delete += 1;
       return inner.delete(key);
     },
+    head: async (key) => {
+      calls.head += 1;
+      return inner.head(key);
+    },
   };
   const store = createR2BlobStore(counted);
 
@@ -295,5 +310,44 @@ test("r2: invalid keys never reach the bucket", async () => {
     await assert.rejects(store.delete(invalid), TypeError);
   }
 
-  assert.deepEqual(calls, { get: 0, put: 0, delete: 0 });
+  assert.deepEqual(calls, { get: 0, put: 0, delete: 0, head: 0 });
+});
+
+test("r2: checkReady heads the reserved sentinel once and never writes", async () => {
+  const inner = openMemoryR2Bucket();
+  const store = createR2BlobStore(inner);
+  assert.equal(isValidBlobKey(R2_READINESS_SENTINEL_KEY), true);
+  assert.ok(store.checkReady);
+
+  await store.checkReady();
+
+  assert.deepEqual(inner.calls, [
+    { operation: "head", key: R2_READINESS_SENTINEL_KEY },
+  ]);
+});
+
+test("r2: checkReady resolves whether the sentinel is absent or present", async () => {
+  const heads: Array<() => Promise<object | null>> = [
+    async () => null,
+    async () => ({}),
+  ];
+  for (const head of heads) {
+    const store = createR2BlobStore(bucket({ head }));
+    assert.ok(store.checkReady);
+    await assert.doesNotReject(store.checkReady());
+  }
+});
+
+test("r2: checkReady rejects when the bucket head rejects", async () => {
+  const inner = openMemoryR2Bucket();
+  const failure = new Error("r2 bucket denied");
+  inner.failOn("head", failure);
+  const store = createR2BlobStore(inner);
+  assert.ok(store.checkReady);
+
+  await assert.rejects(store.checkReady(), failure);
+
+  assert.deepEqual(inner.calls, [
+    { operation: "head", key: R2_READINESS_SENTINEL_KEY },
+  ]);
 });

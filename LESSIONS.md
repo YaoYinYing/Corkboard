@@ -3,6 +3,22 @@
 Campaign learnings. Spelling is intentional per the original request. Keep entries
 actionable and prune stale ones.
 
+## 2026-11-07 — a readiness probe needs a read-only sentinel, not a write
+
+- **Failure avoided:** the R2 adapter omitted `checkReady` because R2 has no
+  store-level probe, so the Worker `/readyz` reported ready after a D1-only check.
+  The tempting fixes are both wrong: `put` a health object (mutates a private bucket
+  and can fail on a read-only credential) or `list` the bucket (scans). The smallest
+  side-effect-free probe is one `head` of a reserved sentinel key: absent is healthy,
+  present is healthy, and a rejection is the only failure.
+- **Reproducer:** `tests/contract/blobs.test.ts` "r2: checkReady heads the reserved
+  sentinel once and never writes"; the Worker test injects `failOn("head")` and
+  asserts the minimal `503 {"status":"unavailable"}` with no bucket/key detail.
+- **Prevents:** readiness that silently skips a configured dependency, and probes
+  that create, delete, or scan objects to prove liveness.
+- **Remove when:** the platform exposes a documented side-effect-free bucket
+  readiness primitive.
+
 ## 2026-11-07 — a negative UI claim can outlive the UI
 
 - **Failure avoided:** `docs/acceptance-report.md` said "Receipts UI — Not implemented;
@@ -2007,6 +2023,11 @@ prevented regression; when to remove the advice.
   silently reports ready without touching R2.
 - **Remove when:** a live R2 staging run executes the same blob contract and a
   sentinel-object readiness probe is implemented and exercised.
+- **Superseded (2026-11-07):** the "do not invent a `checkReady` probe" clause is
+  superseded by the sentinel-readiness lesson at the top of this file: the adapter now
+  issues one `head` of a reserved sentinel key (connectivity/permission only, no object
+  creation). The live-R2/Workers half of the remove-when condition is still
+  unexecuted, so the rule against reporting doubles as live support still stands.
 
 ## 2026-11-07 — a wired entrypoint still proves only the wiring
 

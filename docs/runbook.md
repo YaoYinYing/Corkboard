@@ -750,7 +750,8 @@ live on-call rotation. This section is the short credential path:
   the Worker entrypoint is exercised against those doubles with standard
   `Request`/`Response`; there is no live Workers/workerd run, no Cloudflare binding, no
   wrangler configuration or migration application, and no deployment. `/readyz` on the
-  Worker probes D1 only.
+  Worker probes D1 and R2; R2 readiness is a head of a reserved sentinel key
+  (connectivity/permission only, no object creation).
 - **Attachments are blocked** on Issue #5; text bodies only.
 - **Multi-process caveats.** Rate limits, metrics, and MCP sessions are process-local;
   each process enforces its own buckets and has its own sessions. SQLite serializes

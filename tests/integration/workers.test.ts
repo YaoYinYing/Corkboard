@@ -17,12 +17,16 @@ import {
 } from "../../src/platforms/workers/main.ts";
 import { createD1Database } from "../../src/storage/d1.ts";
 import type { SqlDatabase } from "../../src/storage/db.ts";
+import { R2_READINESS_SENTINEL_KEY } from "../../src/storage/blobs/r2.ts";
 import {
   applyD1Migrations,
   openD1Double,
   type D1Double,
 } from "../helpers/d1-double.ts";
-import { openMemoryR2Bucket } from "../helpers/r2-double.ts";
+import {
+  MemoryR2Bucket,
+  openMemoryR2Bucket,
+} from "../helpers/r2-double.ts";
 
 const WORKERS_DIR = new URL("../../src/platforms/workers/", import.meta.url);
 
@@ -163,10 +167,13 @@ test("worker: healthz and readyz answer from the D1/R2 doubles without writes", 
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: "ok" });
 
-  // The R2 adapter has no checkReady, so readyz probes only the database.
+  // Readiness probes D1 and one R2 sentinel `head`; it never writes or scans.
   const ready = await call(fx.handler, fx.env, "/readyz");
   assert.equal(ready.status, 200);
   assert.deepEqual(await ready.json(), { status: "ready" });
+  assert.deepEqual((fx.env.BLOB_BUCKET as MemoryR2Bucket).calls, [
+    { operation: "head", key: R2_READINESS_SENTINEL_KEY },
+  ]);
 
   assert.deepEqual(
     await fx.db.all<{ count: number }>("SELECT COUNT(*) AS count FROM messages"),
@@ -178,6 +185,25 @@ test("worker: healthz and readyz answer from the D1/R2 doubles without writes", 
     ),
     [{ count: 0 }],
   );
+});
+
+test("worker: readyz fails closed when the R2 head rejects without leaking detail", async (t) => {
+  const fx = await createFixture(t);
+  const bucket = fx.env.BLOB_BUCKET as MemoryR2Bucket;
+  const detail = ["bucket", "readiness", "detail"].join("-");
+  bucket.failOn("head", new Error(detail));
+
+  const ready = await call(fx.handler, fx.env, "/readyz");
+  assert.equal(ready.status, 503);
+  const text = await ready.text();
+  assert.equal(text, JSON.stringify({ status: "unavailable" }));
+  assert.equal(text.includes(detail), false);
+  assert.equal(text.includes(R2_READINESS_SENTINEL_KEY), false);
+
+  // The failing probe performed no write, delete, or scan.
+  assert.deepEqual(bucket.calls, [
+    { operation: "head", key: R2_READINESS_SENTINEL_KEY },
+  ]);
 });
 
 test("worker: seeded account reads /me, sends, and reads the body", async (t) => {

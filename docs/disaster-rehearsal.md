@@ -155,7 +155,8 @@ is exactly one object: `{ok:true, checks, summary}` on success, or
   contracts against structural doubles, and the Worker entrypoint runs against those
   doubles with standard `Request`/`Response`; no live Workers/workerd run, Cloudflare
   binding, wrangler migration application, deployment, or live D1/R2 fault injection
-  is made or claimed. `/readyz` on the Worker probes D1 only.
+  is made or claimed. `/readyz` on the Worker probes D1 and R2; R2 readiness is a head
+  of a reserved sentinel key (connectivity/permission only, no object creation).
 - **Not root-key or pepper rotation.** Neither rotation is implemented. The script
   restores the same key set; regenerating it would make ciphertext unrecoverable.
 - **Not offsite key custody.** The "separate" key backup is a second file in the same

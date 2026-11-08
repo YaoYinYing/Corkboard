@@ -436,7 +436,9 @@ directly over plain HTTP beyond localhost.
 Health: `GET /healthz` (process liveness). Readiness: `GET /readyz` (bounded SQLite
 query plus a non-mutating local-blob-directory or in-memory check). It returns
 `200 {"status":"ready"}` or `503 {"status":"unavailable"}` with `no-store` and no
-details. Backups: see `security-operations.md`.
+details. On the Worker, each unauthenticated `/readyz` call also issues one R2 `head`
+(a Class-A operation); the application does not rate-limit the route, so request
+limiting belongs at the reverse proxy. Backups: see `security-operations.md`.
 
 ### OAuth (remote MCP linking)
 
@@ -527,9 +529,9 @@ this entrypoint.
 uniform bearer failure, a disabled project, configuration `503`s, and a static
 assertion that the entrypoint directory has no `node:` imports. That is wiring
 evidence on doubles, **not** a live Workers/workerd run, real D1/R2 binding semantics,
-`wrangler` migration application, or a deployment. Readiness still does not probe R2:
-the R2 adapter deliberately has no `checkReady`, so `GET /readyz` reports ready after
-the database probe alone.
+`wrangler` migration application, or a deployment. Readiness probes D1 and R2: the R2
+adapter's `checkReady` performs one `head` of a reserved sentinel key, proving
+connectivity and read permission only, with no object creation.
 
 **Isolate lifetime and rotation.** The app is built once per handler instance (once per
 isolate for the default export) from the first successful env. Rotating

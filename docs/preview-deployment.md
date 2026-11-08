@@ -35,7 +35,8 @@ Out of scope and not claimed:
   against structural doubles; the Worker entrypoint is exercised against those doubles
   with standard `Request`/`Response`, but there is no live Workers/workerd run, no
   Cloudflare binding, no wrangler configuration or migration application, no deployment,
-  and `/readyz` probes D1 only);
+  and `/readyz` probes D1 and R2, with R2 readiness a head of a reserved sentinel key
+  (connectivity/permission only, no object creation));
 - attachments (text bodies only, 64 KiB request cap);
 - per-IP limits inside the application (the reverse proxy owns them);
 - multi-process or multi-host operation (SQLite and all in-process state are

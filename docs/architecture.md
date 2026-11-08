@@ -136,11 +136,12 @@ callback result. It passes the shared storage contract against a D1-shaped test 
 over SQLite; live Cloudflare D1 execution remains unexecuted (TODO 325/362).
 
 `src/storage/blobs/r2.ts` implements `BlobStore` over a structural `R2Bucket`
-(`get`/`put`/`delete`): `get` maps a null object to `undefined`, `put` passes the
-supplied bytes unchanged, and `delete` is idempotent. It has no `checkReady` because R2
-has no side-effect-free store-level probe (`head`/`list` need a sentinel object or a
-scan); the Worker `/readyz` route therefore probes D1 only and must add a
-sentinel-object `head` probe before R2 is selected in production. `tests/contract/blobs.test.ts` runs the shared blob contract
+(`get`/`put`/`delete`/`head`): `get` maps a null object to `undefined`, `put` passes the
+supplied bytes unchanged, and `delete` is idempotent. Its `checkReady` performs a single
+`head` of a reserved sentinel key: R2 has no store-level probe, so this proves
+connectivity and read permission only, and an absent object is a healthy answer. It
+never creates, writes, deletes, or lists. The Worker `/readyz` route therefore probes
+D1 and R2 (connectivity/permission only, no object creation). `tests/contract/blobs.test.ts` runs the shared blob contract
 against the Memory, Local, and R2 implementations; the R2 run uses an in-memory
 structural double (`tests/helpers/r2-double.ts`). That proves the adapter and its byte
 handling on the double, not live Cloudflare R2 execution. The Node server still
