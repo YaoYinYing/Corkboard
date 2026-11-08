@@ -204,6 +204,17 @@ test("worker: readyz fails closed when the R2 head rejects without leaking detai
   assert.deepEqual(bucket.calls, [
     { operation: "head", key: R2_READINESS_SENTINEL_KEY },
   ]);
+
+  // Clearing the injection makes readiness healthy again, so the R2 path
+  // recovers as well as the D1 path.
+  bucket.clearFailure("head");
+  const recovered = await call(fx.handler, fx.env, "/readyz");
+  assert.equal(recovered.status, 200);
+  assert.deepEqual(await recovered.json(), { status: "ready" });
+  assert.deepEqual(bucket.calls, [
+    { operation: "head", key: R2_READINESS_SENTINEL_KEY },
+    { operation: "head", key: R2_READINESS_SENTINEL_KEY },
+  ]);
 });
 
 test("worker: seeded account reads /me, sends, and reads the body", async (t) => {

@@ -24,6 +24,10 @@ import type {
 // call of "query" (any prepared statement `first`/`all`/`run`, or `exec`) or
 // "batch" until `clearFailure` is called. The error is thrown, never returned,
 // so callers see the same failure shape as a rejected binding call.
+// `failOnBatchStatement(index, error)` instead fails inside the batch's SQLite
+// transaction at buffered statement `index`, after the earlier statements have
+// executed; the whole batch still rolls back atomically. It stays active until
+// `clearBatchStatementFailure`.
 
 export type D1Operation = "query" | "batch";
 
@@ -90,6 +94,7 @@ class DoubleDatabase implements D1DatabaseLike {
   readonly database: DatabaseSync;
   readonly calls: D1Call[] = [];
   readonly #failures = new Map<D1Operation, Error>();
+  #batchStatementFailure: { index: number; error: Error } | undefined;
 
   constructor(path: string) {
     this.database = new DatabaseSync(path);
@@ -105,6 +110,20 @@ class DoubleDatabase implements D1DatabaseLike {
 
   clearFailure(operation: D1Operation): void {
     this.#failures.delete(operation);
+  }
+
+  failOnBatchStatement(
+    index: number,
+    error = new Error("d1 statement failed"),
+  ): void {
+    if (!Number.isSafeInteger(index) || index < 0) {
+      throw new RangeError("batch statement index must be a non-negative integer");
+    }
+    this.#batchStatementFailure = { index, error };
+  }
+
+  clearBatchStatementFailure(): void {
+    this.#batchStatementFailure = undefined;
   }
 
   recordQuery(sql: string): void {
@@ -137,7 +156,11 @@ class DoubleDatabase implements D1DatabaseLike {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const results: D1Result<T>[] = [];
-      for (const statement of statements) {
+      for (const [index, statement] of statements.entries()) {
+        const injected = this.#batchStatementFailure;
+        if (injected !== undefined && injected.index === index) {
+          throw injected.error;
+        }
         results.push(await statement.run<T>());
       }
       this.database.exec("COMMIT");

@@ -2073,7 +2073,10 @@ prevented regression; when to remove the advice.
   rows, R2 call logs, absence of plaintext/tokens/driver text, and a successful retry
   after `clearFailure`; record "live D1/R2, real network/OS faults, and two isolated
   deployment environments remain unexecuted" in the runbook, acceptance report, state,
-  and TODO reason.
+  and TODO reason. Where the port supports it, inject at a buffered statement index
+  inside the transaction so the proof is rollback of already-executed work rather than
+  batch-entry rejection, and assert clear-injection recovery for each readiness
+  dependency (D1 and R2), not one path standing in for both.
 - **Remove when:** a staging run injects comparable faults against real Cloudflare D1
   and R2 (or the operating system) in two isolated environments and observes the same
   fail-closed and recovery behavior.

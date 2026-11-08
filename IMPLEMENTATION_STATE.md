@@ -3537,10 +3537,37 @@ base; both failure classes fail closed; mutations that swallowed an R2 put failu
 converted a D1 batch failure to success were caught; recovery with the same
 idempotency key publishes exactly one message) and the contract audit returned PASS
 (claims match the four tested paths; TODO 368 remains unchecked; mid-batch rollback is
-attributed to the D1 contract test, not this injection). Residual P3 debt recorded, not
-fixed: the injected D1 batch rejection fires at batch entry, so the new test proves a
-call-time failure commits nothing rather than mid-batch rollback; readiness recovery is
-asserted for the D1-query path only, though the docs phrase recovery more broadly; and
-the dashboard-path sanitization assertions do not check the session cookie value or
-project title/summary (the fixed error template makes leakage unlikely). CI run
-`42454220000` succeeded.
+attributed to the D1 contract test, not this injection). Residual P3 debt was recorded at
+that checkpoint: the injected D1 batch rejection fired at batch entry, so the test proved
+a call-time failure committed nothing rather than mid-batch rollback; readiness recovery
+was asserted for the D1-query path only; and the dashboard-path sanitization assertions
+did not check the session cookie value or the project title/summary. All three are closed
+by the failure-injection test-breadth checkpoint below. CI run `42454220000` succeeded.
+
+## Checkpoint (2026-11-07) — failure-injection test breadth (TODO 368 partial)
+
+Scope: close the three P3 test-breadth items recorded after the controlled
+failure-injection checkpoint. Tests/helpers and docs only; no production behavior
+changed. The test-only D1 double gained `failOnBatchStatement(index)` /
+`clearBatchStatementFailure()`: the injected rejection fires inside the single SQLite
+`BEGIN IMMEDIATE` transaction at the buffered statement index, after the earlier
+statements executed, and the whole batch still rolls back atomically. A new
+`tests/integration/failure-injection.test.ts` test fails the second statement of the
+dashboard's two-row project create, proves the project INSERT executed before the
+failure and the membership INSERT did not, and then proves neither row survives (true
+rollback, not a call-time rejection); clearing the injection lets the same form create
+exactly one project and one membership. The existing call-time `failOn("batch")` test
+is retained. The dashboard batch sanitization assertions now also reject the session
+token, the project title, and the project summary plaintext (in addition to the
+injected driver detail and CSRF token) without changing the production error template.
+`tests/integration/workers.test.ts` now clears an injected R2 `head` failure and
+asserts `/readyz` returns `200 {"status":"ready"}` again, so recovery is covered for
+the R2 readiness path as well as the D1 path.
+
+Tests: `npm run check` exit 0 (786 tests: 786 pass, 0 fail, 0 skipped);
+`npm run test:contract` exit 0 (82 tests: 82 pass); `npm run build` exit 0.
+
+Not proven: live Cloudflare D1/R2 or Workers/workerd, Cloudflare bindings, wrangler
+migration application, a real network/OS fault, a batch failure from a real D1
+binding, two isolated clients in different deployment environments, or a deployed
+recovery. TODO 368 remains unchecked. Independent review: NOT CLAIMED.

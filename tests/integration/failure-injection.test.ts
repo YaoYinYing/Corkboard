@@ -182,6 +182,7 @@ async function seedActor(fx: Fixture, suffix: string): Promise<SeededActor> {
 // without a login round-trip. The raw token and CSRF value are test-generated.
 async function seedSession(fx: Fixture, suffix: string): Promise<{
   cookie: string;
+  token: string;
   csrf: string;
   accountId: string;
   speakerId: string;
@@ -218,6 +219,7 @@ async function seedSession(fx: Fixture, suffix: string): Promise<{
   const cookie = [SESSION_COOKIE_NAME + "=" + token, CSRF_COOKIE_NAME + "=" + csrf].join("; ");
   return {
     cookie,
+    token,
     csrf,
     accountId,
     speakerId,
@@ -404,13 +406,21 @@ test("failure injection: a D1 batch failure during a multi-row write leaves no p
   const detail = ["d1", "batch", "detail"].join("-");
   fx.double.failOn("batch", new Error(detail));
 
+  const title = "Failure-injection project";
+  const summary = "must not be half-created";
   const form = new URLSearchParams({
-    title: "Failure-injection project",
-    summary: "must not be half-created",
+    title,
+    summary,
     csrf_token: session.csrf,
   }).toString();
   const failed = await formCall(fx, "/projects", session.cookie, form);
-  await assertSanitizedWebError(failed, [detail, session.csrf]);
+  await assertSanitizedWebError(failed, [
+    detail,
+    session.csrf,
+    session.token,
+    title,
+    summary,
+  ]);
 
   // The project and its owner membership are inserted in one batch; the
   // rejection leaves neither row.
@@ -428,6 +438,72 @@ test("failure injection: a D1 batch failure during a multi-row write leaves no p
   );
 
   fx.double.clearFailure("batch");
+  const recovered = await formCall(fx, "/projects", session.cookie, form);
+  assert.equal(recovered.status, 303);
+  assert.match(
+    recovered.headers.get("location") ?? "",
+    /^\/projects\/proj_[A-Za-z0-9_-]+$/,
+  );
+  assert.deepEqual(
+    await fx.db.all("SELECT COUNT(*) AS count FROM projects"),
+    [{ count: 1 }],
+  );
+  assert.deepEqual(
+    await fx.db.all("SELECT COUNT(*) AS count FROM project_memberships"),
+    [{ count: 1 }],
+  );
+});
+
+test("failure injection: a mid-batch D1 failure after the first insert rolls the project create back atomically", async (t) => {
+  const fx = await createFixture(t);
+  const session = await seedSession(fx, "midbatch");
+  const detail = ["d1", "mid", "batch", "detail"].join("-");
+  // Fail the second buffered statement (the owner membership insert) inside the
+  // same SQLite transaction, after the project insert has executed.
+  fx.double.failOnBatchStatement(1, new Error(detail));
+
+  const title = "Mid-batch rollback project";
+  const summary = "the first insert must not survive";
+  const form = new URLSearchParams({
+    title,
+    summary,
+    csrf_token: session.csrf,
+  }).toString();
+  const failed = await formCall(fx, "/projects", session.cookie, form);
+  await assertSanitizedWebError(failed, [
+    detail,
+    session.csrf,
+    session.token,
+    title,
+    summary,
+  ]);
+
+  // The first INSERT ran inside the transaction before the injected failure, so
+  // the empty tables are true rollback evidence, not a batch-entry rejection.
+  assert.ok(
+    fx.double.calls.some(
+      (entry) =>
+        entry.operation === "query" &&
+        /INSERT INTO projects/.test(entry.sql ?? ""),
+    ),
+    "the project insert must execute before the second statement fails",
+  );
+  assert.equal(
+    fx.double.calls.some(
+      (entry) =>
+        entry.operation === "query" &&
+        /INSERT INTO project_memberships/.test(entry.sql ?? ""),
+    ),
+    false,
+    "the failing statement must not execute",
+  );
+  assert.deepEqual(await fx.db.all("SELECT id FROM projects"), []);
+  assert.deepEqual(
+    await fx.db.all("SELECT project_id FROM project_memberships"),
+    [],
+  );
+
+  fx.double.clearBatchStatementFailure();
   const recovered = await formCall(fx, "/projects", session.cookie, form);
   assert.equal(recovered.status, 303);
   assert.match(
