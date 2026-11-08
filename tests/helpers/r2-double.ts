@@ -13,8 +13,8 @@ export interface R2Call {
 // Test-only R2 bucket double. It is an in-memory map that implements the same
 // structural API as the Cloudflare binding and copies bytes on both sides so
 // callers cannot observe aliasing. `calls` records every operation in order and
-// `failOn` injects a rejection for one operation. This is not evidence that
-// live Cloudflare R2 executes these calls.
+// `failOn` injects a rejection for one operation until `clearFailure` removes
+// it. This is not evidence that live Cloudflare R2 executes these calls.
 export class MemoryR2Bucket implements R2BucketLike {
   readonly #objects = new Map<string, Uint8Array>();
   readonly #failures = new Map<R2Operation, Error>();
@@ -22,6 +22,10 @@ export class MemoryR2Bucket implements R2BucketLike {
 
   failOn(operation: R2Operation, error = new Error("r2 unavailable")): void {
     this.#failures.set(operation, error);
+  }
+
+  clearFailure(operation: R2Operation): void {
+    this.#failures.delete(operation);
   }
 
   #record(operation: R2Operation, key: string): void {

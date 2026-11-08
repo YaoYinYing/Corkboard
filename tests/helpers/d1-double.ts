@@ -19,30 +19,43 @@ import type {
 // file so the adapter and the shared storage contract exercise the same SQL and
 // error text as production SQLite. It is not evidence that live Cloudflare D1
 // executes this SQL; see TODO 325/362.
+//
+// `failOn(operation, error)` injects a rejection at the next and every later
+// call of "query" (any prepared statement `first`/`all`/`run`, or `exec`) or
+// "batch" until `clearFailure` is called. The error is thrown, never returned,
+// so callers see the same failure shape as a rejected binding call.
+
+export type D1Operation = "query" | "batch";
+
+export interface D1Call {
+  operation: D1Operation;
+  sql?: string;
+}
 
 class DoubleStatement implements D1PreparedStatement {
-  readonly database: DatabaseSync;
+  readonly owner: DoubleDatabase;
   readonly sql: string;
   readonly params: readonly D1Value[];
 
   constructor(
-    database: DatabaseSync,
+    owner: DoubleDatabase,
     sql: string,
     params: readonly D1Value[] = [],
   ) {
-    this.database = database;
+    this.owner = owner;
     this.sql = sql;
     this.params = params;
   }
 
   bind(...values: D1Value[]): D1PreparedStatement {
-    return new DoubleStatement(this.database, this.sql, values);
+    return new DoubleStatement(this.owner, this.sql, values);
   }
 
   async first<T = Record<string, unknown>>(
     columnName?: string,
   ): Promise<T | null> {
-    const row = this.database
+    this.owner.recordQuery(this.sql);
+    const row = this.owner.database
       .prepare(this.sql)
       .get(...this.params) as Record<string, unknown> | undefined;
     if (row === undefined) return null;
@@ -51,7 +64,8 @@ class DoubleStatement implements D1PreparedStatement {
   }
 
   async all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    const rows = this.database
+    this.owner.recordQuery(this.sql);
+    const rows = this.owner.database
       .prepare(this.sql)
       .all(...this.params) as Record<string, unknown>[];
     return {
@@ -62,7 +76,8 @@ class DoubleStatement implements D1PreparedStatement {
   }
 
   async run<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    const result = this.database.prepare(this.sql).run(...this.params);
+    this.owner.recordQuery(this.sql);
+    const result = this.owner.database.prepare(this.sql).run(...this.params);
     return {
       success: true,
       results: [] as T[],
@@ -73,26 +88,52 @@ class DoubleStatement implements D1PreparedStatement {
 
 class DoubleDatabase implements D1DatabaseLike {
   readonly database: DatabaseSync;
+  readonly calls: D1Call[] = [];
+  readonly #failures = new Map<D1Operation, Error>();
 
   constructor(path: string) {
     this.database = new DatabaseSync(path);
     this.database.exec("PRAGMA foreign_keys = ON");
   }
 
+  failOn(
+    operation: D1Operation,
+    error = new Error("d1 unavailable"),
+  ): void {
+    this.#failures.set(operation, error);
+  }
+
+  clearFailure(operation: D1Operation): void {
+    this.#failures.delete(operation);
+  }
+
+  recordQuery(sql: string): void {
+    this.record("query", sql);
+  }
+
+  record(operation: D1Operation, sql?: string): void {
+    this.calls.push(sql === undefined ? { operation } : { operation, sql });
+    const failure = this.#failures.get(operation);
+    if (failure !== undefined) throw failure;
+  }
+
   prepare(sql: string): D1PreparedStatement {
-    return new DoubleStatement(this.database, sql);
+    return new DoubleStatement(this, sql);
   }
 
   async exec(sql: string): Promise<{ count: number; duration: number }> {
+    this.recordQuery(sql);
     this.database.exec(sql);
     return { count: 0, duration: 0 };
   }
 
   // One real transaction around the whole batch: a failing statement rolls
-  // every earlier one back, matching D1 batch atomicity.
+  // every earlier one back, matching D1 batch atomicity. Transaction control
+  // uses the raw handle so failure injection cannot disturb it.
   async batch<T = Record<string, unknown>>(
     statements: D1PreparedStatement[],
   ): Promise<D1Result<T>[]> {
+    this.record("batch");
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const results: D1Result<T>[] = [];
@@ -116,7 +157,7 @@ class DoubleDatabase implements D1DatabaseLike {
   }
 }
 
-export type D1Double = D1DatabaseLike & { close(): void };
+export type D1Double = DoubleDatabase;
 
 export function openD1Double(path: string): D1Double {
   return new DoubleDatabase(path);

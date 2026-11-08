@@ -3504,3 +3504,30 @@ historical records and two wording facts listed as P3 (the R2 `head` class label
 the D1-failure short-circuit wording), which this tail corrects. The downgraded
 sibling candidate `38cfc80` shares base `a90e068`; the pushed commit has the same tree
 as `2b0d677`. CI run `42447924394` succeeded.
+
+## Checkpoint (2026-11-07) — controlled D1/R2 failure injection (TODO 368 partial)
+
+Scope: close the testable half of TODO 368 without claiming two deployment
+environments. The test-only D1 double now mirrors the R2 double's `failOn`: a
+documented rejection at every `query` (prepared-statement `first`/`all`/`run`, or
+`exec`) or `batch` call, plus `clearFailure`, a `calls` log, and batch atomicity via
+one SQLite transaction. The R2 double gained `clearFailure`. New
+`tests/integration/failure-injection.test.ts` (4 tests) drives the Worker-shaped
+handler over those doubles and asserts, per path: an R2 `put` failure during send is
+a sanitized `503 UNAVAILABLE` with no published message/body (only the reclaimable
+pending idempotency reservation), no plaintext/token/driver leakage, and a same-key
+retry publishes exactly one message; an R2 `get` failure during a body read is the
+same sanitized `503` with no `text`/`digest` masquerading as content and recovers;
+a D1 `batch` failure during the dashboard's two-row project create leaves neither the
+project nor the membership row and recovers to a `303`; a D1 `query` failure on the
+read path returns no partial page and `/readyz` fails closed, both recovering when the
+injection is cleared. No app, service, adapter, schema, migration, dependency, lock,
+or API behavior changed; only test helpers and tests.
+
+Tests: `npm run check` exit 0 (785 tests: 785 pass, 0 fail, 0 skipped);
+`npm run test:contract` exit 0 (82 tests: 82 pass); `npm run build` exit 0.
+
+Not proven: live Cloudflare D1/R2 or Workers/workerd, Cloudflare bindings, wrangler
+migration application, a real network/OS fault, two isolated clients in different
+deployment environments, or a deployed recovery. TODO 368 remains unchecked.
+Independent review: NOT CLAIMED.

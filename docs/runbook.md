@@ -752,6 +752,15 @@ live on-call rotation. This section is the short credential path:
   wrangler configuration or migration application, and no deployment. `/readyz` on the
   Worker probes D1 and R2; R2 readiness is a head of a reserved sentinel key
   (connectivity/permission only, no object creation).
+- **Controlled D1/R2 failure injection is covered only against structural doubles.**
+  `tests/integration/failure-injection.test.ts` rejects an R2 `put` during a send, an
+  R2 `get` during a body read, a D1 `batch` during the dashboard's multi-row project
+  create, and a D1 query on a read/readiness path. Each fails closed without publishing
+  a message, returning partial rows/content, or leaking driver text, plaintext, tokens,
+  or binding names, and the same operation succeeds once the injection is cleared
+  (readiness returns to `200`). This is evidence from `tests/helpers/d1-double.ts` and
+  `tests/helpers/r2-double.ts`, not live Cloudflare D1/R2, a real network or OS fault,
+  or two isolated deployment environments; TODO 368 remains unchecked.
 - **Attachments are blocked** on Issue #5; text bodies only.
 - **Multi-process caveats.** Rate limits, metrics, and MCP sessions are process-local;
   each process enforces its own buckets and has its own sessions. SQLite serializes

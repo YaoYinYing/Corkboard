@@ -2060,3 +2060,20 @@ prevented regression; when to remove the advice.
   and transient security regressions being mistaken for committed behavior.
 - **Remove when:** reviews run in isolated worktrees by construction, so no mutation
   can reach another reviewer's source.
+
+## 2026-11-07 — injected double failures prove fail-closed mapping, not platform faults
+
+- **Failure avoided:** treating a structural double's injected `put`/`get`/`batch`/
+  query rejection as evidence that live D1/R2, a network partition, or two isolated
+  deployments fail safely. The double proves the application's error mapping,
+  atomicity guarantees of the port, and recovery of its own in-process state; it does
+  not reproduce binding retries, workerd isolate recycling, partial network effects,
+  or cross-environment behavior.
+- **Rule:** keep failure injection in the doubles, assert HTTP status/envelope, DB
+  rows, R2 call logs, absence of plaintext/tokens/driver text, and a successful retry
+  after `clearFailure`; record "live D1/R2, real network/OS faults, and two isolated
+  deployment environments remain unexecuted" in the runbook, acceptance report, state,
+  and TODO reason.
+- **Remove when:** a staging run injects comparable faults against real Cloudflare D1
+  and R2 (or the operating system) in two isolated environments and observes the same
+  fail-closed and recovery behavior.
