@@ -3658,3 +3658,54 @@ informational notes (the database-unusable exit-2 category is probe-verified but
 committed test, and docs state the contract in prose rather than quoting the literal).
 Downgraded sibling candidates `5cd2cac` and `e07e36a` share base `61a5ee0`; the pushed
 commit has the same tree as `a541c61`. CI run `42472200959` succeeded.
+
+## Deployment (2026-11-08) — private preview live (restricted)
+
+The reviewed preview package was deployed on this host as a separate Compose project. This
+is an operations record, not a new implementation slice: no application code, authorization
+path, crypto, or migration changed after the tested revision.
+
+| Field | Value |
+| --- | --- |
+| Deployed revision | `18e4eb016a72e9ea8e64fdac31f89ba44197b54a` (tree `08ffdf22b9c561550591759d7b7861d7c973f564`) |
+| Image | `corkboard:preview` = `sha256:59c12724ad4df701dbfd07c85db8eb9e7066b119ac69cba5deb23c02b631351b` |
+| Compose project | `corkboard-preview`; volume `corkboard-preview-data`; app on `127.0.0.1:18787` only |
+| Secrets | `/srv/corkboard-preview/secrets/corkboard.env` (`0600`, fresh root key + pepper); credentials under `/srv/corkboard-preview/credentials` (`0600`) |
+| TLS | nginx on the host's Tailscale IPv4 address, port 443, leaf for the node's MagicDNS name, issued by the local Corkboard Preview Root CA; tailnet-only |
+| Access | the node's MagicDNS HTTPS origin; synthetic `owner@preview.invalid`; no registration; OAuth routes disabled (`CORKBOARD_PUBLIC_BASE_URL` unset) |
+
+Acceptance on the live endpoint: preflight 15/15 over HTTPS; a real Chrome desktop pass
+(1440x900) covering login, wrong-password rejection, dashboard, the timeline before/after,
+the compose page, and signed-out project access; mobile Chrome (390x844) covering login,
+dashboard, and the timeline before/after, but not the wrong-password, compose, or signed-out
+pages; credential revocation 200→401 (`revocation-probe.txt`); non-member 404; restart
+persistence with identical `doctor` (`doctor-restart-before/after.json`); backup → verify →
+restore into a fresh directory with a clean restored `doctor` (the backup predates seq 2, so
+the restored copy has one message, not two); container hardening and loopback-only listener
+confirmed. A real Claude Code MCP client over HTTPS called `corkboard_whoami`,
+`list_projects`, `list_messages`, `send_message` (seq 2), `mark_read`, and
+`get_message(include_body=true)` (body text and digest in `mcp-body-read.txt`); the Web UI
+shows the same message and receipt.
+
+A context-isolated deployment audit reproduced the HTTPS/TLS checks, the preflight with
+unchanged counts, `doctor`, the screenshot authenticity and secret review, repo containment,
+and the MCP registration: PASS. It flagged that unknown SNI/Host on `:443` was served by the
+default vhost; default `return 444` servers were added on the Tailscale address for `:80` and
+`:443` and re-verified (`unknown-host-probe.txt`: unknown SNI/Host closed; canonical name
+still 200/301; preflight still 15/15).
+
+Evidence: GitHub pre-release `preview-evidence-18e4eb0` (screenshots, raw outputs, MCP
+transcripts, nginx/compose config, the preview root CA certificate (public half)). Deployment
+record and remaining actions: Issue #11; MCP integration status: Issue #12.
+
+Limitations: the Tailscale account cannot issue HTTPS certificates, so the route uses a
+private CA that testers must install; there is no public DNS/ACME host and the remotely managed
+Cloudflare tunnel was not modified. Tailnet-only; ChatGPT untested; single process; no
+destructive `gc-blobs --apply`. The long-running Commander session must be restarted (with
+`CORKBOARD_APIKEY` sourced from `/srv/corkboard-preview/credentials/commander.env`) to load
+the updated MCP registration.
+
+Rollback: `docker compose -f compose.yaml -f compose.preview.yaml --project-name corkboard-preview down`
+stops without deleting data; restore a verified backup into a new directory and start a second
+container on it; remove the preview volume only with its `corkboard.preview=true` label check.
+No production stack, volume, secrets path, or certificate was touched.

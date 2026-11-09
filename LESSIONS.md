@@ -2096,3 +2096,19 @@ prevented regression; when to remove the advice.
   filesystem cannot provide.
 - **Remove when:** the send path changes to insert metadata before the blob and that
   ordering is asserted by a test, at which point this rationale must be revisited.
+
+## 2026-11-08 — a deployment package is not a deployment, and trust is part of the route
+
+The preview package was "ready" for two days while the actual deployment still had no TLS route:
+the Tailscale account could not issue certificates, no public DNS/ACME host existed, and the
+existing Cloudflare tunnel was remotely managed and unverifiable. A CI-green package plus a
+Compose file did not answer "can an authorized tester open the UI over HTTPS?".
+- **Rule:** a release campaign proves the deployment on the real endpoint, including its TLS
+  trust chain and the tester's path to it, before calling it live. Prefer an already-authorized
+  private network (a tailnet) over inventing public DNS or purchasing certificates, and treat a
+  private CA as a real cost: every tester must install the trust anchor.
+- **Rule:** keep the origin loopback-only and bind the terminator to the private interface, not
+  to `0.0.0.0`; verify with `ss` and a TLS probe, not by assumption. Report the exact missing
+  prerequisite (here: HTTPS certificates for the tailnet) as one maintainer action.
+- **Remove when:** the tailnet issues publicly trusted certificates for the node (then the
+  private-CA disclosure disappears), or the preview moves to a public hostname with ACME.

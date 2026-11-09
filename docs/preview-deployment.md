@@ -1,23 +1,30 @@
 # Private preview deployment package
 
-**Status:** package only. **Nothing in this document was deployed.** No public
-infrastructure, DNS record, certificate, or real credential was created. The package
-is ready for a maintainer-supplied host and must not be described as a deployment,
-a browser verification, or a ChatGPT interoperability result.
+**Status:** deployed as a restricted, tailnet-only private preview on 2026-11-08 from
+revision `18e4eb016a72e9ea8e64fdac31f89ba44197b54a` (tree
+`08ffdf22b9c561550591759d7b7861d7c973f564`), image
+`sha256:59c12724ad4df701dbfd07c85db8eb9e7066b119ac69cba5deb23c02b631351b`. The live
+URL, tester onboarding, acceptance evidence and remaining actions are recorded in
+Issue #11 and the `preview-evidence-18e4eb0` pre-release. This is not a public beta or
+a production release, and no ChatGPT interoperability is claimed.
 
-**Baseline:** the package commit is based on `0cd5ffc` (tree `bb8270e`), the
-docs/state tail that records the TODO 409 review-remediation checkpoint `5a310d1`
-(tree `d8b1bb3`) as independently audited and pushed. `da6eba9` remains the latest
-audited CI-passing code checkpoint before the remediation. The preview package is
-committed on its own branch, not on `main`.
+**Route used:** the host is a Tailscale node. nginx terminates TLS on the node's
+Tailscale address with a leaf from a locally generated preview root CA, and the
+application origin stays on `127.0.0.1:18787`. The Tailscale account cannot issue
+HTTPS certificates and no public DNS/ACME route exists, so the CA (not a publicly
+trusted certificate) is the trust anchor and testers install it. Enabling HTTPS
+certificates for the tailnet would remove that step. The pre-existing Cloudflare
+tunnel is remotely managed and was not modified.
+
+**Runbook:** the procedure below is the operator runbook and was executed as written for
+build, secrets, synthetic data, loopback verification, revocation, restart persistence and
+backup/restore, with the host/TLS substitutions above. The browser smoke was partial and
+the public-DNS/Cloudflare options were not used (see §8 and §10). It was not created by the
+deployment.
 
 **Tracking:** results, review findings, and maintainer blockers are recorded in
 Issue #11, `[Preview] Restricted private-preview deployment — status and blockers`.
 This document does not duplicate that Issue's content.
-
-**Blocker:** a host, a domain with DNS, a TLS certificate, and synthetic preview
-credentials do not exist yet. Those are maintainer-supplied. Until they are supplied,
-only the offline checks in §2 and the merged-compose validation can run.
 
 This package reuses the shipped Node.js 24 + SQLite + Docker Compose stack. It does
 not add an adapter, a dependency, an authorization path, or a crypto change.
@@ -42,7 +49,11 @@ Out of scope and not claimed:
 - multi-process or multi-host operation (SQLite and all in-process state are
   single-process);
 - ChatGPT Web installation/linking or conversation-level tool invocation;
-- a real browser pass, a TLS pass, or a disaster rehearsal on the preview host.
+- a public DNS name or a publicly trusted certificate (the deployed preview uses the
+  host's Tailscale name and a private CA);
+- a full manual browser smoke (the deployed desktop pass covered login, dashboard, timeline,
+  compose page, and denied access; the mobile pass covered login, dashboard, and the timeline.
+  Body reveal, en/zh switching, and a UI compose submit were not exercised in either).
 
 ## 1. Variables and isolation
 
@@ -708,8 +719,8 @@ row is not accepted on "it should work".
 | Message send/list/body/read/replay/idempotency | Preflight | `201`/`200`, exact body and digest, `200` receipt, `200` replay with the same ID/sequence, `409` conflict |
 | Restart persistence | `"${COMPOSE[@]}" run --rm -T corkboard node dist/scripts/corkboard.js doctor --data-dir /data --json` before; `"${COMPOSE[@]}" stop corkboard`; `"${COMPOSE[@]}" up -d --wait`; the same `doctor --data-dir /data --json` after; rerun preflight | Counts unchanged, `/readyz` ready, preflight replay returns the same message; no data in the container layer |
 | Backup/verify/restore | §8.1 commands | `backup` and `verify` exit `0`; `restore` into a new host directory succeeds; `doctor` on the restored copy exits `0` with 0 issues |
-| Browser smoke (manual, not executed here) | Sign in over HTTPS, open the project timeline, reveal the preflight body, send a message, switch en/zh, sign out | No console error, no XSS, expected pages and cookies; record that this was a manual browser pass at the exact revision |
-| ChatGPT/MCP client (external, not executed here) | Only if a real client is available | Not claimed. Record the exact client/account/result or leave it untested |
+| Browser smoke (partially executed on the deployed preview) | Sign in over HTTPS, open the project timeline, compose page, and a signed-out project URL | Desktop (1440x900): login, wrong-password rejection, dashboard, timeline before/after, compose page, and signed-out redirect were recorded. Mobile (390x844): login, dashboard, and timeline before/after only. Body reveal, en/zh switch, a UI compose submit, and sign-out were not exercised in the browser |
+| MCP client (executed over HTTPS); ChatGPT not executed | A real MCP client, and a ChatGPT account only if one is available | A real Claude Code MCP client connected, called the native tools, sent seq 2, marked it read, and read its body; ChatGPT Web was not tested and no interoperability is claimed |
 
 ### 8.1 Backup, verify, and restore into a new directory
 
@@ -835,9 +846,12 @@ directory. Rollback must never touch the production stack.
 - **ChatGPT interoperability is unclaimed.** No ChatGPT account, plugin, OAuth
   consent, or conversation-level tool invocation was tested. Local MCP/OAuth is not
   evidence of ChatGPT support.
-- **No browser pass is claimed.** The dashboard, CSP, cookie behavior, and UI are
-  covered by application tests and the earlier acceptance report, but this package
-  did not run a browser against the preview host.
+- **Browser pass on the deployed preview.** Real Chrome desktop (1440x900) covered
+  login, wrong-password rejection, dashboard, the timeline before/after a synthetic
+  exchange, the compose page, and a signed-out project URL redirect with no message
+  content. Mobile Chrome (390x844) covered login, dashboard, and the timeline
+  before/after only. Body reveal, en/zh switching, and a UI compose submit were not
+  exercised in either; the send used MCP and the preflight.
 - **Single host, single process.** SQLite serializes writers; rate limits, metrics,
   login buckets, and MCP sessions are process-local; do not run replicas against
   the same volume.
@@ -851,9 +865,12 @@ directory. Rollback must never touch the production stack.
   in the preview secrets file enables the OAuth routes; leave it unset unless the
   tester specifically needs OAuth/MCP linking. Cloudflare Access must be scoped or
   bypassed for those routes.
-- **TLS and reverse-proxy configuration are not executed here.** No certificate was
-  issued and no nginx/Cloudflare configuration was applied. The snippets are
-  operator input.
+- **TLS and reverse-proxy configuration on the deployed preview.** nginx terminates
+  TLS on the host's Tailscale address with a leaf from a locally generated preview
+  root CA; the public-DNS/ACME and Cloudflare Access/Options A–B snippets below were
+  not used, and the pre-existing Cloudflare tunnel was not modified. Testers must
+  install the preview CA, or the tailnet administrator can enable HTTPS certificates
+  for the node to replace it.
 - **Loopback plaintext is trusted by name.** The preflight accepts
   `http://localhost` and `http://127.0.0.1`/`::1`. `localhost` is resolved through
   the hosts file or DNS, so a local hosts-file change can point it at another
@@ -866,14 +883,20 @@ directory. Rollback must never touch the production stack.
   UTF-8 bytes; requests are capped at 64 KiB.
 - **Key rotation is not implemented.** One root-key version and one pepper. Key
   loss means ciphertext loss; previously read plaintext cannot be un-read.
-- **Backup/restore was not rehearsed on the preview host.** The scripts are tested
-  locally; the §8.1 run is the proof for this installation.
+- **Backup/verify/restore on the deployed preview.** The §8.1 procedure ran on the
+  preview host: `verify` and `restore` succeeded, and `doctor` on the restored copy
+  reported integrity ok with 0 issues. The backup predates the MCP message, so the
+  restored copy contains one message, not two.
 - **The preflight creates one synthetic message** per credential/project with a
   fixed idempotency key. It is safe to rerun; it is not a load or soak test.
 
-## 11. What remains blocked on maintainer-supplied infrastructure
+## 11. Infrastructure the package cannot produce by itself
 
-The package stops here. The following cannot be produced from the repository:
+For the deployed preview these were supplied as: the host is this Tailscale node; TLS
+trust is the local preview CA (tailnet HTTPS certificates are unavailable); testers are
+tailnet devices; the secrets file and synthetic credentials live on the host. The
+public-DNS and Cloudflare Access options were not used. The list below is what any new
+installation still needs from its operator:
 
 - a host (or VM/container host) with Docker Engine and Compose v2.24+;
 - a domain name and DNS control, plus an HTTPS certificate for it;
@@ -885,6 +908,6 @@ The package stops here. The following cannot be produced from the repository:
 - a real MCP/OAuth client and a ChatGPT account/workspace, if interoperability is to
   be tested.
 
-Once those exist, run §2–§8 in order and record the exact revision, image ID, host,
-and command output. Until then, this remains a ready-to-run package, not a
-deployment.
+For a new installation, run §2–§8 in order once the inputs above exist and record the
+exact revision, image ID, host, and command output. The deployed preview's substitutions
+and its partial browser/limit coverage are recorded in Issue #11 and §10.
