@@ -2112,3 +2112,18 @@ Compose file did not answer "can an authorized tester open the UI over HTTPS?".
   prerequisite (here: HTTPS certificates for the tailnet) as one maintainer action.
 - **Remove when:** the tailnet issues publicly trusted certificates for the node (then the
   private-CA disclosure disappears), or the preview moves to a public hostname with ACME.
+
+## 2026-11-09 — the edge added last bypasses the proxy hardened first
+
+A Cloudflare tunnel route was pointed straight at the application's loopback port. The nginx
+vhost's TLS, redirects, unknown-host rejection and rate limits did not apply to that path, and
+the public hostname answered plaintext HTTP with `200` and no redirect: only the app's own
+limits and `Secure` cookies remained.
+- **Rule:** when an edge route is added or discovered, verify scheme redirect, access policy,
+  rate limits and Host handling on that route itself. A hardened origin proxy does not cover a
+  tunnel that targets the app directly.
+- **Rule:** `Secure` cookies protect the browser session but do not protect bearer tokens from a
+  client that uses `http://`. Require an edge-level HTTPS redirect and test it with a plaintext
+  request, not by reading the configuration.
+- **Remove when:** the Cloudflare route enforces Always Use HTTPS, a scoped Access policy and
+  rate limits, or all traffic is forced through the checked proxy.

@@ -1,26 +1,30 @@
 # Private preview deployment package
 
-**Status:** deployed as a restricted, tailnet-only private preview on 2026-11-08 from
-revision `18e4eb016a72e9ea8e64fdac31f89ba44197b54a` (tree
+**Status:** deployed as a private preview on 2026-11-08 from revision
+`18e4eb016a72e9ea8e64fdac31f89ba44197b54a` (tree
 `08ffdf22b9c561550591759d7b7861d7c973f564`), image
-`sha256:59c12724ad4df701dbfd07c85db8eb9e7066b119ac69cba5deb23c02b631351b`. The live
-URL, tester onboarding, acceptance evidence and remaining actions are recorded in
-Issue #11 and the `preview-evidence-18e4eb0` pre-release. This is not a public beta or
-a production release, and no ChatGPT interoperability is claimed.
+`sha256:59c12724ad4df701dbfd07c85db8eb9e7066b119ac69cba5deb23c02b631351b`. Since
+2026-11-09 the preview is served over public HTTPS at `https://corkboard.<maintainer-domain>`
+through the existing Cloudflare tunnel; the tailnet vhost and private CA remain as a
+fallback. The live URL, tester onboarding, acceptance evidence and remaining actions are
+recorded in Issue #11 and the `preview-evidence-18e4eb0` pre-release. This is not a public
+beta or a production release, and no ChatGPT interoperability is claimed.
 
-**Route used:** the host is a Tailscale node. nginx terminates TLS on the node's
-Tailscale address with a leaf from a locally generated preview root CA, and the
-application origin stays on `127.0.0.1:18787`. The Tailscale account cannot issue
-HTTPS certificates and no public DNS/ACME route exists, so the CA (not a publicly
-trusted certificate) is the trust anchor and testers install it. Enabling HTTPS
-certificates for the tailnet would remove that step. The pre-existing Cloudflare
-tunnel is remotely managed and was not modified.
+**Routes:** the public route terminates TLS at the Cloudflare edge and forwards HTTP to the
+application's loopback origin (`127.0.0.1:18787`). It does not pass through the nginx vhost,
+so the proxy's rate limits, HSTS and unknown-host handling apply only to the tailnet route;
+the application's own limits and 64 KiB cap still apply. The tailnet route uses the private
+CA because the Tailscale account cannot issue HTTPS certificates. The public hostname
+currently answers plaintext HTTP with `200` and no redirect, and no Cloudflare Access policy
+is applied, so it is credential-gated rather than network-restricted; enable Always Use
+HTTPS and a scoped Access policy (bypassing `/api/v1`, `/mcp`, `/oauth`, `/.well-known`)
+before relying on network restriction.
 
 **Runbook:** the procedure below is the operator runbook and was executed as written for
 build, secrets, synthetic data, loopback verification, revocation, restart persistence and
-backup/restore, with the host/TLS substitutions above. The browser smoke was partial and
-the public-DNS/Cloudflare options were not used (see §8 and §10). It was not created by the
-deployment.
+backup/restore, with the route substitutions above. The browser smoke was partial and the
+public-DNS/Access options were not configured by this deployment (see §8 and §10). It was
+not created by the deployment.
 
 **Tracking:** results, review findings, and maintainer blockers are recorded in
 Issue #11, `[Preview] Restricted private-preview deployment — status and blockers`.
@@ -49,8 +53,8 @@ Out of scope and not claimed:
 - multi-process or multi-host operation (SQLite and all in-process state are
   single-process);
 - ChatGPT Web installation/linking or conversation-level tool invocation;
-- a public DNS name or a publicly trusted certificate (the deployed preview uses the
-  host's Tailscale name and a private CA);
+- a TLS listener inside the application (TLS terminates at the Cloudflare edge on the
+  public route and at nginx with the private CA on the tailnet route);
 - a full manual browser smoke (the deployed desktop pass covered login, dashboard, timeline,
   compose page, and denied access; the mobile pass covered login, dashboard, and the timeline.
   Body reveal, en/zh switching, and a UI compose submit were not exercised in either).
@@ -707,9 +711,9 @@ row is not accepted on "it should work".
 | Pinned image recorded | `docker image inspect --format '{{.Id}}' "$CORKBOARD_PREVIEW_IMAGE"` | One `sha256:` ID recorded with the commit/tree; base image digest matches the Dockerfile |
 | Secret file private | `stat -c '%a %u:%g %n'` on the directory and file; `test ! -L` | Directory `700`, file `600`, `1000:1000`, regular file; no production path or value involved |
 | Container hardening | §5 `docker inspect` commands | `user=1000:1000`, `ReadonlyRootfs=true`, `CapDrop=[ALL]`, `no-new-privileges:true`, secrets bind `rw=false` |
-| Loopback only | `ss -ltnp`; probe from a second host | Host listens on `127.0.0.1:<port>` only; `<port>` unreachable externally |
-| TLS | `curl -fsS https://preview.example/healthz`; `openssl s_client -connect preview.example:443 -servername preview.example </dev/null` | Valid chain for the name, TLS 1.2+, HTTP `301` from `:80`, no plaintext service |
-| Proxy limits | Confirm `limit_req`, `limit_conn`, `client_max_body_size 1m` are loaded; send an oversized body | 1 MiB+ request is rejected at the proxy; a >64 KiB JSON request gets the application `413` |
+| Loopback only | `ss -ltnp`; probe the port from a second host | Host listens on `127.0.0.1:<port>` only and the port is not directly reachable externally. The service may still be reachable through an authorized tunnel/edge; that path is checked separately |
+| TLS | `curl -fsS https://<name>/healthz`; `openssl s_client -connect <name>:443 -servername <name> </dev/null` | nginx/tailnet route: valid chain (private CA), TLS 1.2+, HTTP `301` from `:80`, no plaintext. Public edge, if used: the edge certificate verifies; require the edge to redirect or refuse plaintext HTTP (the deployed public route currently returns `200`, see §10) |
+| Proxy limits | Confirm `limit_req`, `limit_conn`, `client_max_body_size 1m` are loaded on the nginx route; send an oversized body | nginx/tailnet route: 1 MiB+ is rejected at the proxy and a >64 KiB JSON request gets the application `413`. A tunnel that targets the app directly bypasses these limits; the edge must supply them |
 | `/healthz` | Preflight or `curl` | `200 {"status":"ok"}` |
 | `/readyz` | Preflight or `curl` | `200 {"status":"ready"}` |
 | Login/session cookies | Preflight `--login` + `--password-file`; manual browser sign-in | The app's exact `SESSION_COOKIE_NAME` (`__Host-...`), not any `__Host-` cookie: `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Domain`; CSRF cookie: `Secure`, `SameSite=Strict`, not `HttpOnly` |
@@ -865,12 +869,17 @@ directory. Rollback must never touch the production stack.
   in the preview secrets file enables the OAuth routes; leave it unset unless the
   tester specifically needs OAuth/MCP linking. Cloudflare Access must be scoped or
   bypassed for those routes.
-- **TLS and reverse-proxy configuration on the deployed preview.** nginx terminates
-  TLS on the host's Tailscale address with a leaf from a locally generated preview
-  root CA; the public-DNS/ACME and Cloudflare Access/Options A–B snippets below were
-  not used, and the pre-existing Cloudflare tunnel was not modified. Testers must
-  install the preview CA, or the tailnet administrator can enable HTTPS certificates
-  for the node to replace it.
+- **TLS and routes on the deployed preview.** The public route terminates TLS at the
+  Cloudflare edge (publicly trusted certificate) and forwards HTTP to the loopback
+  origin. The tailnet route terminates TLS at nginx with a leaf from the locally
+  generated preview CA; tailnet clients must install that CA. The public-DNS/ACME and
+  Cloudflare Access/Options A–B snippets below were not configured by this deployment.
+- **The public route bypasses the nginx vhost.** Cloudflare forwards to
+  `127.0.0.1:18787` directly, so proxy rate limits, HSTS and unknown-host rejection
+  apply only to the tailnet route; the application's own limits and 64 KiB cap remain.
+  The public hostname also answers plaintext HTTP with `200` and no redirect, and no
+  Access policy restricts it: it is credential-gated rather than network-restricted.
+  Enable Always Use HTTPS and a scoped Access policy before relying on the edge.
 - **Loopback plaintext is trusted by name.** The preflight accepts
   `http://localhost` and `http://127.0.0.1`/`::1`. `localhost` is resolved through
   the hosts file or DNS, so a local hosts-file change can point it at another
@@ -892,10 +901,12 @@ directory. Rollback must never touch the production stack.
 
 ## 11. Infrastructure the package cannot produce by itself
 
-For the deployed preview these were supplied as: the host is this Tailscale node; TLS
-trust is the local preview CA (tailnet HTTPS certificates are unavailable); testers are
-tailnet devices; the secrets file and synthetic credentials live on the host. The
-public-DNS and Cloudflare Access options were not used. The list below is what any new
+For the deployed preview these were supplied as: the host is this Tailscale node and the
+public Cloudflare tunnel route; TLS terminates at the Cloudflare edge on the public route
+and at nginx with the local preview CA on the tailnet fallback; testers can be public
+(credential-gated) or tailnet; the secrets file and synthetic credentials live on the
+host. No Cloudflare Access policy or edge rate limit has been applied to the public
+route, and that route currently answers plaintext HTTP. The list below is what any new
 installation still needs from its operator:
 
 - a host (or VM/container host) with Docker Engine and Compose v2.24+;

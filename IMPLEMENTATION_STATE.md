@@ -96,9 +96,10 @@ as the work it describes.
   `scripts/preview-preflight.ts`, `tests/unit/preview-preflight.test.ts`, and the
   `preview-preflight` npm script. No application authorization, crypto, dependency,
   schema, migration, or runtime-server change.
-- **Status:** **nothing was deployed.** No public infrastructure, DNS record,
+- **Status (2026-11-06; superseded by the deployment section at the end of this file):**
+  nothing had been deployed at that time. No public infrastructure, DNS record,
   certificate, real secret, browser pass, TLS pass, backup rehearsal, or ChatGPT
-  interoperability result exists.
+  interoperability result existed.
 - **Blocker:** host, domain/DNS, TLS certificate, authorized tester list, and the
   preview owner/credential files are maintainer-supplied. The package stops at the
   boundary in `docs/preview-deployment.md` §11.
@@ -3671,41 +3672,47 @@ path, crypto, or migration changed after the tested revision.
 | Image | `corkboard:preview` = `sha256:59c12724ad4df701dbfd07c85db8eb9e7066b119ac69cba5deb23c02b631351b` |
 | Compose project | `corkboard-preview`; volume `corkboard-preview-data`; app on `127.0.0.1:18787` only |
 | Secrets | `/srv/corkboard-preview/secrets/corkboard.env` (`0600`, fresh root key + pepper); credentials under `/srv/corkboard-preview/credentials` (`0600`) |
-| TLS | nginx on the host's Tailscale IPv4 address, port 443, leaf for the node's MagicDNS name, issued by the local Corkboard Preview Root CA; tailnet-only |
-| Access | the node's MagicDNS HTTPS origin; synthetic `owner@preview.invalid`; no registration; OAuth routes disabled (`CORKBOARD_PUBLIC_BASE_URL` unset) |
+| TLS | public route: Cloudflare edge certificate, then HTTP to `127.0.0.1:18787`; tailnet route: nginx on the host's Tailscale IPv4 address, port 443, leaf from the local Corkboard Preview Root CA |
+| Access | public HTTPS origin at `https://corkboard.<maintainer-domain>` (credential-gated; no Cloudflare Access policy applied); tailnet vhost as fallback; synthetic `owner@preview.invalid`; no registration; OAuth routes disabled (`CORKBOARD_PUBLIC_BASE_URL` unset) |
 
-Acceptance on the live endpoint: preflight 15/15 over HTTPS; a real Chrome desktop pass
-(1440x900) covering login, wrong-password rejection, dashboard, the timeline before/after,
-the compose page, and signed-out project access; mobile Chrome (390x844) covering login,
-dashboard, and the timeline before/after, but not the wrong-password, compose, or signed-out
-pages; credential revocation 200→401 (`revocation-probe.txt`); non-member 404; restart
-persistence with identical `doctor` (`doctor-restart-before/after.json`); backup → verify →
+Acceptance on the live endpoint: public-URL preflight 15/15 (`preflight-public.txt`) with
+the public chain verified by an edge TLS probe (`public-edge-probe.txt`); public-origin
+browser evidence: an address-bar capture of the public URL (`public-00-address-bar.png`)
+and recorded public URLs/statuses, cookie host, and the 390x844 viewport in
+`browser-public.json`, with page-content screenshots `public-01`…`public-09` covering
+desktop login/wrong-password/dashboard/timeline/compose/signed-out and mobile
+login/dashboard/timeline; public HTTPS MCP calls (`mcp-public-https.txt`) with the exact
+body and digest (`mcp-public-body.txt`). Earlier tailnet-path evidence: preflight 15/15,
+credential revocation 200→401 (`revocation-probe.txt`), non-member 404, restart
+persistence with identical `doctor` (`doctor-restart-before/after.json`), backup → verify →
 restore into a fresh directory with a clean restored `doctor` (the backup predates seq 2, so
-the restored copy has one message, not two); container hardening and loopback-only listener
-confirmed. A real Claude Code MCP client over HTTPS called `corkboard_whoami`,
-`list_projects`, `list_messages`, `send_message` (seq 2), `mark_read`, and
-`get_message(include_body=true)` (body text and digest in `mcp-body-read.txt`); the Web UI
-shows the same message and receipt.
+the restored copy has one message, not two), container hardening and loopback-only listener
+confirmed, and unknown SNI/Host closed (`unknown-host-probe.txt`). The Web UI shows the MCP
+message and its read receipt.
 
-A context-isolated deployment audit reproduced the HTTPS/TLS checks, the preflight with
-unchanged counts, `doctor`, the screenshot authenticity and secret review, repo containment,
-and the MCP registration: PASS. It flagged that unknown SNI/Host on `:443` was served by the
-default vhost; default `return 444` servers were added on the Tailscale address for `:80` and
-`:443` and re-verified (`unknown-host-probe.txt`: unknown SNI/Host closed; canonical name
-still 200/301; preflight still 15/15).
+A context-isolated deployment audit reproduced the tailnet HTTPS/TLS checks, the preflight
+with unchanged counts, `doctor`, the screenshot authenticity and secret review, repo
+containment, and the MCP registration: PASS; it also drove the unknown-SNI/Host `return 444`
+fix. That audit predates the public Cloudflare route; the public-route acceptance above is
+recorded in Issue #11 and the evidence pre-release and has not yet had its own independent
+audit.
 
 Evidence: GitHub pre-release `preview-evidence-18e4eb0` (screenshots, raw outputs, MCP
-transcripts, nginx/compose config, the preview root CA certificate (public half)). Deployment
-record and remaining actions: Issue #11; MCP integration status: Issue #12.
+transcripts, nginx/compose config, the preview root CA certificate (public half), and the
+public-edge probe). Deployment record and remaining actions: Issue #11; MCP integration
+status: Issue #12.
 
-Limitations: the Tailscale account cannot issue HTTPS certificates, so the route uses a
-private CA that testers must install; there is no public DNS/ACME host and the remotely managed
-Cloudflare tunnel was not modified. Tailnet-only; ChatGPT untested; single process; no
-destructive `gc-blobs --apply`. The long-running Commander session must be restarted (with
-`CORKBOARD_APIKEY` sourced from `/srv/corkboard-preview/credentials/commander.env`) to load
-the updated MCP registration.
+Limitations: the public hostname is world-reachable and credential-gated rather than
+network-restricted; it answers plaintext HTTP with `200` and no redirect, and the Cloudflare
+tunnel forwards straight to the app, so nginx rate limits/HSTS/unknown-host handling apply
+only to the tailnet route. Enable Always Use HTTPS and a scoped Access policy before relying
+on the edge. Tailnet clients still need the private CA. ChatGPT untested; single process; no
+destructive `gc-blobs --apply`; the long-running Commander session must reconnect/restart
+(with `CORKBOARD_APIKEY` sourced from `/srv/corkboard-preview/credentials/commander.env`) to
+load the loopback MCP registration.
 
 Rollback: `docker compose -f compose.yaml -f compose.preview.yaml --project-name corkboard-preview down`
-stops without deleting data; restore a verified backup into a new directory and start a second
+stops without deleting data; remove the Cloudflare tunnel route (remote ingress) and the nginx
+vhost separately; restore a verified backup into a new directory and start a second
 container on it; remove the preview volume only with its `corkboard.preview=true` label check.
 No production stack, volume, secrets path, or certificate was touched.
