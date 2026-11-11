@@ -3757,3 +3757,30 @@ binary built with reference-before-write and the pre-delete re-read; the deploye
 (`18e4eb0`) is pre-fix and stays offline-only for `--apply` until redeployed. Issue #21 is
 closed by this checkpoint; remote/R2 GC and row GC remain out of scope, and local deletion is
 still non-transactional and not fsynced.
+
+## Durable agent inbox (2026-11-11) — issue #16
+
+Adds the client-side durable delivery spool authorized by #16: `docs/agent-inbox.md`
+(contract), `src/inbox/` (spool, bridge, index) and `scripts/inbox.ts` (run/list/ack/prune).
+The version-1 event carries `project_id`, `seq`, `message_id`, server-authenticated sender
+attribution, body state and a redacted summary; message plaintext is written only with
+`--plaintext` into a private spool and is never printed. A receipt and cursor advance only
+after the event is durably queued (fsync + atomic rename); the receipt explicitly means
+fetched/validated/queued, never executed. Dedupe is `(project_id, seq)`, delivery is
+at-least-once, disk usage is bounded with ack-temp accounting and explicit backpressure.
+Spool storage is outside the repository with `0700`/`0600`, `O_NOFOLLOW` and symlink
+rejection; wrong project/speaker, forged IDs/digests, oversized or expired records, revoked
+credentials, corrupt cursors and unknown versions fail closed. `scripts/poll.ts` gains an
+`onExpired` hook that queues `bodyState: "expired"` before the cursor moves, plus the
+`resolveToken` export; existing behavior is unchanged when the hook is unused. No server,
+route, dependency, push or scheduler change.
+
+Tests cover send→queue→crash at each handoff→restart→replay, stale ack temps, temp-write
+crashes, duplicate/out-of-order records, ack monotonicity, consumer registration, wrong
+project/speaker, expired tombstones, corrupt records, backpressure, and secret/plaintext
+absence from diagnostics. Independent security and contract audits returned PASS on
+`3defc922cb3a13e1e633248f93c80f5f4688ac92`; the merged commit was delta-checked and
+`npm run check` passes (827 tests). Issue #16 is closed by this checkpoint; #17 builds the
+supervised follower/fan-out on this contract. Residual: one bridge writer per spool (no
+inter-process lock), metadata-only still needs `receipt.write`, and Windows mode checks are
+skipped (POSIX-only guarantees documented).

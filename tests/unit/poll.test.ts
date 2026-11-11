@@ -658,6 +658,37 @@ test("an oversized body fails closed, including an error body", async () => {
   );
 });
 
+test("onExpired alone implies consumption and reports the definitive expired state", async () => {
+  const path = cursorPath("on-expired-only");
+  const seen: PollMessage[] = [];
+  const { fetchImpl, calls } = fakeFetch((call) => {
+    if (readUrl(call)) return jsonResponse(page([row(1)]));
+    if (bodyUrl(call)) return jsonResponse({ error: { code: "BODY_EXPIRED" } }, 410);
+    if (readMessageUrl(call)) throw new Error("expired bodies must not be acknowledged");
+    throw new Error("unexpected request");
+  });
+
+  const result = await pollPass({
+    ...baseOptions,
+    cursorPath: path,
+    afterSeq: 0,
+    limit: 10,
+    maxPages: 1,
+    fetchImpl,
+    onExpired: (message) => {
+      seen.push(message);
+    },
+  });
+
+  assert.equal(result.processed, 1);
+  assert.equal(result.afterSeq, 1);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.bodyState, "expired");
+  assert.equal(calls.filter(bodyUrl).length, 1);
+  assert.equal(calls.filter(readMessageUrl).length, 0);
+  assert.equal(readCursor(path).after_seq, 1);
+});
+
 test("a body GET 410 BODY_EXPIRED advances without a receipt while other body GET failures do not", async () => {
   const expiredPath = cursorPath("expired");
   const statusLines: string[] = [];

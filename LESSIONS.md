@@ -2148,3 +2148,20 @@ failed the backup safety net.
   reinstating it.
 - **Remove when:** a row GC removes unreachable `body_objects` rows safely, and backup/doctor
   keep message-reachability semantics documented and tested.
+
+## 2026-11-11 — a durable spool must precede the receipt, not follow it
+
+The inbox bridge initially verified a body and queued it, but the receipt/cursor ordering and
+the tombstone path needed auditing as one contract: a list row can say `ready` while the body
+`GET` returns a definitive `410`, and a false ready event either wedges a plaintext spool or
+advances a cursor for content that was never queued. Ack temp files written outside `tmp/` also
+escaped the bounded-usage accounting.
+- **Rule:** define the receipt as "fetched, verified and durably queued", and make every code
+  path (including expiry tombstones) write that durable record before `mark_read` or a cursor
+  move. A consumer's ack is separate from the bridge's receipt.
+- **Rule:** every temporary file a crash can leave must be inside the swept/accounted temp
+  area, or be swept and counted explicitly at startup. "Bounded" includes crash residue.
+- **Rule:** make consumer acks append-only per sequence and read the maximum, so a stale
+  concurrent write cannot regress the watermark.
+- **Remove when:** the service itself owns delivery/ack state (it does not), or a
+  multi-process lock replaces the documented single-writer startup assumption.

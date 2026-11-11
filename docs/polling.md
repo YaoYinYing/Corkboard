@@ -28,7 +28,23 @@ a receipt only after all of the following:
 
 The default CLI is **metadata observation only**. It fetches no bodies, creates no
 receipts, and does not advance the cursor. Consumption requires the explicit
-`--consume` flag; a programmatic `onMessage` callback always implies consumption.
+`--consume` flag; a programmatic `onMessage` or `onExpired` callback always
+implies consumption.
+
+### Programmatic hooks
+
+- `onMessage(message, text)` receives each fetched and verified ready message.
+  Supplying it implies consumption.
+- `onExpired(message)` is called for a definitive `410 BODY_EXPIRED` tombstone
+  **before** the cursor advances. The callback always receives
+  `bodyState: "expired"`, even when the list row still said `ready`, because the
+  definitive 410 is the authority. Supplying it implies consumption. The
+  mark-read expiry race is different: the body was already fetched and verified,
+  so `onMessage` ran and no separate expired callback is emitted.
+- `resolveToken(env, tokenFile)` is exported so adapters can apply exactly the
+  CLI's credential rules: `CORKBOARD_APIKEY` takes precedence, a token file must
+  be a regular non-symlink `0600` file with one non-empty token, and no value is
+  echoed in an error.
 
 ## What the client does
 

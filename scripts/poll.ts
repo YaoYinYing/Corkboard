@@ -78,6 +78,8 @@ export type MessageHandler = (
   body: string,
 ) => void | Promise<void>;
 
+export type ExpiredHandler = (message: PollMessage) => void | Promise<void>;
+
 export interface PollPassOptions extends PollContext {
   baseUrl: string;
   token: string;
@@ -90,6 +92,7 @@ export interface PollPassOptions extends PollContext {
   showSummary?: boolean | undefined;
   consume?: boolean | undefined;
   onMessage?: MessageHandler | undefined;
+  onExpired?: ExpiredHandler | undefined;
 }
 
 export interface PollPassResult {
@@ -109,6 +112,7 @@ export interface RunOptions extends PollContext {
   showSummary?: boolean | undefined;
   consume?: boolean | undefined;
   onMessage?: MessageHandler | undefined;
+  onExpired?: ExpiredHandler | undefined;
   once?: boolean | undefined;
   intervalMs?: number | undefined;
 }
@@ -770,8 +774,13 @@ export async function pollPass(options: PollPassOptions): Promise<PollPassResult
   let pages = 0;
   // A receipt asserts that content was fetched. Without explicit consumption the
   // pass is metadata observation only: no body fetch, no mark_read, no cursor
-  // write. A programmatic callback always implies consumption.
-  const consume = options.consume === true || options.onMessage !== undefined;
+  // write. A programmatic callback always implies consumption; asking for expired
+  // tombstones implies it too, because tombstones are only discovered while
+  // consuming.
+  const consume =
+    options.consume === true ||
+    options.onMessage !== undefined ||
+    options.onExpired !== undefined;
   try {
     if (!consume) {
       if (options.signal?.aborted) {
@@ -841,6 +850,24 @@ export async function pollPass(options: PollPassOptions): Promise<PollPassResult
                 ` sender=${displayText(message.senderId, options.token)}` +
                 ` summary=${displayText(message.summary, options.token)}`,
             );
+          }
+          // A durable tombstone must be queued before the cursor advances past a
+          // message whose body can never be fetched again. The list row may still
+          // say "ready"; the definitive 410 is the authority, so hand the
+          // callback an expired message rather than a false ready row.
+          if (options.onExpired !== undefined) {
+            try {
+              await options.onExpired({ ...message, bodyState: "expired" });
+            } catch {
+              if (options.signal?.aborted) {
+                return { afterSeq: cursor, processed, pages, stopped: true };
+              }
+              throw new PollError(
+                1,
+                "PROCESS_FAILED",
+                `queueing expired seq ${message.seq} failed; cursor unchanged`,
+              );
+            }
           }
           cursor = message.seq;
           state.after_seq = cursor;
@@ -1028,7 +1055,7 @@ function readTokenFile(path: string): string {
   }
 }
 
-function resolveToken(
+export function resolveToken(
   env: Record<string, string | undefined>,
   tokenFile: string | undefined,
 ): string {
