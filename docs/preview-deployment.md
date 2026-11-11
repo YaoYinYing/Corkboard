@@ -15,10 +15,13 @@ application's loopback origin (`127.0.0.1:18787`). It does not pass through the 
 so the proxy's rate limits, HSTS and unknown-host handling apply only to the tailnet route;
 the application's own limits and 64 KiB cap still apply. The tailnet route uses the private
 CA because the Tailscale account cannot issue HTTPS certificates. The public hostname
-currently answers plaintext HTTP with `200` and no redirect, and no Cloudflare Access policy
-is applied, so it is credential-gated rather than network-restricted; enable Always Use
-HTTPS and a scoped Access policy (bypassing `/api/v1`, `/mcp`, `/oauth`, `/.well-known`)
-before relying on network restriction.
+answers plaintext HTTP with `200` and no redirect (Chrome upgrades explicit `http://`
+navigations client-side, so the downgrade is invisible in a browser; `curl` and other
+clients are not protected), the edge sends `strict-transport-security: max-age=0`, and no
+Cloudflare Access policy is applied, so it is credential-gated rather than
+network-restricted; enable Always Use HTTPS, HSTS with a positive `max-age`, and a scoped
+Access policy (bypassing `/api/v1`, `/mcp`, `/oauth`, `/.well-known`) before relying on
+network restriction.
 
 **Runbook:** the procedure below is the operator runbook and was executed as written for
 build, secrets, synthetic data, loopback verification, revocation, restart persistence and
@@ -877,9 +880,12 @@ directory. Rollback must never touch the production stack.
 - **The public route bypasses the nginx vhost.** Cloudflare forwards to
   `127.0.0.1:18787` directly, so proxy rate limits, HSTS and unknown-host rejection
   apply only to the tailnet route; the application's own limits and 64 KiB cap remain.
-  The public hostname also answers plaintext HTTP with `200` and no redirect, and no
-  Access policy restricts it: it is credential-gated rather than network-restricted.
-  Enable Always Use HTTPS and a scoped Access policy before relying on the edge.
+  The public hostname also answers plaintext HTTP with `200` and no redirect to clients
+  that do not upgrade (Chrome upgrades explicit `http://` navigations client-side with a
+  non-authoritative internal `307`), the edge sends `strict-transport-security:
+  max-age=0`, and no Access policy restricts it: it is credential-gated rather than
+  network-restricted. Enable Always Use HTTPS, HSTS with a positive `max-age`, and a
+  scoped Access policy before relying on the edge.
 - **Loopback plaintext is trusted by name.** The preflight accepts
   `http://localhost` and `http://127.0.0.1`/`::1`. `localhost` is resolved through
   the hosts file or DNS, so a local hosts-file change can point it at another
@@ -906,7 +912,8 @@ public Cloudflare tunnel route; TLS terminates at the Cloudflare edge on the pub
 and at nginx with the local preview CA on the tailnet fallback; testers can be public
 (credential-gated) or tailnet; the secrets file and synthetic credentials live on the
 host. No Cloudflare Access policy or edge rate limit has been applied to the public
-route, and that route currently answers plaintext HTTP. The list below is what any new
+route, and that route currently answers plaintext HTTP to clients that do not upgrade
+(Chrome upgrades explicit `http://` navigations client-side). The list below is what any new
 installation still needs from its operator:
 
 - a host (or VM/container host) with Docker Engine and Compose v2.24+;

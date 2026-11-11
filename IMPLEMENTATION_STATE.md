@@ -3703,10 +3703,13 @@ public-edge probe). Deployment record and remaining actions: Issue #11; MCP inte
 status: Issue #12.
 
 Limitations: the public hostname is world-reachable and credential-gated rather than
-network-restricted; it answers plaintext HTTP with `200` and no redirect, and the Cloudflare
-tunnel forwards straight to the app, so nginx rate limits/HSTS/unknown-host handling apply
-only to the tailnet route. Enable Always Use HTTPS and a scoped Access policy before relying
-on the edge. Tailnet clients still need the private CA. ChatGPT untested; single process; no
+network-restricted; it answers plaintext HTTP with `200` and no redirect to clients that do
+not upgrade (Chrome upgrades explicit `http://` navigations client-side with a
+non-authoritative internal `307`; the edge sends `strict-transport-security: max-age=0`),
+and the Cloudflare tunnel forwards straight to the app, so nginx rate limits/HSTS/unknown-host
+handling apply only to the tailnet route. Enable Always Use HTTPS, HSTS with a positive
+`max-age`, and a scoped Access policy before relying on the edge. Tailnet clients still need
+the private CA. ChatGPT untested; single process; no
 destructive `gc-blobs --apply`; the long-running Commander session must reconnect/restart
 (with `CORKBOARD_APIKEY` sourced from `/srv/corkboard-preview/credentials/commander.env`) to
 load the loopback MCP registration.
