@@ -968,7 +968,8 @@ membership editor and credential issuance described above). Project create/edit 
 implemented only as the HTML dashboard routes above; there is no `/api/v1` create/edit
 endpoint. Also
 deferred: the ChatGPT Web plugin installation/linking experience,
-attachments, a separate audited hard-delete/admin cleanup path (body expiry retains
+attachments (see [`attachments-proposal.md`](./attachments-proposal.md); analysis only,
+blocked on Issue #5), a separate audited hard-delete/admin cleanup path (body expiry retains
 metadata), account registration/invite provisioning, email verification, password
 reset, and the remaining dashboard write/admin actions. Human sign-in/session
 read/sign-out is implemented as described above; the dashboard (login, project list,

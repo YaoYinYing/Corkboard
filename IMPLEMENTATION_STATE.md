@@ -3721,3 +3721,20 @@ stops without deleting data; remove the Cloudflare tunnel route (remote ingress)
 vhost separately; restore a verified backup into a new directory and start a second
 container on it; remove the preview volume only with its `corkboard.preview=true` label check.
 No production stack, volume, secrets path, or certificate was touched.
+
+## Attachments analysis (2026-11-11) — decision-gated proposal
+
+Issue #22 authorizes only a non-mutating analysis until Issue #5 chooses the
+binding/AAD/lifecycle design. `docs/attachments-proposal.md` compares Candidate A
+(two-phase pending upload, recommended but not chosen) with Candidate B (bounded
+multipart), fixes proposed limits (10 MiB per file, 4 files, 40 MiB aggregate, PNG/JPEG
+first class), previews-off download-only serving, a new `v2` attachment AAD that omits
+`message_id` (explicitly flagged as an AGENTS.md exception requiring #5 approval), lease
+and abandoned-upload cleanup, project/speaker authorization at every phase, idempotency,
+backup/restore expectations, and 23 adversarial contract vectors. `docs/api.md` now links
+to it as analysis only. No route, schema, crypto branch, test, or runtime behavior was
+added; destructive cleanup remains blocked on #5 and the #21 safety invariant. The
+proposal was independently reviewed against the envelope/blob/GC/backup code: PASS with
+non-blocking corrections applied (memory estimate, route prefixes, operator-scan wording,
+same-uploader vector). `npm run check` exit 0 (800 tests: 800 pass, 0 fail, 0 skipped).
+Issue #22 stays open pending #5.
