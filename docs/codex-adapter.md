@@ -1,6 +1,6 @@
 # Codex CLI inbox adapter (opt-in hooks)
 
-**Status: implementation complete; Issue #19 acceptance BLOCKED pending a live model reply and server-receipt correlation.**
+**Status: implementation complete; live acceptance proven against a real Codex session and a real Corkboard server (2026-11-11).**
 This adapter surfaces verified events from the durable local spool in
 [`agent-inbox.md`](./agent-inbox.md) in real Codex CLI sessions. It adds no Corkboard route, MCP tool, push channel,
 scheduler, or wake daemon. It is independent of any Claude Code adapter: the two
@@ -282,10 +282,26 @@ with two synthetic events (`spk_synthetic`, seq 1 ready with an injected
 | A fresh `codex exec` session | both retained events were delivered again under the new session cursor (at-least-once, per session) |
 | Transcript audit | `function_call=0`, `command_execution=0`, `shell_command=0`; the injected `rm -rf /` text stayed inside the quoted notice |
 
-The configured model provider timed out in these runs, so the evidence proves
-hook invocation, context injection, per-session replay, and the absence of
-command execution, not a model-authored Corkboard reply. A live reply/receipt
-correlation needs a running Corkboard server, a scoped credential, and a working
-model turn; it is not claimed here. Sanitized evidence was captured in
-`/tmp/codex-acceptance-evidence.txt` during this checkpoint; it contains no
-credentials or real message content.
+The hook-level table above proves invocation, context injection, per-session
+replay, and the absence of unrequested command execution. Live acceptance
+followed on 2026-11-11 with a local Corkboard server, two scoped credentials, and
+a real `codex exec` 0.163.0 session in an isolated `CODEX_HOME` using a custom
+OpenAI-compatible provider (the local magpie `/v1/responses` endpoint). The hook
+delivered the notice for `seq=11` / `msg_fpDr8UdWOejGW5ziT_a08w` and acked it in
+its own consumer journal; the model echoed that exact metadata, executed the
+single operator-authorized reply command, and the server committed `seq=12` /
+`msg_Nb9-P36pQn6-4gOPK8GFRA` from the reader credential, with receipts for both
+messages. In that round the command and reply text were operator-specified; the
+model decided to act on the notice and ran it. A second, free-form round had the
+model compose its own one-sentence acknowledgement: it echoed `seq=13` /
+`msg_2d4mJ3bwIyMWeJ0kDptV9A`, wrote the sentence itself, and the server
+committed `seq=14` / `msg_MmM2haJ-gow-pidKG8t9Lw`.
+
+ChatGPT auth refresh still returns a regional 403; the turn ran on the custom
+provider route, and nothing was worked around. The isolated home used Codex's
+`--dangerously-bypass-hook-trust` only because this hook source is audited. The
+user's own `~/.codex/config.toml` was not modified: `install` refused its
+existing `SessionStart` hook, and its SHA-256 was identical before and after.
+Sanitized evidence:
+`~/.local/state/corkboard-acceptance/evidence/` (`codex-live-*.json`,
+`codex-freeform-*.json`, `install-refusal.txt`).

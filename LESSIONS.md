@@ -2233,3 +2233,17 @@ above nothing, and a later event queued below it would never be delivered to tha
   consumer that is still registered; a refusal is safer than a speculative advance.
 - **Remove when:** the spool exposes a single atomic "acknowledge target with gap check"
   operation and both the CLI and adapters use it.
+
+## 2026-11-11 — an auth-mode failure is not a missing model provider
+
+Codex's ChatGPT token refresh failed with a regional 403, and the first conclusion was that
+no live Codex turn was possible. The local model gateway turned out to expose an
+OpenAI-compatible Responses endpoint; a custom `model_provider` in an isolated `CODEX_HOME`
+produced a real turn without touching the user's agent config or bypassing the region rule.
+- **Rule:** diagnose auth mode separately from model availability. Probe the gateway's API
+  surface (`/v1/models`, `/v1/responses`) before declaring a provider impossible.
+- **Rule:** run third-party-agent acceptance in an isolated config/home directory when the
+  user's own config has conflicting hooks; never rewrite their agent config for a test.
+- **Rule:** a trust-bypass flag may be used only for a hook source that was itself audited,
+  and the evidence should say so.
+- **Remove when:** the agent runtime offers a first-class test profile with scoped hooks.

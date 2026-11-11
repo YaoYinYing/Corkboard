@@ -3874,10 +3874,20 @@ config as a nonzero error instead of "not installed".
 Evidence: guarded real Codex test accepted the generated config each run (`hooks/list`:
 `handlerType=command`, `async=false`, `timeoutSec=10`, `additionalContextLimit=0`,
 `trustStatus=untrusted`) and a synthetic-sender session transcript showed both events with
-zero `function_call`/`command_execution`/`shell_command`. **Not proven:** a live Codex
-model-authored reply and server-receipt correlation — `codex exec` timed out
-(exit 124; no model provider in this environment), recorded in the sanitized evidence. **Issue #19 remains open**; #20 tracks
-the full Claude/Codex acceptance. Independent security PASS and contract PASS on candidate
+zero `function_call`/`command_execution`/`shell_command`. Live acceptance followed on
+2026-11-11: a real `codex exec` 0.163.0 session in an isolated `CODEX_HOME` with a custom
+OpenAI-compatible provider (the local magpie `/v1/responses` endpoint) received the hook
+notice for `seq=11` / `msg_fpDr8UdWOejGW5ziT_a08w`, acked it in its own consumer journal,
+echoed the exact notice metadata (`NOTICE seq=11 id=msg_fpDr8UdWOejGW5ziT_a08w`), executed
+the single operator-authorized reply command (`send.ts`, with operator-specified text), and
+the server committed `seq=12` / `msg_Nb9-P36pQn6-4gOPK8GFRA` from the reader credential,
+with receipts for both messages. A second, free-form round had the model compose its own
+one-sentence acknowledgement: it echoed `seq=13` / `msg_2d4mJ3bwIyMWeJ0kDptV9A`, wrote the
+sentence itself, and the server committed `seq=14` / `msg_MmM2haJ-gow-pidKG8t9Lw`. The user's own `~/.codex/config.toml` was not
+modified: `install` correctly refused its existing `SessionStart` hook, the isolated home
+used only `--dangerously-bypass-hook-trust` for the audited hook source, and ChatGPT token
+refresh still returns the regional 403 while the custom provider route serves the turn.
+**Issue #19 acceptance is met.** Independent security PASS and contract PASS on candidate
 tree `b8ef904`, plus a final delta review after the quote-run and Plane-14 fixes. Debt (P3):
 the config editor is line-oriented and fails closed on surfaces it does not parse (a line
 identical to the managed begin prefix and a second managed block fail closed; a copied
@@ -3898,3 +3908,26 @@ absent-target refusal, and `docs/agent-inbox.md` documents the behavior. Indepen
 security PASS and contract PASS on the candidate; the security review's P2 (a seed written
 before the target was confirmed) was fixed with the existence gate. Debt (P3): non-
 `OUT_OF_ORDER` seed errors propagate by construction but are not fault-injected in a test.
+
+## Real two-agent acceptance (2026-11-11) — issues #18, #19, #20
+
+A local Corkboard server on `127.0.0.1:18789` (real SQLite and crypto), one project, two
+speakers and separate send vs read/receipt credentials. Verified:
+
+- Claude Code: a real installed 2.1.310 session received the `SessionStart` notice for
+  `seq=1`/`msg_Cm4NqQwFR_0DWvDKBjr3iA`, replied `seq=2`/`msg_1zBOrlWmm8N6ilyaNMLlbw`, and
+  receipts agree. The Stop `asyncRewake` monitor delivered notices while the session was
+  idle and the model answered with the notice's seq. Two real sessions then exchanged
+  `seq=4` -> `seq=5`: the reader was woken by the `seq=4` notice and the sender by the
+  `seq=5` reply notice.
+- Codex: see the #19 section above — hook delivery, exact notice metadata, a live
+  model-authored reply, and server-receipt correlation.
+- Fault injection: three real `SIGKILL`s of the supervised follower 0.1/0.4/0.8 s after a
+  post; each restart reclaimed the stale lock and caught up, with exactly one durable event
+  per seq and one receipt per message from the reading speaker (seq 6 and 7 also carry the
+  sender's own read receipt from its separate follower).
+
+Sanitized evidence lives outside the repo at
+`~/.local/state/corkboard-acceptance/evidence/`. The issues close on this evidence; #23's
+live-turn blocker was unblocked for the test through the local OpenAI-compatible provider,
+while the regional 403 on ChatGPT auth remains and was not worked around.
