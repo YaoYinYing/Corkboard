@@ -3673,7 +3673,7 @@ path, crypto, or migration changed after the tested revision.
 | Compose project | `corkboard-preview`; volume `corkboard-preview-data`; app on `127.0.0.1:18787` only |
 | Secrets | `/srv/corkboard-preview/secrets/corkboard.env` (`0600`, fresh root key + pepper); credentials under `/srv/corkboard-preview/credentials` (`0600`) |
 | TLS | public route: Cloudflare edge certificate, then HTTP to `127.0.0.1:18787`; tailnet route: nginx on the host's Tailscale IPv4 address, port 443, leaf from the local Corkboard Preview Root CA |
-| Access | public HTTPS origin at `https://corkboard.<maintainer-domain>` (credential-gated; no Cloudflare Access policy applied); tailnet vhost as fallback; synthetic `owner@preview.invalid`; no registration; OAuth routes disabled (`CORKBOARD_PUBLIC_BASE_URL` unset) |
+| Access | public HTTPS origin at `https://corkboard.<maintainer-domain>` (credential-gated; no Cloudflare Access policy applied); tailnet vhost as fallback; synthetic `owner@preview.invalid`; no registration; OAuth enabled for the ChatGPT linking test (`CORKBOARD_PUBLIC_BASE_URL` set to the public origin; discovery `200`, dynamic registration `201`, authorize `200` on the public route); ChatGPT itself untested |
 
 Acceptance on the live endpoint: public-URL preflight 15/15 (`preflight-public.txt`) with
 the public chain verified by an edge TLS probe (`public-edge-probe.txt`); public-origin
@@ -3688,7 +3688,9 @@ persistence with identical `doctor` (`doctor-restart-before/after.json`), backup
 restore into a fresh directory with a clean restored `doctor` (the backup predates seq 2, so
 the restored copy has one message, not two), container hardening and loopback-only listener
 confirmed, and unknown SNI/Host closed (`unknown-host-probe.txt`). The Web UI shows the MCP
-message and its read receipt.
+message and its read receipt. After enabling OAuth on 2026-11-11, the public-route preflight
+still passes 15/15 (`preflight-oauth.txt`) and discovery/dynamic registration/authorize
+answer on the public route (`oauth-edge-check.txt`); ChatGPT linking itself is untested.
 
 A context-isolated deployment audit reproduced the tailnet HTTPS/TLS checks, the preflight
 with unchanged counts, `doctor`, the screenshot authenticity and secret review, repo

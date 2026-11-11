@@ -867,11 +867,13 @@ directory. Rollback must never touch the production stack.
   execute or verify them.
 - **No account registration, email verification, or password reset.** Accounts are
   created only by the operator CLI. OAuth dynamic client registration is not
-  account registration and is disabled while `CORKBOARD_PUBLIC_BASE_URL` is unset.
+  account registration.
 - **OAuth/MCP are opt-in.** Setting `CORKBOARD_PUBLIC_BASE_URL=https://preview.example`
   in the preview secrets file enables the OAuth routes; leave it unset unless the
-  tester specifically needs OAuth/MCP linking. Cloudflare Access must be scoped or
-  bypassed for those routes.
+  tester specifically needs OAuth/MCP linking. The deployed preview sets it to the
+  public origin for the ChatGPT linking test, so OAuth discovery, dynamic
+  registration and the authorize page answer on the public route; remove the line and
+  restart to disable. Cloudflare Access must be scoped or bypassed for those routes.
 - **TLS and routes on the deployed preview.** The public route terminates TLS at the
   Cloudflare edge (publicly trusted certificate) and forwards HTTP to the loopback
   origin. The tailnet route terminates TLS at nginx with a leaf from the locally
