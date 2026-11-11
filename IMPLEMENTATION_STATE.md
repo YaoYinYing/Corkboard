@@ -3820,5 +3820,30 @@ Correction (2026-11-11): commit `75d2aa4` was pushed on a check run that recorde
 **1 failure** — the integration test "a SIGKILL leaves a recoverable stale lock and the next
 run continues" exceeded its 5 s `waitFor` deadline under full-suite load — although the
 commit message stated 865 pass. The test passes in isolation. A follow-up commit raises the
-integration `waitFor` default to 20 s (failure-only delay) and records the clean rerun. No
-product code changed in the correction.
+integration `waitFor` default to 60 s and surfaces an early child exit with stderr, a
+failure-only delay, then records the clean rerun. No product code changed in the correction.
+
+## Claude Code inbox adapter (2026-11-11) — issue #18 (capability; acceptance open)
+
+Adds `docs/claude-code-adapter.md` and `scripts/claude-code-adapter.ts` plus tests: opt-in
+install/uninstall/status scoped to a spool/project/credential; runtime version detection
+selects `SessionStart` + an always-installed `UserPromptSubmit` fallback and a bounded Stop
+`asyncRewake` monitor (60 s default, 120 s cap). Notices carry only durable event metadata
+(seq, message id, sender id, body state, queued time, pending count) — never the body or
+summary — and are escaped, size-bounded and credential-redacted; a notification cannot
+authorize side effects, broaden permissions, or execute anything. Settings merge preserves
+permissions and foreign hooks; install fails closed without a credential-bound `cursor.json`
+unless `--allow-unbound`. Durable per-consumer `notified_seq`, a PID/boot/start monitor lock,
+and SessionStart recovery provide at-least-once behaviour without duplicate spam.
+
+Evidence: one-shot `claude -p` 2.1.310 (not the Commander) accepted the generated hooks and
+replied `SEEN` to a metadata-only notice, with `notified_seq` persisted. **Not proven:** the
+real interactive Commander receiving the notice, a server-side synthetic sender from another
+identity, Commander choosing to read/reply, and server IDs/receipts agreeing; no sanitized
+screenshots of that flow exist. The documented procedure covers the gap and does not restart
+the active campaign. Independent security PASS (`2146d502`) and contract PASS for the
+implementable bullets (`48f328c`); `npm run check` passes. **Issue #18 remains open** until
+the real-session acceptance exists; #20 targets that exchange. Debt (P3): the `asyncRewake`
+field is an internal, version-gated harness detail; notice-write/duplicate races are
+at-least-once by design; abandoned per-session consumers pin spool pruning (documented);
+`install` is POSIX-only.

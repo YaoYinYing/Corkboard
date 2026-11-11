@@ -225,15 +225,26 @@ function startInbox(args: string[], env: Record<string, string> = {}): ChildRun 
   return { child, done };
 }
 
-// Child-process startup and lock creation can exceed 5s under the full-suite
-// load; a longer deadline only delays a genuine failure, so keep it generous.
-async function waitFor(condition: () => boolean, timeoutMs = 20_000): Promise<void> {
+// Child-process startup and lock creation can exceed the deadline under the
+// full-suite load; a longer deadline only delays a genuine failure, so keep it
+// generous and surface an early child exit instead of timing out blindly.
+async function waitFor(condition: () => boolean, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (condition()) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("condition was not met before the deadline");
+}
+
+async function waitForLive(child: ChildRun, dir: string): Promise<void> {
+  await waitFor(() => liveSupervisor(dir) || child.child.exitCode !== null);
+  if (child.child.exitCode !== null) {
+    const early = await child.done;
+    assert.fail(
+      `supervisor exited before becoming live (status ${early.status}, signal ${early.signal}): ${early.stderr.slice(0, 500)}`,
+    );
+  }
 }
 
 function liveSupervisor(dir: string): boolean {
@@ -566,7 +577,7 @@ test("a SIGKILL leaves a recoverable stale lock and the next run continues", asy
     ],
     { CORKBOARD_INBOX_CONSUMERS: "consumer-a" },
   );
-  await waitFor(() => liveSupervisor(dir));
+  await waitForLive(child, dir);
   const pid = child.child.pid;
   assert.ok(pid !== undefined);
   process.kill(pid, "SIGKILL");
@@ -619,7 +630,7 @@ test("stop terminates only the follower, after durable state, and redacts output
     "--interval-ms",
     "60000",
   ]);
-  await waitFor(() => liveSupervisor(dir));
+  await waitForLive(child, dir);
   await new Promise((resolve) => setTimeout(resolve, 200));
   if (!liveSupervisor(dir)) {
     const early = await child.done;

@@ -299,6 +299,11 @@ The supervision contract (one poller per cursor, session fan-out, recoverable
 locks, degraded/backpressure behavior, at-least-once framing, and the systemd
 unit) is in [`inbox-service.md`](./inbox-service.md).
 
+To let an installed Claude Code session notice queued events without human
+polling, opt in per spool with the host adapter in
+[`claude-code-adapter.md`](./claude-code-adapter.md). It reads this local spool
+only; it does not add a poller, receipt, or server capability.
+
 The credential is read from `CORKBOARD_APIKEY` or a `0600` `--token-file`,
 never from a positional argument. `run` reuses the poller's base-URL, credential,
 deadline, 1 MiB response cap, and scope checks. `list` prints only seq,

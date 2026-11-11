@@ -2184,3 +2184,21 @@ reclaim, and quarantine instead of unlink on conflict.
 - **Remove when:** the host provides a kernel advisory lock held for the process lifetime
   (documented as the upgrade path); the guard's residual missing/corrupt-owner window is the
   reason to prefer it.
+
+## 2026-11-11 — a notification is a power boundary, even when it looks like metadata
+
+The Claude Code adapter first included a redacted peer summary in its notice. The harness
+renders a Stop-hook exit-2 message as a system-reminder, so hostile text could ride a
+model-visible reminder, and the escaping missed Unicode line/paragraph separators and bidi
+controls. The adapter also advanced its notified watermark before stdout succeeded, so a
+failed write lost the notice.
+- **Rule:** a notification from untrusted peers carries stable IDs and source metadata only.
+  Do not copy peer text into any model-visible channel unless it is fully escaped and
+  explicitly labelled untrusted; dropping it is safer than escaping it badly.
+- **Rule:** advance a delivery watermark only after the output write succeeds; a crash before
+  the write duplicates (acceptable), after it defers, and the durable event is never lost.
+- **Rule:** treat harness integration points (`asyncRewake`, additionalContext roles) as
+  version-gated, unsupported internals: always install a bounded fallback and document the
+  exact runtime that was exercised.
+- **Remove when:** the harness exposes a typed, documented notification channel with an
+  explicit untrusted-content role, and its version contract is stable.
