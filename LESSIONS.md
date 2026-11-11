@@ -2221,3 +2221,15 @@ content under, and writes the complete text before fsync and rename.
 - **Rule:** escape by Unicode property, not by an ad-hoc list: Cc, Cf, Zl, Zp, and
   Default_Ignorable include reserved planes, astral tag characters, and variation selectors.
 - **Remove when:** the runtime exposes a typed config API instead of a text file.
+
+## 2026-11-11 — a recovery command must not write before it has something to recover
+
+An operator acknowledgement seeded the watermark below a pruned prefix before checking that
+the target event existed. A mistyped or not-yet-fetched seq then left a durable watermark
+above nothing, and a later event queued below it would never be delivered to that consumer.
+- **Rule:** a repair or recovery path gets the same fail-closed ordering as the automated
+  path: confirm the object you are advancing to exists before writing any watermark.
+- **Rule:** an operator escape hatch must not be able to break at-least-once delivery for a
+  consumer that is still registered; a refusal is safer than a speculative advance.
+- **Remove when:** the spool exposes a single atomic "acknowledge target with gap check"
+  operation and both the CLI and adapters use it.

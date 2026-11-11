@@ -46,6 +46,7 @@ import {
   readSupervisorStatus,
   registeredConsumers,
   runSupervisor,
+  seedConsumerAck,
   spoolUsage,
   type InboxSpool,
   type SupervisorLockInspection,
@@ -472,6 +473,21 @@ export async function main(
       }
       const seq = integer(values.seq, "seq", 1, Number.MAX_SAFE_INTEGER, 0);
       const spool = openSpool(spoolDir);
+      // A consumer registered after another consumer's events were pruned
+      // starts below an absent prefix. Seed that gap only when the target
+      // event exists: seeding for an absent target could hide a later event
+      // that is enqueued below the new watermark. seedConsumerAck refuses to
+      // skip a retained event, so in-order acknowledgement is preserved.
+      if (
+        seq > acknowledgedSeq(spool, consumerId) + 1 &&
+        listEvents(spool).some((event) => event.seq === seq)
+      ) {
+        try {
+          seedConsumerAck(spool, consumerId, seq - 1);
+        } catch (error) {
+          if (!(error instanceof InboxError) || error.code !== "INBOX_OUT_OF_ORDER") throw error;
+        }
+      }
       const ack = ackEvent(spool, consumerId, seq);
       out(`acknowledged consumer=${display(ack.consumer_id)} acked_seq=${ack.acked_seq}`);
       return 0;

@@ -3885,3 +3885,16 @@ begin/end block is treated as the adapter's own and replaced or removed); PID-re
 needs Linux `/proc`;
 quarantine/temp lock files are never swept; a concurrent Codex trust-state write can be
 lost by read-modify-rename; hook stdout/stderr writes ignore partial writes.
+
+## Operator acknowledgement recovery (2026-11-11) — issue #16 follow-up
+
+Real acceptance exposed that `scripts/inbox.ts ack` refused a consumer registered after its
+prefix had been pruned (the adapter path already used `seedConsumerAck`), so an abandoned
+session could pin spool pruning indefinitely. The CLI now seeds an absent prefix before
+acknowledging, but only when the target event exists, and `seedConsumerAck` still refuses to
+skip a retained event, so in-order acknowledgement and at-least-once delivery are preserved.
+A new integration test spawns the real CLI for both the seeded-prefix success and the
+absent-target refusal, and `docs/agent-inbox.md` documents the behavior. Independent
+security PASS and contract PASS on the candidate; the security review's P2 (a seed written
+before the target was confirmed) was fixed with the existence gate. Debt (P3): non-
+`OUT_OF_ORDER` seed errors propagate by construction but are not fault-injected in a test.

@@ -291,7 +291,9 @@ node scripts/inbox.ts run \
 # Metadata list for a consumer (never prints bodies).
 node scripts/inbox.ts list --spool-dir <spool> --consumer claude-session
 
-# Acknowledge the next contiguous event.
+# Acknowledge the next contiguous event. If the consumer was registered after
+# earlier events were pruned, the CLI seeds that absent prefix first; it still
+# refuses to skip a retained event.
 node scripts/inbox.ts ack --spool-dir <spool> --consumer claude-session --seq 42
 
 # Remove events acknowledged by every registered consumer.
