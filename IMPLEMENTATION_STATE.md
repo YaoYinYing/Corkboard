@@ -3815,3 +3815,10 @@ lock-loss retries, `stop --force` does not re-validate a live record under the g
 `.quarantine-*` growth is operator-managed, and a fresh corrupt guard makes `--force` wait
 for its 30 s age. #18/#19 now add host adapters over this service; #20 proves the real
 two-agent exchange.
+
+Correction (2026-11-11): commit `75d2aa4` was pushed on a check run that recorded
+**1 failure** — the integration test "a SIGKILL leaves a recoverable stale lock and the next
+run continues" exceeded its 5 s `waitFor` deadline under full-suite load — although the
+commit message stated 865 pass. The test passes in isolation. A follow-up commit raises the
+integration `waitFor` default to 20 s (failure-only delay) and records the clean rerun. No
+product code changed in the correction.

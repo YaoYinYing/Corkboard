@@ -225,7 +225,9 @@ function startInbox(args: string[], env: Record<string, string> = {}): ChildRun 
   return { child, done };
 }
 
-async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+// Child-process startup and lock creation can exceed 5s under the full-suite
+// load; a longer deadline only delays a genuine failure, so keep it generous.
+async function waitFor(condition: () => boolean, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (condition()) return;
