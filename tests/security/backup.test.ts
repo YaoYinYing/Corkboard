@@ -68,8 +68,21 @@ async function makeBackup(t: { after(fn: () => void): void }): Promise<Fixture> 
       ["proj_1", "acct_1", "Ops", NOW],
     );
     await db.run(
+      "INSERT INTO speakers (id, owner_account_id, display_name, status, created_at) VALUES (?, ?, ?, 'active', ?)",
+      ["spk_1", "acct_1", "Speaker", NOW],
+    );
+    await db.run(
       "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?, ?, ?, 'ready', ?)",
       ["body_1", "proj_1", REFERENCED_ZERO, NOW],
+    );
+    // A blob is required only when a message reaches it. The committed message
+    // also proves the cross-check still rejects a genuinely missing body.
+    await db.run(
+      `INSERT INTO messages
+         (id, project_id, seq, sender_speaker_id, summary, type, language,
+          received_at, committed_at, body_state, body_object_id)
+       VALUES (?, ?, 1, ?, ?, 'request', 'en', ?, ?, 'ready', ?)`,
+      ["msg_1", "proj_1", "spk_1", "summary", NOW, NOW, "body_1"],
     );
     // Enough rows to make page 3 a corruptible b-tree page in the snapshot.
     for (let index = 0; index < 300; index += 1) {
@@ -455,6 +468,13 @@ test("restore re-checks referenced blobs against staged bytes and cleans staging
             db.prepare(
               "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?, 'proj_1', ?, 'ready', ?)",
             ).run("body_staged_missing", "absentBlobKey_123456", NOW);
+            // Reachable from a message, so restore must require it.
+            db.prepare(
+              `INSERT INTO messages
+                 (id, project_id, seq, sender_speaker_id, summary, type, language,
+                  received_at, committed_at, body_state, body_object_id)
+               VALUES (?, 'proj_1', 2, 'spk_1', ?, 'request', 'en', ?, ?, 'ready', ?)`,
+            ).run("msg_staged_missing", "summary", NOW, NOW, "body_staged_missing");
           } finally {
             db.close();
           }
@@ -515,8 +535,19 @@ test("backup refuses a schema newer than bundled and a missing referenced blob",
     ["proj_1", "acct_1", "Ops", NOW],
   );
   await missingDb.run(
+    "INSERT INTO speakers (id, owner_account_id, display_name, status, created_at) VALUES (?, ?, ?, 'active', ?)",
+    ["spk_1", "acct_1", "Speaker", NOW],
+  );
+  await missingDb.run(
     "INSERT INTO body_objects (id, project_id, storage_key, state, created_at) VALUES (?, ?, ?, 'ready', ?)",
     ["body_1", "proj_1", "absentBlobKey_123456", NOW],
+  );
+  await missingDb.run(
+    `INSERT INTO messages
+       (id, project_id, seq, sender_speaker_id, summary, type, language,
+        received_at, committed_at, body_state, body_object_id)
+     VALUES (?, ?, 1, ?, ?, 'request', 'en', ?, ?, 'ready', ?)`,
+    ["msg_1", "proj_1", "spk_1", "summary", NOW, NOW, "body_1"],
   );
   missingDb.close();
   const missingOut = join(root, "missing-out");

@@ -296,10 +296,17 @@ test("failure injection: an R2 put failure during send fails closed, then the sa
   );
   await assertSanitizedUnavailable(failed, [detail, text, actor.token]);
 
-  // The failure happened before the body record and message: nothing is
-  // published. Only the pending idempotency reservation remains, by design.
+  // The reference row is committed before the put (reference before write), so
+  // the failed put leaves exactly one dangling body_objects row and no message.
+  // Nothing is published; only that reference and the pending idempotency
+  // reservation remain. The dangling reference is never readable and GC
+  // conservatively retains its key.
   assert.deepEqual(await fx.db.all("SELECT id FROM messages"), []);
-  assert.deepEqual(await fx.db.all("SELECT id FROM body_objects"), []);
+  const dangling = await fx.db.all<{ id: string; storage_key: string | null }>(
+    "SELECT id, storage_key FROM body_objects",
+  );
+  assert.equal(dangling.length, 1);
+  assert.equal(typeof dangling[0]?.storage_key, "string");
   assert.deepEqual(await fx.db.all("SELECT message_id FROM message_receipts"), []);
   assert.deepEqual(
     await fx.db.all<{ status: string }>("SELECT status FROM idempotency_keys"),
@@ -334,10 +341,19 @@ test("failure injection: an R2 put failure during send fails closed, then the sa
     await fx.db.all("SELECT COUNT(*) AS count FROM messages"),
     [{ count: 1 }],
   );
+  // The retry writes a fresh object; the dangling reference from the failed
+  // attempt is retained metadata, not part of the published message.
   assert.deepEqual(
     await fx.db.all("SELECT COUNT(*) AS count FROM body_objects"),
-    [{ count: 1 }],
+    [{ count: 2 }],
   );
+  const bound = await fx.db.all<{ id: string }>(
+    `SELECT b.id FROM messages m JOIN body_objects b ON b.id = m.body_object_id
+      WHERE m.id = ?`,
+    [sent.message_id],
+  );
+  assert.equal(bound.length, 1);
+  assert.notEqual(bound[0]?.id, dangling[0]?.id);
   assert.deepEqual(
     await fx.db.all<{ status: string }>("SELECT status FROM idempotency_keys"),
     [{ status: "completed" }],

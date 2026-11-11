@@ -229,14 +229,21 @@ never leaves the blob directory. Two limits are deliberate: a stale
 blob is retained (conservative retention, not data loss); and a `.tmp-<hex>` file left
 by a crash mid-write has an invalid key, so it is never collected.
 
-The grace period is a timing margin, not a proof of impossibility. The real order is
-ciphertext `put` first and the `body_objects` row insert second, and GC protects that
-gap only by mtime plus grace: files within the grace window are skipped. Normal
-operation closes the gap within one local INSERT (SQLite `busy_timeout` 5000 ms), but a
-send stalled longer than the grace between those steps (for example SIGSTOP, a VM
-pause, or a DB hang) could have its blob collected and then permanently fail reads;
-keep grace comfortably above any expected send stall. The referenced-key set is read
-once per run; new sends use fresh random keys.
+A send commits its `body_objects` reference row before writing the ciphertext
+(reference before write), so a live send never owns a file without a row. Apply mode
+also re-reads referenced keys immediately before unlinking, so a send paused past the
+grace period (SIGSTOP, VM pause, DB hang) cannot have its blob collected. The grace
+period remains a conservative candidate filter, not the concurrency proof. The
+referenced-key set is read for candidate selection and again immediately before
+deletion; new sends use fresh random keys. See
+[`blob-gc-safety.md`](./blob-gc-safety.md) for the invariant and crash analysis.
+Run `--apply` concurrently with writes only after confirming the running server was built
+with reference-before-write and its `gc-blobs` command includes the pre-delete re-read. On such a build that use is safe for live
+sends;
+still schedule it after backups and avoid running it against a directory that `restore`
+is replacing. The **deployed preview runs the older image `18e4eb0`**, which predates
+this fix: keep the preview offline-only (no destructive GC while it accepts writes)
+until it is redeployed. Any image rollback reinstates the old rule.
 
 Deletion is **not transactional**. The summary reports `candidates`, `deleted`,
 `failed`, `skippedRecent`, and `skippedReferenced` (plus `dryRun`); a failed unlink
@@ -390,9 +397,11 @@ applying any migration (normal startup may switch journal mode and tighten permi
 first); an older binary must not write against a newer schema.
 
 Blob meanings: `orphaned` is a file in `<data-dir>/blobs` whose valid opaque name is not
-referenced by any non-null `body_objects.storage_key`; `missing` is a referenced key with
-no regular file on disk; `expired_pending_deletion` is an expired message whose body
-object is not yet `state = 'deleted'` (including `NULL`). Non-file and symlink entries are
+referenced by any non-null `body_objects.storage_key` (full row set, matching GC);
+`missing` is a non-null key reachable through `messages.body_object_id` with no regular
+file on disk, so an unreachable dangling reference-before-write row is not fatal;
+`expired_pending_deletion` is an expired message whose body object is not yet
+`state = 'deleted'` (including `NULL`). Non-file and symlink entries are
 counted as `blob_dir_non_files` and never followed; regular files with invalid names are
 ignored.
 
@@ -458,7 +467,9 @@ included; back them up separately and restore them before starting the service.
 `verify` checks the manifest schema/version and bounds, every size/digest, required and
 extra files, `PRAGMA integrity_check` on the snapshot, that the schema is not newer than
 the bundled migrations and matches the manifest, and that every non-null
-`body_objects.storage_key` is present in the blob list. `restore` runs `verify` first,
+`body_objects.storage_key` reachable through `messages.body_object_id` is present in the
+blob list (unreachable dangling rows and expiry-cleared keys are not required).
+`restore` runs `verify` first,
 requires an absent or empty non-symlinked target, stages the copy in a temporary sibling
 directory, re-hashes each file, repeats the integrity/schema checks, and atomically
 renames the directory into place. A failure leaves no partial installation and never

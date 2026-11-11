@@ -204,7 +204,10 @@ async function seed(dataDir: string, options: SeedOptions): Promise<void> {
 
 // Provision through the real service so the "clean" counts reflect a message that
 // was actually sent and read, including the blob written by LocalBlobStore.
-async function seedSentAndRead(dataDir: string): Promise<void> {
+async function seedSentAndRead(
+  dataDir: string,
+  options: { danglingFailedPut?: boolean } = {},
+): Promise<void> {
   const db = await openSqliteDatabase(join(dataDir, "corkboard.sqlite"));
   const pepper = crypto.getRandomValues(new Uint8Array(32));
   const timestamp = "2026-11-03T12:00:00.000Z";
@@ -261,6 +264,36 @@ async function seedSentAndRead(dataDir: string): Promise<void> {
       bodyDigest: `sha256:${createHash("sha256").update(BODY).digest("hex")}`,
     });
     await markRead(deps, principal, "proj_1", sent.messageId);
+
+    if (options.danglingFailedPut === true) {
+      // Reference-before-write: a failed put leaves a body_objects row with no
+      // file and no message. It is never readable; doctor must not call it a
+      // missing body.
+      const realBlobs = deps.blobs;
+      let failNextPut = true;
+      deps.blobs = {
+        async put(key: string, bytes: Uint8Array): Promise<void> {
+          if (failNextPut) {
+            failNextPut = false;
+            throw new Error("injected failed put");
+          }
+          await realBlobs.put(key, bytes);
+        },
+        get: (key: string) => realBlobs.get(key),
+        delete: (key: string) => realBlobs.delete(key),
+      };
+      await assert.rejects(
+        sendMessage(deps, principal, "proj_1", "doctor-dangling", {
+          summary: SUMMARY,
+          type: "request",
+          language: "en",
+          text: BODY,
+          bodyDigest: `sha256:${createHash("sha256").update(BODY).digest("hex")}`,
+        }),
+        /injected failed put/,
+      );
+      deps.blobs = realBlobs;
+    }
   } finally {
     db.close();
   }
@@ -465,6 +498,31 @@ test("doctor reports a clean instance with a sent/read message", (t) => {
     assert.match(human.stdout, /issues: none/);
     assert.equal(human.stdout.includes(SUMMARY), false);
     assert.equal(human.stdout.includes(BODY), false);
+  })();
+});
+
+test("doctor does not report BLOB_MISSING for a dangling reference-before-write row", (t) => {
+  const root = tempDir(t);
+  const dataDir = join(root, "data");
+  return (async () => {
+    await seedSentAndRead(dataDir, { danglingFailedPut: true });
+    const env = withoutCorkboardEnv(keyEnv());
+    const result = runCli(sourceCli, ["doctor", "--data-dir", dataDir, "--json"], env);
+    assert.equal(result.status, 0, result.stderr);
+    const report = parseJson(result);
+
+    assert.equal(report.database?.counts?.messages, 1);
+    // The full reference count includes the unreachable dangling row; the
+    // fatal missing count does not, and `orphaned` still uses the full set.
+    assert.deepEqual(report.blobs, {
+      files: 1,
+      referenced: 2,
+      orphaned: 0,
+      missing: 0,
+      expired_pending_deletion: 0,
+      blob_dir_non_files: 0,
+    });
+    assert.deepEqual(report.issues, []);
   })();
 });
 

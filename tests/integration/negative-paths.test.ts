@@ -286,8 +286,14 @@ test("a blob write failure leaves no committed message and the same key resumes 
   assert.equal((await first.text()).includes("injected blob write failure"), false);
 
   // The provisional idempotency row remains; nothing is published or visible.
+  // The reference row is committed before the put (reference before write), so
+  // the failed put leaves one dangling body_objects row with no message.
   assert.equal((await fx.db.all("SELECT id FROM messages")).length, 0);
-  assert.equal((await fx.db.all("SELECT id FROM body_objects")).length, 0);
+  assert.equal(
+    (await fx.db.all("SELECT id FROM messages WHERE body_state = 'ready'")).length,
+    0,
+  );
+  assert.equal((await fx.db.all("SELECT id FROM body_objects")).length, 1);
   const record = await fx.db.first<{ message_id: string | null; status: string }>(
     "SELECT message_id, status FROM idempotency_keys WHERE key = ?",
     ["blob-fail"],
@@ -320,7 +326,9 @@ test("a blob write failure leaves no committed message and the same key resumes 
   assert.equal(replay.status, 200);
   assert.equal((await jsonBody(replay)).message_id, retryBody.message_id);
   assert.equal((await fx.db.all("SELECT id FROM messages")).length, 1);
-  assert.equal((await fx.db.all("SELECT id FROM body_objects")).length, 1);
+  // The retry uses a fresh object; the dangling reference from the failed put
+  // is retained metadata with no message and no ciphertext.
+  assert.equal((await fx.db.all("SELECT id FROM body_objects")).length, 2);
   assert.equal((await fx.db.all("SELECT key FROM idempotency_keys")).length, 1);
 });
 

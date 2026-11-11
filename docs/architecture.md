@@ -305,21 +305,29 @@ receipts, body objects/blobs, or pre-existing audit rows.
    `(speaker_id, project_id, key)`. If an existing row in that scope has a different
    payload digest → `CONFLICT`; if completed → return the stored result. Keys in
    another speaker or project are independent and never return another's response.
-4. Insert the message with `seq = NULL` and `body_state = 'pending'`; normal reads
-   exclude provisional rows.
-5. Encrypt the body with AES-256-GCM. The AAD binds only pre-decryption metadata; the
+4. Encrypt the body with AES-256-GCM. The AAD binds only pre-decryption metadata; the
    verified plaintext digest is encrypted inside the payload. Record the ciphertext
-   SHA-256 separately. Write the ciphertext blob.
-6. Atomically finalize with the single `UPDATE ... RETURNING` above: assign `seq`, set
+   SHA-256 separately.
+5. Insert the `body_objects` row with a fresh random storage key and the metadata above
+   **before** writing the ciphertext. This reference-before-write order is the local
+   blob GC safety invariant (see [`blob-gc-safety.md`](./blob-gc-safety.md)); the row
+   is not reachable by any read until a message references it.
+6. Write the ciphertext blob.
+7. Insert the message with `seq = NULL`, `body_state = 'pending'`, and its
+   `body_object_id`; normal reads exclude provisional rows.
+8. Atomically finalize with the single `UPDATE ... RETURNING` above: assign `seq`, set
    `ready`, stamp `committed_at` and `body_object_id`; the trigger advances
    `projects.next_seq` and marks the idempotency row completed. Retry on a unique
    sequence collision. No provisional row is ever visible with a sequence.
-8. On read: verify the computed ciphertext SHA-256 against the digest stored in
+9. On read: verify the computed ciphertext SHA-256 against the digest stored in
    `body_objects` (the DB is the authority, not the envelope header), decrypt, then
    verify the plaintext digest embedded in the payload. A mismatch is
    `INTEGRITY_FAILURE`: no content, no receipt.
-9. On failure after step 5, leave a reclaimable pending row and an orphan blob record;
-   diagnostics report both. A retry with the same key resumes or replaces safely.
+10. A failure after step 5 leaves a reference row without a file and without a message
+    (failed put or crash before the write), or a file/reference with no message (crash
+    before step 7). Neither is readable or published. A retry with the same key creates
+    a fresh object and commits safely; the old row/file is retained conservatively.
+    Diagnostics ignore the unreachable dangling row for fatal missing-body checks.
 
 No success response is returned before a committed metadata row references readable
 ciphertext. Content hashes detect corruption; no cross-tenant deduplication.
@@ -531,7 +539,9 @@ with the existing service functions.
   branch. It bounds that set to 100 (the API maximum) and reports truncation.
   Message counts are one grouped parameterized aggregate over the authorized IDs;
   storage is a sum of `body_objects.cipher_length` for live (`storage_key IS NOT
-  NULL`) rows; credential state counts reuse `credentialState` from the inventory,
+  NULL`) rows reachable through a message, so an unreachable dangling
+  reference-before-write row is not counted; credential state counts reuse
+  `credentialState` from the inventory,
   select only expiry/revocation columns, return at most 1,001 rows for the overflow
   check, and count the first 1,000 (the limit bounds result size, not scan work;
   see `web-ui.md` Limits) with an explicit incomplete state above 1,000; audit rows
@@ -633,8 +643,10 @@ create, and reports a version newer than the bundled set as `SCHEMA_AHEAD`; the 
 opener refuses such a database before applying any migration (it may switch journal
 mode and tighten permissions first). It runs `PRAGMA integrity_check`,
 counts message/receipt/credential/grant rows,
-reconciles blob files against non-null `body_objects.storage_key`, and samples pending
-rows older than the configured threshold. Blob entries are matched as opaque keys;
+reconciles blob files against non-null `body_objects.storage_key` (orphan count) and
+message-reachable keys (fatal missing count, so a dangling reference-before-write row is
+not a missing body), and samples pending rows older than the configured threshold. Blob
+entries are matched as opaque keys;
 symlinks and other non-file entries are never followed. Output is counts and bounded
 metadata only — never bodies, summaries, tokens, or key material. Values that cannot be
 measured are `null`; reconciliation internally reads all referenced storage keys and
@@ -665,7 +677,9 @@ scheduler, remote replication, key management, or a D1/Workers path.
   a failed run removes the output directory it created. Blobs committed before the
   snapshot normally exist when the copy begins; an expiry deleting one in that window
   is the remaining race, so `verify` independently cross-checks every non-null
-  `body_objects.storage_key` against the manifest.
+  `body_objects.storage_key` reachable through `messages.body_object_id` against the
+  manifest. Unreachable dangling rows and expiry-cleared keys are not required;
+  unreferenced files are still copied and listed.
 - **Manifest.** `manifest.json` (format `corkboard-backup`, version `1`) is bounded to
   8 MiB and 100,000 blob entries and records the database size/SHA-256, sorted blob
   names/sizes/SHA-256, counts, UTC creation time, and source schema version. It carries

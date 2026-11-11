@@ -7,17 +7,17 @@
 // scans the local directory directly and never follows symlinks, touches
 // non-regular entries, deletes directories, or leaves the blob directory.
 //
-// Ordering rationale: `commitBody` writes the blob before inserting its
-// `body_objects` row, so a just-written file can briefly have no row. The grace
-// window is a timing margin, not a guarantee: files whose mtime is within the
-// grace window are skipped. Normal operation inserts the row within one local
-// statement, but a send stalled longer than grace between those steps (SIGSTOP,
-// VM pause, DB hang) can leave a live, row-less blob that a run may collect,
-// making later reads fail permanently; operators must keep grace comfortably
-// above expected send stalls. A file older than grace with no row is normally
-// an abandoned send or a file whose row was cleared by expiry. The reference
-// set is read once per run; new sends use fresh random keys, so a concurrent
-// send cannot turn an old file into a referenced one.
+// Safety invariant: `commitBody` commits its `body_objects` row (the reference)
+// before it writes the ciphertext. A live send therefore never owns a file with
+// no row, regardless of how long it pauses between those steps. Apply mode
+// additionally re-reads referenced keys immediately before unlinking and drops
+// any candidate that gained a row after the scan. The reference set is not
+// monotonic: expiry can clear a key after deleting its ciphertext between the
+// two reads. That cannot turn a live send's file into a target, because a live
+// send's row is committed before its file exists, and expiry only clears keys
+// whose ciphertext is already gone. The grace window is a conservative
+// candidate filter, not the concurrency proof. See docs/blob-gc-safety.md for
+// the proof and crash analysis.
 //
 // File deletion is not transactional. The summary distinguishes per-file
 // failures from successes and never implies a rollback.
@@ -53,7 +53,11 @@ export interface BlobGcSummary {
   dryRun: boolean;
   graceHours: number;
   limit: number;
-  /** Eligible orphans selected this run, bounded by `limit`. */
+  /**
+   * Candidates selected this run, bounded by `limit`. A dry run reports the
+   * pre-fence selection; apply mode reports the post-fence targets, so a file
+   * retained by the second reference read is in `skippedReferenced`, not here.
+   */
   candidates: number;
   deleted: number;
   failed: number;
@@ -144,9 +148,8 @@ export async function pruneOrphanBlobs(
     throw new BlobGcError("cannot read the blob directory");
   }
 
-  // One read for the whole run. Referenced keys are never removed from this
-  // set later in the run, so a concurrent expiry can only make collection more
-  // conservative.
+  // First reference read (R0): the candidate filter and the dry-run report.
+  // Apply mode re-reads immediately before unlinking (R1).
   const referencedRows = await deps.db.all<{ storage_key: string }>(
     "SELECT storage_key FROM body_objects WHERE storage_key IS NOT NULL",
   );
@@ -179,9 +182,24 @@ export async function pruneOrphanBlobs(
 
   const selected = eligible.slice(0, limit);
   summary.candidates = selected.length;
-  if (!apply) return summary;
+  if (!apply || selected.length === 0) return summary;
 
-  for (const name of selected) {
+  // Second reference read (R1), immediately before the destructive step. With
+  // reference-before-write, any live send whose file was visible to the scan
+  // committed its row before that file existed, hence before R1. A candidate
+  // that acquired a row since R0 belongs to such a send; retain it.
+  const currentRows = await deps.db.all<{ storage_key: string }>(
+    "SELECT storage_key FROM body_objects WHERE storage_key IS NOT NULL",
+  );
+  const current = new Set(currentRows.map((row) => row.storage_key));
+  const targets = selected.filter((name) => {
+    if (!current.has(name)) return true;
+    summary.skippedReferenced += 1;
+    return false;
+  });
+  summary.candidates = targets.length;
+
+  for (const name of targets) {
     try {
       // Exact path, and the key regex forbids separators, so this cannot leave
       // the blob directory. unlink removes a symlink itself, never its target.

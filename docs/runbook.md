@@ -652,20 +652,35 @@ counts as a reference, so its blob is retained — conservative retention, not d
 A `.tmp-<hex>` file left by a crash mid-write has an invalid key, so it is never
 collected.
 
-The grace period is the concurrency safeguard, not a proof of impossibility. The real
-order is ciphertext `put` first and the `body_objects` row insert second, so a
-just-written file briefly lacks a row; GC protects that gap only by mtime plus grace,
-and skips any file within the grace window. Normal operation closes the gap within one
-local INSERT (SQLite `busy_timeout` 5000 ms), so the default grace covers it. A send
-stalled longer than the grace between those steps (for example SIGSTOP, a VM pause, or a
-DB hang) could have its blob collected and then permanently fail reads, so operators
-must keep grace comfortably above any expected send stall. The referenced-key set is
-read once per run, and new sends use fresh random keys; a file older than grace with no
-row is normally an abandoned send or an expiry-cleared object.
+A send commits its `body_objects` reference row **before** it writes the ciphertext
+(reference before write), so a live send never owns a file without a row. Deletion-time
+safety does not depend on grace: the command re-reads referenced keys immediately before
+unlinking and drops any candidate that acquired a row after the scan. A send paused
+longer than the grace period between its reference insert and its write therefore cannot
+lose its blob — the row exists first, and the file is either not written yet or newly
+referenced. Grace and the initial snapshot remain the conservative candidate filter and
+extra defense in depth; a file older than grace with no row is normally an abandoned
+send or a row cleared by expiry. The full invariant and crash analysis are in
+[`blob-gc-safety.md`](./blob-gc-safety.md).
+
+Run `--apply` concurrently with writes only after confirming the running server was built
+with reference-before-write and its `gc-blobs` command includes the pre-delete re-read. On such a build destructive local GC may
+overlap accepting writes for the live-send race above; still schedule it after backups
+and prefer a quiet period, because deletion is not transactional and per-run counts are
+easier to reason about. Do not run `gc-blobs --apply` against a data directory that
+`restore` is concurrently replacing.
+
+The **deployed preview runs the older image `18e4eb0`**, which predates this fix. Keep
+the preview offline-only for destructive GC: never run `gc-blobs --apply` there while it
+accepts writes. Any image rollback reinstates the old rule until the rebuilt image with
+the reference-before-write ordering and pre-delete re-read is deployed.
+
 Deletion is **not transactional**: each selected file is unlinked by exact path, and
 the summary separates `deleted` from `failed` plus the `skippedRecent` and
-`skippedReferenced` counts. If any unlink fails, the command prints the summary and
-exits 1; deletions that already succeeded are not rolled back. The summary (human or
+`skippedReferenced` counts. `candidates` is the pre-fence selection in a dry run and
+the post-fence target count in apply mode; a file retained by the pre-delete re-read is
+counted in `skippedReferenced`, not `candidates`. If any unlink fails, the command
+prints the summary and exits 1; deletions that already succeeded are not rolled back. The summary (human or
 `--json`) contains no paths, keys, or file contents.
 
 `gc-blobs` writes exactly one system-actor `blob.orphan_prune` audit row

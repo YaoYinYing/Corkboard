@@ -2127,3 +2127,24 @@ limits and `Secure` cookies remained.
   request, not by reading the configuration.
 - **Remove when:** the Cloudflare route enforces Always Use HTTPS, a scoped Access policy and
   rate limits, or all traffic is forced through the checked proxy.
+
+## 2026-11-11 — reference before write, and follow the reference into backup and doctor
+
+The local Blob GC race was a timing margin, not a proof: `commitBody` wrote ciphertext first and
+the `body_objects` row second, so a send paused past the grace period could lose its blob.
+Reversing the order (row first, then put) removes the row-less-file window; a pre-delete
+referenced-key re-read closes the scan/resume gap. The first fix attempt then broke a
+different invariant: `backup`, `verify`, `restore` and `doctor` treated every
+`body_objects.storage_key` as a required file, so one failed put's dangling row permanently
+failed the backup safety net.
+- **Rule:** put the durable reference before the payload when one refers to the other, and make
+  every reader of that reference distinguish "reachable from a committed message" from "row
+  exists". A dangling reference is metadata, not a missing body.
+- **Rule:** a reordering race fix is not complete until the backup, restore, doctor, metrics and
+  operator docs that assumed the old order are audited together. Contract and security audits
+  both caught the backup/doctor consequence; the code review alone did not.
+- **Rule:** destructive GC concurrency is a property of the running binary, not the source tree:
+  name the deployed image/revision when the old rule still applies, and treat rollback as
+  reinstating it.
+- **Remove when:** a row GC removes unreachable `body_objects` rows safely, and backup/doctor
+  keep message-reachability semantics documented and tested.

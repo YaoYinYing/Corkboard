@@ -586,7 +586,9 @@ printed or logged.
 Blob reconciliation never follows symlinks. `blob_dir_non_files` counts non-file entries
 (directories, symlinks, special files) and invalid-named regular files are ignored.
 `orphaned` means a valid opaque blob-file name is not referenced by any non-null
-`body_objects.storage_key`; `missing` means a referenced key has no regular file on disk;
+`body_objects.storage_key` (the full row set, matching blob GC); `missing` means a key
+reachable from a message through `messages.body_object_id` has no regular file on disk,
+so an unreachable dangling reference-before-write row is not a fatal missing body;
 `expired_pending_deletion` means an expired message's body object is not yet
 `state = 'deleted'` (including `NULL`). These are reported as counts only. Output is
 bounded (at most ten provisional IDs and ages), but reconciliation reads every referenced
@@ -750,24 +752,30 @@ without first confirming the database and backup state. `doctor` is SQLite/Node-
   `<data-dir>/blobs` with a valid opaque key, mtime at least `--grace-hours` old
   (default 24, 1–8760), and no `body_objects.storage_key` reference in any state.
   Invalid names, directories, symlinks, and other non-regular entries are ignored and
-  never followed; the scan never leaves the blob directory. The real send order is
-  ciphertext first and the `body_objects` row insert second; GC protects that gap only
-  by mtime plus grace, skipping files within the grace window. Normal operation closes
-  the gap within one local INSERT (SQLite `busy_timeout` 5000 ms), but a send stalled
-  longer than the grace between those steps (SIGSTOP, VM pause, DB hang) could have its
-  blob collected and then permanently fail reads; keep grace comfortably above any
-  expected send stall. A stale `body_objects` row with no message still protects its
-  blob (conservative retention, not data loss), and `.tmp-<hex>` crash residue has an
-  invalid key and is never collected. A valid dry run may still create/initialize the
-  data directory and database and apply migrations, but deletes no blobs and writes no
-  audit row. Deletion is not transactional: each
-  selected file is unlinked by exact path, and the summary reports `deleted`, `failed`,
-  `skippedRecent`, and `skippedReferenced`. A failed unlink exits 1 without claiming a
-  rollback. A run that deletes at least one file appends one system-actor
-  `blob.orphan_prune` audit row after the deletions; a dry or zero-deletion run writes
-  none, and an audit-insert failure is fail-open (deletions stand, warning and exit 1).
-  This command is local-directory-only; R2 and other remote blob stores are out of
-  scope.
+  never followed; the scan never leaves the blob directory. A send commits its
+  `body_objects` reference row before writing ciphertext (reference before write), and
+  the command re-reads referenced keys immediately before unlinking, so a live send
+  cannot lose its blob even if paused beyond the grace period. Grace remains the
+  conservative candidate filter and defends against older code paths; it is no longer
+  the concurrency proof. A stale `body_objects` row with no message (or a crashed
+  send's row before its write) still protects its key (conservative retention, not data
+  loss), and `.tmp-<hex>` crash residue has an invalid key and is never collected. See
+  [`blob-gc-safety.md`](./blob-gc-safety.md) for the invariant and crash analysis. A
+  valid dry run may still create/initialize the data directory and database and apply
+  migrations, but deletes no blobs and writes no audit row. Deletion is not
+  transactional: each selected file is unlinked by exact path, and the summary reports
+  `deleted`, `failed`, `skippedRecent`, and `skippedReferenced` (`candidates` is the
+  pre-fence selection in a dry run and the post-fence target count in apply mode). A
+  failed unlink exits 1 without claiming a rollback. A run that deletes at least one
+  file appends one system-actor `blob.orphan_prune` audit row after the deletions; a dry
+  or zero-deletion run writes none, and an audit-insert failure is fail-open (deletions
+  stand, warning and exit 1). Run `--apply` concurrently with writes only after
+  confirming the running server was built with reference-before-write and its `gc-blobs`
+  command includes the pre-delete re-read. The
+  **deployed preview runs the older image `18e4eb0`**, which predates this fix: keep it
+  offline-only for destructive GC until it is redeployed, and treat any image rollback
+  as reinstating the old rule. This command is local-directory-only; R2 and other remote
+  blob stores are out of scope.
 
 ## Environment separation
 
@@ -818,13 +826,19 @@ verification externally; nothing runs on a timer.
   enumeration cap, because they are filtered after listing. Unbounded crash-left temp
   debris can therefore still trip `BACKUP_BLOB_LIMIT_EXCEEDED`; that is a bounded
   cleanup consideration, not a snapshot-correctness issue.
-- A committed message references a blob written before it committed, so a blob
-  referenced by the snapshot normally exists when the copy runs. One race remains: an
-  expiry that deletes a blob after the snapshot but before the copy can leave a
-  referenced blob missing. `verify` cross-checks every non-null
-  `body_objects.storage_key` against the manifest and fails, so run `verify`
-  immediately; take backups on a quiesced installation when a byte-exact pair is
-  required.
+- A message's blob is written after its `body_objects` reference row is committed and
+  before the message is finalized (reference before write), so normally it exists when
+  the copy runs. One race remains: an expiry that deletes a blob after the snapshot but
+  before the copy can leave a message-referenced blob missing; `createBackup` then
+  fails instead of reporting success. `verify`/restore cross-check every non-null
+  `body_objects.storage_key` **reachable through `messages.body_object_id`** against
+  the manifest. A dangling reference-before-write row (failed put or crash before the
+  write) has no message and is not required. Expiry clears `storage_key` in place after
+  deleting the ciphertext, so a tombstone is excluded without weakening the check; a
+  row whose `body_object_id` was cleared out of band is unreachable metadata, not
+  restorable content. Unreferenced files are still copied and listed. Run `verify`
+  immediately after backup; take backups on a quiesced installation when a byte-exact
+  pair is required.
 - The output directory is created `0700` and must not exist beforehand. Files
   (`manifest.json`, the database, every blob) are `0600`. A failed run removes the
   directory it created and leaves the source database/blob content untouched.

@@ -352,8 +352,21 @@ async function inspectDatabaseFile(path: string): Promise<DatabaseInspection> {
 
     let referencedKeys: string[] = [];
     if (integrityOk && schemaVersion !== null) {
+      // Only ciphertext reachable from a message is required for a restorable
+      // pair. A reference-before-write send can leave a body_objects row with
+      // no file and no message (failed put or crash before the write); that
+      // row is never readable and must not fail backup/verify/restore. Expiry
+      // clears body_objects.storage_key after deleting its ciphertext, so a
+      // tombstoned object has no key to require. Expiry does not clear
+      // messages.body_object_id; if an out-of-band change ever did while the
+      // key remained, its blob would be unreachable metadata, not restore
+      // content. Unreferenced files are still copied and listed, but they are
+      // not required by the cross-check.
       const rows = await db.all<{ storage_key: string }>(
-        "SELECT storage_key FROM body_objects WHERE storage_key IS NOT NULL",
+        `SELECT b.storage_key
+           FROM body_objects b
+           JOIN messages m ON m.body_object_id = b.id
+          WHERE b.storage_key IS NOT NULL`,
       );
       referencedKeys = rows.map((row) => row.storage_key);
     }

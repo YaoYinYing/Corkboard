@@ -324,6 +324,15 @@ test("overview excludes expiry-deleted storage using independently known bytes",
   );
   assert.equal(deleted?.count, 1);
 
+  // A reference-before-write failure leaves a row with no message and no file.
+  // It must not inflate stored bytes.
+  await fx.db.run(
+    `INSERT INTO body_objects
+       (id, project_id, storage_key, cipher_length, state, created_at)
+     VALUES ('obj_dangling', 'proj_a', ?, 999, 'ready', ?)`,
+    ["D".repeat(20), "2026-11-03T12:00:00.000Z"],
+  );
+
   const overview = await getAccountOverview(fx.deps, ownerPrincipal("acct_a"));
   assert.equal(overview.projects[0]?.storageBytes, secondBytes.cipher_length);
   assert.equal(overview.totals.storageBytes, secondBytes.cipher_length);

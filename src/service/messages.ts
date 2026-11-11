@@ -364,7 +364,12 @@ async function publish(
   return { row, finalized };
 }
 
-// Writes the blob, body_objects row and provisional message, then finalizes.
+// Commits the body_objects reference row BEFORE writing the blob, then inserts
+// the provisional message and finalizes. The order is the local blob GC safety
+// invariant (docs/blob-gc-safety.md): GC may only collect a file with no
+// reference row, so a live send must never create a row-less file. A crash or
+// failed put in the reversed window leaves a row with no file and no message,
+// which is unreadable and never published; a retry creates a fresh object.
 // Shortcut: concurrent same-key retries can race before either sees the other's
 // provisional row and leave an orphaned blob/body_objects row. Messages and seq
 // stay unique; the orphan is reclaimable like any failed-send pending row.
@@ -391,8 +396,11 @@ async function commitBody(
     deps.keys,
   );
   const storageKey = randomToken(16);
-  await deps.blobs.put(storageKey, sealed.envelope);
 
+  // Reference before write: commit the row first so GC can never see a
+  // live-send file without a reference. If this succeeds and the put fails or
+  // the process dies, the row is a dangling reference with no message; it is
+  // never readable or published, and GC conservatively retains its key.
   await deps.db.run(
     `INSERT INTO body_objects
        (id, project_id, storage_key, cipher_alg, key_version, nonce, compression,
@@ -411,6 +419,7 @@ async function commitBody(
       deps.now().toISOString(),
     ],
   );
+  await deps.blobs.put(storageKey, sealed.envelope);
 
   await deps.db.run(
     `INSERT OR IGNORE INTO messages

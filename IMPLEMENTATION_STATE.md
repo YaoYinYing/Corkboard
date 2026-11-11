@@ -3738,3 +3738,22 @@ proposal was independently reviewed against the envelope/blob/GC/backup code: PA
 non-blocking corrections applied (memory estimate, route prefixes, operator-scan wording,
 same-uploader vector). `npm run check` exit 0 (800 tests: 800 pass, 0 fail, 0 skipped).
 Issue #22 stays open pending #5.
+
+## Blob GC safety (2026-11-11) — issue #21
+
+`commitBody` now commits the `body_objects` reference row before `blobs.put`
+(reference-before-write), and `gc-blobs --apply` re-reads referenced keys immediately before
+unlinking, so a live send paused beyond the grace period can no longer lose its ciphertext;
+grace is only a conservative candidate filter. `backup`, `verify`, `restore` and the fatal
+`doctor` missing check now require only ciphertext reachable from a message
+(`body_objects` joined to `messages.body_object_id`), so a failed put's dangling row no longer
+permanently fails backups or doctor; the full key set still drives orphaned/GC counts and the
+overview metric joins messages. Tests cover pre-write and post-write pauses longer than grace
+with `--apply`, failed put → backup/verify/restore and doctor, interrupted scans, symlink/path
+safety, and the overview metric. Independent security and contract audits returned PASS on
+tree `283b10322dd4cea38bcd1f70f753aabd1327339a`; the merged commit was delta-checked and
+`npm run check` passes (808 tests). Operator rule: concurrent destructive GC is safe only on a
+binary built with reference-before-write and the pre-delete re-read; the deployed preview
+(`18e4eb0`) is pre-fix and stays offline-only for `--apply` until redeployed. Issue #21 is
+closed by this checkpoint; remote/R2 GC and row GC remain out of scope, and local deletion is
+still non-transactional and not fsynced.

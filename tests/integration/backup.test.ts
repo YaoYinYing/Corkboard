@@ -27,6 +27,7 @@ import {
   verifyBackup,
 } from "../../src/service/backup.ts";
 import { authenticateBearer, type Principal, type ServiceDeps } from "../../src/service/auth.ts";
+import { expireMessageBody } from "../../src/service/expiry.ts";
 import { getMessageBody, sendMessage } from "../../src/service/messages.ts";
 import { LocalBlobStore } from "../../src/storage/blobs/local.ts";
 import { openSqliteDatabase } from "../../src/storage/db.ts";
@@ -249,6 +250,147 @@ test("backup, verify, and restore round-trip preserves ciphertext and metadata",
   } finally {
     restoredDb.close();
   }
+});
+
+test("backup, verify, and restore tolerate a dangling reference-before-write row", async (t) => {
+  const root = tempDir(t);
+  const installation = await seed(join(root, "data"));
+
+  // Reference before write: a failed put leaves a body_objects row with no
+  // file and no message. It is never readable and must not fail the pair.
+  const realBlobs = installation.deps.blobs;
+  let failNextPut = true;
+  installation.deps.blobs = {
+    async put(key: string, bytes: Uint8Array): Promise<void> {
+      if (failNextPut) {
+        failNextPut = false;
+        throw new Error("injected failed put");
+      }
+      await realBlobs.put(key, bytes);
+    },
+    get: (key: string) => realBlobs.get(key),
+    delete: (key: string) => realBlobs.delete(key),
+  };
+  const failedText = "body whose first write fails";
+  const failedInput = {
+    summary: "failed",
+    type: "request",
+    language: "en",
+    text: failedText,
+    bodyDigest: digest(failedText),
+  };
+  await assert.rejects(
+    sendMessage(installation.deps, installation.principal, "proj_1", "backup-failed", failedInput),
+    /injected failed put/,
+  );
+  installation.deps.blobs = realBlobs;
+
+  const dangling = await installation.deps.db.all<{ id: string }>(
+    `SELECT b.id FROM body_objects b
+       LEFT JOIN messages m ON m.body_object_id = b.id
+      WHERE b.storage_key IS NOT NULL AND m.id IS NULL`,
+  );
+  assert.equal(dangling.length, 1);
+  installation.close();
+
+  const backupDir = join(root, "backup");
+  const summary = await createBackup({ dataDir: installation.dataDir, outDir: backupDir });
+  assert.equal(summary.ok, true);
+  // The dangling row has no file; the four real files are still copied.
+  assert.equal(summary.blobs, 4);
+
+  const report = await verifyBackup({ backupDir });
+  assert.equal(report.ok, true, JSON.stringify(report.issues));
+
+  const restoredDir = join(root, "restored");
+  const restored = await restoreBackup({ backupDir, dataDir: restoredDir });
+  assert.equal(restored.ok, true);
+
+  // The same idempotency key resumes from the restored pair and is readable.
+  const restoredDb = await openSqliteDatabase(join(restoredDir, BACKUP_DATABASE_FILE));
+  try {
+    const deps: ServiceDeps = {
+      db: restoredDb,
+      blobs: new LocalBlobStore(join(restoredDir, BACKUP_BLOB_DIR)),
+      keys: installation.deps.keys,
+      pepper: installation.deps.pepper,
+      serviceId: "svc_test",
+      now: () => new Date(NOW),
+    };
+    const principal = await authenticateBearer(deps, `Bearer ${installation.token}`);
+    const sent = await sendMessage(
+      deps,
+      principal,
+      "proj_1",
+      "backup-failed",
+      failedInput,
+    );
+    const body = await getMessageBody(deps, principal, "proj_1", sent.messageId);
+    assert.equal(body.text, failedText);
+  } finally {
+    restoredDb.close();
+  }
+});
+
+test("backup requires only message-reachable blobs after expiry and cleared links", async (t) => {
+  const root = tempDir(t);
+  const installation = await seed(join(root, "data"));
+
+  // Real expiry: the message stays linked but the ciphertext is deleted and
+  // body_objects.storage_key is cleared. Nothing is required from the tombstone.
+  await expireMessageBody(
+    installation.deps,
+    installation.principal,
+    "proj_1",
+    installation.messageIds[1] ?? "",
+  );
+
+  // Out-of-band cleared body_object_id with a surviving key/file (not a shipped
+  // path; expiry clears the key, not the link). The object is unreachable
+  // metadata, so the cross-check must not require it. The file is still copied
+  // as an unreferenced blob and listed in the manifest.
+  const object = await installation.deps.db.first<{
+    id: string;
+    storage_key: string | null;
+  }>(
+    `SELECT b.id, b.storage_key FROM body_objects b
+       JOIN messages m ON m.body_object_id = b.id
+      WHERE m.id = ?`,
+    [installation.messageIds[0] ?? ""],
+  );
+  assert.ok(object !== undefined && object.storage_key !== null);
+  await installation.deps.db.run(
+    "UPDATE messages SET body_state = 'expired', body_object_id = NULL WHERE id = ?",
+    [installation.messageIds[0] ?? ""],
+  );
+  const stillStored = await installation.deps.db.first<{ storage_key: string | null }>(
+    "SELECT storage_key FROM body_objects WHERE id = ?",
+    [object.id],
+  );
+  assert.equal(stillStored?.storage_key, object.storage_key);
+  assert.equal(
+    existsSync(join(installation.dataDir, BACKUP_BLOB_DIR, object.storage_key)),
+    true,
+  );
+  installation.close();
+
+  const backupDir = join(root, "backup");
+  const summary = await createBackup({ dataDir: installation.dataDir, outDir: backupDir });
+  assert.equal(summary.ok, true);
+  // Two seed bodies minus the expired/deleted one, plus the orphan and the
+  // zero-byte value; the cleared-link ciphertext is copied as an unreferenced
+  // file and is not required by verify.
+  assert.equal(summary.blobs, 3);
+
+  const report = await verifyBackup({ backupDir });
+  assert.equal(report.ok, true, JSON.stringify(report.issues));
+  assert.equal(
+    report.issues.some((issue) => issue.code === "BACKUP_BLOB_REFERENCED_MISSING"),
+    false,
+  );
+
+  const restoredDir = join(root, "restored");
+  await restoreBackup({ backupDir, dataDir: restoredDir });
 });
 
 test("restore refuses a non-empty target and leaves the source untouched", async (t) => {

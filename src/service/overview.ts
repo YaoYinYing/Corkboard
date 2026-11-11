@@ -101,12 +101,16 @@ export async function getAccountOverview(
     }
 
     // `storage_key IS NULL` marks a deleted blob (expiry), so only live stored
-    // ciphertext counts. Both length columns come from the stored metadata.
+    // ciphertext counts. The message join excludes a dangling
+    // reference-before-write row (failed put or crash before the write): it has
+    // metadata but no message and no stored ciphertext. Both length columns
+    // come from the stored metadata.
     const storageRows = await deps.db.all<{ project_id: string; bytes: number | null }>(
-      `SELECT project_id, COALESCE(SUM(cipher_length), 0) AS bytes
-         FROM body_objects
-        WHERE project_id IN (${list}) AND storage_key IS NOT NULL
-        GROUP BY project_id`,
+      `SELECT b.project_id, COALESCE(SUM(b.cipher_length), 0) AS bytes
+         FROM body_objects b
+         JOIN messages m ON m.body_object_id = b.id
+        WHERE b.project_id IN (${list}) AND b.storage_key IS NOT NULL
+        GROUP BY b.project_id`,
       projectIds,
     );
     for (const row of storageRows) {

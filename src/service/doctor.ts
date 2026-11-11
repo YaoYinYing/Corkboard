@@ -162,6 +162,7 @@ async function inspectDatabase(
   database: NonNullable<DoctorReport["database"]>;
   blobCrossCheck: {
     referenced: string[];
+    messageReferenced: string[];
     expiredPendingDeletion: number;
   } | null;
 }> {
@@ -213,8 +214,11 @@ async function inspectDatabase(
           .join("; ");
 
   let counts: NonNullable<DoctorReport["database"]>["counts"] = null;
-  let blobCrossCheck: { referenced: string[]; expiredPendingDeletion: number } | null =
-    null;
+  let blobCrossCheck: {
+    referenced: string[];
+    messageReferenced: string[];
+    expiredPendingDeletion: number;
+  } | null = null;
 
   if (complete) {
     try {
@@ -243,11 +247,22 @@ async function inspectDatabase(
         grants: await count(db, "credential_project_grants"),
       };
 
-      // Internal only: the full key set is needed for exact missing/orphan
-      // counts, but keys are never printed. Output remains counts plus bounded
-      // samples.
+      // Internal only: the full key set is needed for exact orphan counts and
+      // matches GC's reference rule, but keys are never printed. Output remains
+      // counts plus bounded samples.
       const referencedRows = await db.all<{ storage_key: string }>(
         "SELECT storage_key FROM body_objects WHERE storage_key IS NOT NULL",
+      );
+      // The fatal `missing` set is limited to ciphertext reachable from a
+      // message. A reference-before-write send can leave a body_objects row
+      // with no file and no message (failed put or crash before the write);
+      // that row is never readable, so it is not a missing body. The full set
+      // above still drives the conservative orphan count.
+      const messageReferencedRows = await db.all<{ storage_key: string }>(
+        `SELECT b.storage_key
+           FROM body_objects b
+           JOIN messages m ON m.body_object_id = b.id
+          WHERE b.storage_key IS NOT NULL`,
       );
       const pendingDeletion = await db.first<{ n: number }>(
         `SELECT COUNT(*) AS n
@@ -258,6 +273,7 @@ async function inspectDatabase(
       );
       blobCrossCheck = {
         referenced: referencedRows.map((row) => row.storage_key),
+        messageReferenced: messageReferencedRows.map((row) => row.storage_key),
         expiredPendingDeletion: Number(pendingDeletion?.n ?? 0),
       };
     } catch (error) {
@@ -288,6 +304,7 @@ async function inspectDatabase(
 function inspectBlobs(
   dataDir: string,
   referenced: string[] | null,
+  messageReferenced: string[] | null,
   expiredPendingDeletion: number | null,
 ): {
   blobs: DoctorReport["blobs"];
@@ -329,13 +346,22 @@ function inspectBlobs(
   let orphaned: number | null = null;
   let missing: number | null = null;
   if (referenced !== null) {
+    // Conservative orphan rule: a file counts as orphaned only if no
+    // body_objects row (any state, any message linkage) references it. This
+    // matches blob GC.
     const referencedSet = new Set(referenced);
     orphaned = 0;
     for (const key of diskKeys) {
       if (!referencedSet.has(key)) orphaned += 1;
     }
+  }
+  if (messageReferenced !== null) {
+    // Fatal missing rule: only ciphertext reachable from a message counts. A
+    // dangling reference-before-write row has no file and no message, so it is
+    // not a missing body.
+    const messageSet = new Set(messageReferenced);
     missing = 0;
-    for (const key of referencedSet) {
+    for (const key of messageSet) {
       if (!diskKeys.has(key)) missing += 1;
     }
   }
@@ -408,8 +434,11 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     complete: false,
   };
   let database: DoctorReport["database"] = null;
-  let blobCrossCheck: { referenced: string[]; expiredPendingDeletion: number } | null =
-    null;
+  let blobCrossCheck: {
+    referenced: string[];
+    messageReferenced: string[];
+    expiredPendingDeletion: number;
+  } | null = null;
   let provisional: DoctorReport["provisional"] = {
     stuck_minutes: options.stuckMinutes,
     count: null,
@@ -471,6 +500,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const blobInspection = inspectBlobs(
     dataDir,
     blobCrossCheck?.referenced ?? null,
+    blobCrossCheck?.messageReferenced ?? null,
     blobCrossCheck?.expiredPendingDeletion ?? null,
   );
 
