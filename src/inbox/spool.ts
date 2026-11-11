@@ -1141,6 +1141,52 @@ export function ackEvent(
   return consumerAck(spool, id);
 }
 
+/**
+ * Advance a consumer watermark over sequence numbers that have no retained
+ * event. This is used by a consumer that starts after pruning, where the first
+ * visible event can be N>1, and between retained events that pruning left
+ * non-contiguous. It refuses to skip any event that still exists, so it cannot
+ * silently discard an unread record.
+ */
+export function seedConsumerAck(
+  spool: InboxSpool,
+  consumerId: string,
+  seq: number,
+): ConsumerAckV1 {
+  const id = safeConsumerId(consumerId);
+  if (!Number.isSafeInteger(seq) || seq <= 0) throw configError("seed seq must be positive");
+  const ack = consumerAck(spool, id);
+  if (seq <= ack.acked_seq) return ack;
+  if (listEventFiles(spool).some(({ seq: existing }) => existing > ack.acked_seq && existing <= seq)) {
+    throw new InboxError(
+      3,
+      "INBOX_OUT_OF_ORDER",
+      "seed would skip an existing event",
+    );
+  }
+  const dir = acksDir(spool, id);
+  ensurePrivateDir(dir);
+  const name = eventName(seq);
+  const target = join(dir, name);
+  const record: ConsumerAckV1 = {
+    version: ACK_VERSION,
+    consumer_id: id,
+    project_id: spool.projectId,
+    acked_seq: seq,
+    updated_at: new Date().toISOString(),
+  };
+  if (existsSync(target)) {
+    const existing = parseAck(readPrivateFile(target, MAX_CONFIG_BYTES), id, spool.projectId);
+    if (existing.acked_seq !== seq) {
+      throw corruptError("acknowledgement file name does not match its seq");
+    }
+  } else {
+    writePrivateAtomic(dir, dir, name, `${JSON.stringify(record)}\n`);
+  }
+  cleanupAcks(dir, seq);
+  return consumerAck(spool, id);
+}
+
 export function registeredConsumers(spool: InboxSpool): string[] {
   const ids: string[] = [];
   for (const entry of readdirSync(spool.consumersDir, { withFileTypes: true })) {

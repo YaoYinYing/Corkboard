@@ -19,6 +19,7 @@ export {
   readPayload,
   registerConsumer,
   registeredConsumers,
+  seedConsumerAck,
   spoolUsage,
   type ConsumerAckV1,
   type EnqueueOptions,

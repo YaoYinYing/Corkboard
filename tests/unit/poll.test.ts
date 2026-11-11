@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import {
   PollError,
+  escapeForTerminal,
   loadCursorState,
   main,
   parseBaseUrl,
@@ -1083,6 +1084,28 @@ test("a consumer processing failure leaves no acknowledgement and no cursor adva
   assert.equal(calls.filter(bodyUrl).length, 1);
   assert.equal(calls.filter(readMessageUrl).length, 0);
   assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
+});
+
+test("escapeForTerminal escapes line and paragraph separators", () => {
+  assert.equal(escapeForTerminal("a b c"), "a\\u2028b\\u2029c");
+  assert.equal(escapeForTerminal("‮evil"), "\\u202eevil");
+});
+
+test("escapeForTerminal escapes format and default-ignorable controls", () => {
+  const codePoints = [
+    0x00ad, 0x034f, 0x0600, 0x061c, 0x06dd, 0x070f, 0x0890, 0x08e2,
+    0x115f, 0x17b4, 0x180e, 0x2060, 0x206a, 0x3164, 0xfe00, 0xffa0,
+    0xfff9, 0x110bd, 0x13430, 0x1bca0, 0x1d173, 0xe0000, 0xe0001, 0xe0002, 0xe0020, 0xe0100,
+  ];
+  const slash = String.fromCharCode(0x5c);
+  for (const codePoint of codePoints) {
+    const input = String.fromCodePoint(codePoint);
+    const expected =
+      codePoint <= 0xffff
+        ? `${slash}u${codePoint.toString(16).padStart(4, "0")}`
+        : `${slash}u{${codePoint.toString(16)}}`;
+    assert.equal(escapeForTerminal(`a${input}b`), `a${expected}b`, `U+${codePoint.toString(16)}`);
+  }
 });
 
 test("control and bidirectional summary characters are escaped in output", async () => {

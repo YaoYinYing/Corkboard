@@ -191,6 +191,15 @@ expected. Consumers deduplicate on `(project_id, seq)` (or the recorded
   (`acked_seq + 1`) or is already at/below the watermark (idempotent no-op). An
   out-of-order acknowledgement is rejected; events themselves may be queued and
   listed out of arrival order because readers sort by `seq`.
+- `seedConsumerAck(spool, consumerId, seq)` advances a new consumer's watermark
+  over a prefix that has already been pruned. It writes one immutable ack file
+  and refuses to advance over any event that is still retained, so it cannot
+  skip existing data. A consumer that starts at the oldest retained event should
+  seed to `firstRetainedSeq - 1`; the Codex adapter does this automatically. It
+  is also used to step over gaps between retained events (a seq that was never
+  queued or is already pruned) before acknowledging the next retained event.
+  Because the seed precedes delivery, a later failure can leave the seeded
+  watermark advanced without acknowledging or skipping a retained event.
 - An event is pruned only after **every registered consumer** has acknowledged
   it (and the retention window has elapsed), or under backpressure as described
   below. Unacknowledged events are never deleted.
@@ -263,6 +272,7 @@ readPayload(spool, event)                     // verified plaintext, opt-in only
 registerConsumer(spool, consumerId)
 pendingEvents(spool, consumerId, limit)       // seq > consumer watermark
 ackEvent(spool, consumerId, seq)              // contiguous, idempotent
+seedConsumerAck(spool, consumerId, seq)       // advance over pruned/gap seqs only
 pruneSpool(spool, { force })                  // acked-only cleanup
 runInbox(options)                             // poll -> queue bridge
 ```
@@ -297,7 +307,8 @@ node scripts/inbox.ts stop --spool-dir <spool>
 
 The supervision contract (one poller per cursor, session fan-out, recoverable
 locks, degraded/backpressure behavior, at-least-once framing, and the systemd
-unit) is in [`inbox-service.md`](./inbox-service.md).
+unit) is in [`inbox-service.md`](./inbox-service.md). The opt-in Codex CLI hook
+adapter is in [`codex-adapter.md`](./codex-adapter.md).
 
 To let an installed Claude Code session notice queued events without human
 polling, opt in per spool with the host adapter in

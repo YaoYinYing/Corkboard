@@ -2202,3 +2202,22 @@ failed write lost the notice.
   exact runtime that was exercised.
 - **Remove when:** the harness exposes a typed, documented notification channel with an
   explicit untrusted-content role, and its version contract is stable.
+
+## 2026-11-11 — a config file is user authority; edit it with parser state, not a line count
+
+The first Codex config merge scanned raw lines. A multi-line array or `"""`/`'''` string put
+the inserted hook keys inside a user value, and a created `[hooks]` header was absorbed on
+reinstall, silently moving a user guard hook to top level. A single `writeSync` could also
+rename a truncated config over the only copy. The scanner now tracks string and bracket
+state across lines, refuses anything it cannot classify, keeps a header the user has
+content under, and writes the complete text before fsync and rename.
+- **Rule:** inserting into a user-owned structured file is a parser boundary. Track the
+  grammar's state across lines (strings, brackets) and fail closed on anything ambiguous;
+  never infer a section boundary from a line prefix.
+- **Rule:** a header you created is not a header you own. If the user appended content under
+  it, the header must survive both reinstall and uninstall.
+- **Rule:** a config file is the only copy. Use a complete write, fsync, and an atomic
+  rename; a short write that still renames is data loss, not a partial update.
+- **Rule:** escape by Unicode property, not by an ad-hoc list: Cc, Cf, Zl, Zp, and
+  Default_Ignorable include reserved planes, astral tag characters, and variation selectors.
+- **Remove when:** the runtime exposes a typed config API instead of a text file.

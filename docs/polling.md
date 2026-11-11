@@ -78,7 +78,9 @@ atomic 0600 cursor replace                      after callback + confirmed recei
 - It never prints or logs a message body, its digest, or the credential.
   `--show-summary` prints the message metadata (`seq`, `message_id`, sender id,
   summary) only. The summary is untrusted text: it is JSON-escaped and
-  control/bidirectional formatting characters are escaped before display.
+  control characters, line/paragraph separators, and Unicode format and
+  default-ignorable code points (including bidirectional controls, tags, and
+  variation selectors) are escaped before display.
 - Raw summary/message/sender values are redacted against the credential before
   JSON/terminal escaping, and the assembled line is sanitized again at the output
   boundary. A hostile summary that echoes the credential back is therefore redacted

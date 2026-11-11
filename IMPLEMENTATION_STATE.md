@@ -3836,14 +3836,52 @@ permissions and foreign hooks; install fails closed without a credential-bound `
 unless `--allow-unbound`. Durable per-consumer `notified_seq`, a PID/boot/start monitor lock,
 and SessionStart recovery provide at-least-once behaviour without duplicate spam.
 
-Evidence: one-shot `claude -p` 2.1.310 (not the Commander) accepted the generated hooks and
-replied `SEEN` to a metadata-only notice, with `notified_seq` persisted. **Not proven:** the
-real interactive Commander receiving the notice, a server-side synthetic sender from another
-identity, Commander choosing to read/reply, and server IDs/receipts agreeing; no sanitized
-screenshots of that flow exist. The documented procedure covers the gap and does not restart
-the active campaign. Independent security PASS (`2146d502`) and contract PASS for the
-implementable bullets (`48f328c`); `npm run check` passes. **Issue #18 remains open** until
-the real-session acceptance exists; #20 targets that exchange. Debt (P3): the `asyncRewake`
-field is an internal, version-gated harness detail; notice-write/duplicate races are
-at-least-once by design; abandoned per-session consumers pin spool pruning (documented);
-`install` is POSIX-only.
+Evidence: a real installed 2.1.310 session (separate from the Commander) received the
+`SessionStart` notice for seq 1 / `msg_Cm4NqQwFR_0DWvDKBjr3iA`, chose to reply, and the
+server committed seq 2 / `msg_1zBOrlWmm8N6ilyaNMLlbw` from that session's own credential,
+with receipts for both messages agreeing. A second real session exchanged a full loop with
+another real session: seq 4 was delivered while the reader was idle, the `Stop asyncRewake`
+monitor woke it, it replied seq 5 seven seconds later, and the sender's own monitor then woke
+on seq 5 (`ACK_A 5`). Metadata-only notices (`body_included=false`,
+`summary_included=false`) were verified from the session transcripts. Sanitized evidence
+lives outside the repo at `~/.local/state/corkboard-acceptance/evidence/`. **Not proven:** the
+specific interactive Commander process (starting it would interrupt the campaign; the
+harness path is identical). Independent security PASS (`2146d502`) and contract PASS for the
+implementable bullets (`48f328c`); `npm run check` passes. **Issue #18** is supported for
+closure by this evidence; #20 tracks the combined Claude/Codex acceptance. Debt (P3): the
+`asyncRewake` field is an internal, version-gated harness detail; notice-write/duplicate
+races are at-least-once by design; abandoned per-session consumers pin spool pruning
+(documented); `install` is POSIX-only.
+
+## Codex CLI inbox adapter (2026-11-11) — issue #19 (capability; live acceptance open)
+
+Adds `docs/codex-adapter.md`, `src/inbox/codex-adapter.ts`, `scripts/codex-adapter.ts` and
+tests: opt-in, spool-scoped install of the stable `SessionStart` and `UserPromptSubmit`
+hooks. The hook emits only `hookSpecificOutput.additionalContext`; Codex maps that to a
+developer-role message, which the adapter never constructs, and the adapter emits no user
+turn, tool call, or command. Config editing is scanner-backed: multi-line arrays, inline
+tables, and `"""`/`'''` strings are tracked; ambiguous or unterminated shapes fail closed
+with "merge manually"; an adapter-created `[hooks]` header is preserved when the user added
+content after the block; writes are full-write + fsync + rename. Notices are metadata-only
+by default (bodies only when the spool was created with `--plaintext`), credential-redacted
+when `CORKBOARD_APIKEY` is in the hook environment, escaped for Cc/Cf/Zl/Zp and
+default-ignorables including astral tag/variation ranges, clipped and capped. Per-session
+consumer ids, an ack-max watermark, `seedConsumerAck` gap seeding that cannot skip a
+retained event, a rename-to-claim lock with `/proc` identity, journal rotation, and
+exit-0-on-runtime-failure preserve at-least-once without authority. `check` surfaces unsafe
+config as a nonzero error instead of "not installed".
+
+Evidence: guarded real Codex test accepted the generated config each run (`hooks/list`:
+`handlerType=command`, `async=false`, `timeoutSec=10`, `additionalContextLimit=0`,
+`trustStatus=untrusted`) and a synthetic-sender session transcript showed both events with
+zero `function_call`/`command_execution`/`shell_command`. **Not proven:** a live Codex
+model-authored reply and server-receipt correlation — `codex exec` timed out
+(exit 124; no model provider in this environment), recorded in the sanitized evidence. **Issue #19 remains open**; #20 tracks
+the full Claude/Codex acceptance. Independent security PASS and contract PASS on candidate
+tree `b8ef904`, plus a final delta review after the quote-run and Plane-14 fixes. Debt (P3):
+the config editor is line-oriented and fails closed on surfaces it does not parse (a line
+identical to the managed begin prefix and a second managed block fail closed; a copied
+begin/end block is treated as the adapter's own and replaced or removed); PID-reuse reclaim
+needs Linux `/proc`;
+quarantine/temp lock files are never swept; a concurrent Codex trust-state write can be
+lost by read-modify-rename; hook stdout/stderr writes ignore partial writes.

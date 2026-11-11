@@ -198,8 +198,15 @@ export function redact(text: string, secret: string): string {
 // matched in its original form before any escaping.
 export function escapeForTerminal(value: string): string {
   return value.replace(
-    /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g,
-    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    // Cc plus Cf and Default_Ignorable code points (including astral tag and
+    // variation-selector ranges) that can hide or reorder injected text.
+    /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u115f-\u1160\u17b4-\u17b5\u180b-\u180f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/gu,
+    (character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0xffff
+        ? `\\u${codePoint.toString(16).padStart(4, "0")}`
+        : `\\u{${codePoint.toString(16)}}`;
+    },
   );
 }
 
