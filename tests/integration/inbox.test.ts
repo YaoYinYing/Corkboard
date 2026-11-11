@@ -179,8 +179,8 @@ function noReceipts(fx: Fixture["fx"]): Promise<void> {
   return receiptCount(fx).then((count) => assert.equal(count, 0));
 }
 
-function cursorAt(spool: string, projectId: string, speakerId: string): number {
-  return loadCursorState(join(spool, "cursor.json"), projectId, speakerId, () => new Date())
+function cursorAt(spool: string, projectId: string, speakerId: string, baseUrl: string): number {
+  return loadCursorState(join(spool, "cursor.json"), projectId, speakerId, baseUrl, () => new Date())
     .after_seq;
 }
 
@@ -217,7 +217,7 @@ test("send -> queue -> list/ack -> restart is durable and idempotent", async (t)
   for (const name of readdirSync(spool.eventsDir)) {
     assert.equal(statSync(join(spool.eventsDir, name)).mode & 0o777, 0o600);
   }
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 2);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 2);
   assert.equal(await receiptCount(fx), 2);
 
   assert.deepEqual(
@@ -305,11 +305,12 @@ test("an uncertain receipt replays the queued event without duplication", async 
 
   const spool = openSpool(dir);
   assert.equal(listEvents(spool).length, 1);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 0);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 0);
   await noReceipts(fx);
 
+  const restartedBaseUrl = (await startAppServer(t, fx)).baseUrl;
   const restarted = await runInbox({
-    baseUrl: (await startAppServer(t, fx)).baseUrl,
+    baseUrl: restartedBaseUrl,
     token: poller.token,
     projectId: "proj_1",
     spoolDir: dir,
@@ -320,7 +321,7 @@ test("an uncertain receipt replays the queued event without duplication", async 
   assert.equal(restarted.processed, 1);
   assert.equal(listEvents(spool).length, 1);
   assert.equal(await receiptCount(fx), 1);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 1);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", restartedBaseUrl), 1);
   assert.deepEqual(pendingEvents(spool, "consumer-a").map((event) => event.seq), [1]);
 });
 
@@ -348,7 +349,7 @@ test("a spool failure before durability leaves no event, receipt, or cursor adva
     },
   );
   assert.deepEqual(listEvents(openSpool(dir)), []);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 0);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 0);
   await noReceipts(fx);
 
   const retried = await runInbox({
@@ -363,7 +364,7 @@ test("a spool failure before durability leaves no event, receipt, or cursor adva
   assert.equal(retried.processed, 1);
   assert.equal(listEvents(openSpool(dir)).length, 1);
   assert.equal(await receiptCount(fx), 1);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 1);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 1);
 });
 
 test("a stale temp file from a crashed write is cleared and the message queues on restart", async (t) => {
@@ -398,7 +399,7 @@ test("a stale temp file from a crashed write is cleared and the message queues o
   assert.ok(event !== undefined);
   assert.equal(event.payload.included, true);
   assert.equal(readPayload(reopened, event), text);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 1);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 1);
 });
 
 test("a lost cursor after the receipt replays without a second event or receipt", async (t) => {
@@ -425,6 +426,7 @@ test("a lost cursor after the receipt replays without a second event or receipt"
       version: 1,
       project_id: "proj_1",
       speaker_id: "spk_poller",
+      base_url: baseUrl,
       after_seq: 0,
       updated_at: "2026-11-11T12:00:00.000Z",
     })}\n`,
@@ -444,7 +446,7 @@ test("a lost cursor after the receipt replays without a second event or receipt"
   assert.equal(replayed.processed, 1);
   assert.equal(listEvents(openSpool(dir)).length, 1);
   assert.equal(await receiptCount(fx), 1);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 1);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 1);
 });
 
 test("a ready row whose body is now expired queues an expired tombstone in a plaintext spool", async (t) => {
@@ -480,7 +482,7 @@ test("a ready row whose body is now expired queues an expired tombstone in a pla
   assert.ok(event !== undefined);
   assert.equal(event.body_state, "expired");
   assert.equal(event.payload.included, false);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 1);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 1);
   await noReceipts(fx);
 });
 
@@ -511,7 +513,7 @@ test("an expired body is queued as a consumable tombstone without a receipt", as
   assert.ok(event !== undefined);
   assert.equal(event.body_state, "expired");
   assert.equal(event.payload.included, false);
-  assert.equal(cursorAt(dir, "proj_1", "spk_poller"), 1);
+  assert.equal(cursorAt(dir, "proj_1", "spk_poller", baseUrl), 1);
   await noReceipts(fx);
   assert.deepEqual(pendingEvents(spool, "consumer-a").map((entry) => entry.seq), [1]);
   assert.equal(output.join("\n").includes("expired body"), false);
@@ -661,6 +663,7 @@ test("a wrong-speaker cursor and corrupt event fail closed", async (t) => {
       version: 1,
       project_id: "proj_1",
       speaker_id: "spk_other",
+      base_url: baseUrl,
       after_seq: 0,
       updated_at: "2026-11-11T12:00:00.000Z",
     })}\n`,

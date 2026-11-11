@@ -1149,33 +1149,47 @@ async function rehearse(
   );
 
   const resyncText = await readFile(resyncCursorPath, "utf8");
-  const bound = modules.poll.parseCursorState(resyncText, projectOne, speakerOne);
+  const bound = modules.poll.parseCursorState(
+    resyncText,
+    projectOne,
+    speakerOne,
+    "http://localhost",
+  );
   let wrongProjectRejected = false;
   let wrongSpeakerRejected = false;
+  let wrongOriginRejected = false;
   try {
-    modules.poll.parseCursorState(resyncText, projectTwo, speakerOne);
+    modules.poll.parseCursorState(resyncText, projectTwo, speakerOne, "http://localhost");
   } catch {
     wrongProjectRejected = true;
   }
   try {
-    modules.poll.parseCursorState(resyncText, projectOne, speakerTwo);
+    modules.poll.parseCursorState(resyncText, projectOne, speakerTwo, "http://localhost");
   } catch {
     wrongSpeakerRejected = true;
+  }
+  try {
+    modules.poll.parseCursorState(resyncText, projectOne, speakerOne, "http://other.example");
+  } catch {
+    wrongOriginRejected = true;
   }
   const storedOldCursor = modules.poll.parseCursorState(
     storedCursorText,
     projectOne,
     speakerOne,
+    "http://localhost",
   );
   check(
     state,
     "cursor-binding",
     bound.project_id === projectOne &&
       bound.speaker_id === speakerOne &&
+      bound.base_url === "http://localhost" &&
       wrongProjectRejected &&
       wrongSpeakerRejected &&
+      wrongOriginRejected &&
       storedOldCursor.after_seq === liveSnapshot.seqs.at(-1),
-    "a stored cursor was accepted for a different project/speaker or lost its position",
+    "a stored cursor was accepted for a different project/speaker/origin or lost its position",
   );
 
   // 7. Revoke a compromised credential; rotate another. Both are checked on the

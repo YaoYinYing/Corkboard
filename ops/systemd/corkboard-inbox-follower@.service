@@ -1,0 +1,38 @@
+[Unit]
+Description=Corkboard inbox follower (%i)
+Documentation=file://%h/repo/Corkboard/docs/inbox-service.md
+# Bound repeated starts (including INBOX_LOCKED exit 1) instead of loop-forever.
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=HOME=%h
+# Mode must be 0600. Values: CORKBOARD_BASE_URL, CORKBOARD_PROJECT_ID,
+# CORKBOARD_INBOX_CONSUMERS (comma-separated), CORKBOARD_APIKEY.
+EnvironmentFile=%h/.config/corkboard/inbox-%i.env
+# Resolve node from the user manager's PATH. Add a drop-in
+# (systemctl --user edit ...) when Node is provided by nvm or another prefix.
+# The default checkout path is %h/repo/Corkboard; adjust it if yours differs.
+ExecStart=/usr/bin/env node --experimental-strip-types %h/repo/Corkboard/scripts/inbox.ts supervise --spool-dir %h/.local/state/corkboard-inbox/%i
+# Transient/network/disk failures are retried by the supervisor with its own
+# exponential backoff and jitter. systemd handles process death. Credential,
+# configuration and corruption exits (2/3) must not restart; a lock conflict
+# (exit 1) is bounded by the unit start limit above.
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=2 3
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+SyslogIdentifier=corkboard-inbox-%i
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Only the spool parent is writable so the instance directory can be created.
+# The env file and repository stay read-only.
+ReadWritePaths=%h/.local/state/corkboard-inbox
+
+[Install]
+WantedBy=default.target

@@ -135,6 +135,9 @@ export interface SpoolOptions {
 
 export interface PrepareSpoolOptions extends SpoolOptions {
   plaintext?: boolean | undefined;
+  // The supervisor acquires the exclusive lock with a non-destructive
+  // bootstrap preparation, then lets the normal per-pass preparation sweep.
+  sweep?: boolean | undefined;
 }
 
 export interface EnqueueOptions {
@@ -278,6 +281,23 @@ function ensurePrivateDir(path: string): void {
   }
   mkdirSync(path, { recursive: false, mode: 0o700 });
   chmodSync(path, 0o700);
+}
+
+// Read-only validation for status/health/stop: never creates or repairs a
+// spool directory.
+function requirePrivateDir(path: string): void {
+  let info;
+  try {
+    info = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw configError("spool is not initialized");
+    }
+    throw error;
+  }
+  if (info.isSymbolicLink()) throw unsafeError("spool subdirectory must not be a symbolic link");
+  if (!info.isDirectory()) throw unsafeError("spool subdirectory must be a directory");
+  assertPrivateMode(info, "spool subdirectory");
 }
 
 function safeConsumerId(consumerId: string): string {
@@ -484,15 +504,17 @@ function buildSpool(
   root: string,
   config: SpoolConfigV1,
   options: SpoolOptions,
+  readOnly = false,
 ): InboxSpool {
   const eventsDir = join(root, "events");
   const payloadsDir = join(root, "payloads");
   const consumersDir = join(root, "consumers");
   const tmpDir = join(root, "tmp");
-  ensurePrivateDir(eventsDir);
-  ensurePrivateDir(consumersDir);
-  ensurePrivateDir(tmpDir);
-  if (config.plaintext) ensurePrivateDir(payloadsDir);
+  const prepareDir = readOnly ? requirePrivateDir : ensurePrivateDir;
+  prepareDir(eventsDir);
+  prepareDir(consumersDir);
+  prepareDir(tmpDir);
+  if (config.plaintext) prepareDir(payloadsDir);
   return {
     root,
     projectId: config.project_id,
@@ -550,17 +572,23 @@ export function prepareSpool(
     );
   }
   const spool = buildSpool(root, config, options);
-  clearTemporary(spool.tmpDir);
-  clearConsumerTemporaries(spool);
+  if (options.sweep !== false) {
+    clearTemporary(spool.tmpDir);
+    clearConsumerTemporaries(spool);
+  }
   return spool;
 }
 
-export function openSpool(dir: string, options: SpoolOptions = {}): InboxSpool {
+export function openSpool(
+  dir: string,
+  options: SpoolOptions = {},
+  readOnly = false,
+): InboxSpool {
   const root = resolveSpoolRoot(dir, options.repoRoot ?? REPO_ROOT, false);
   const configPath = join(root, "spool.json");
   if (!existsSync(configPath)) throw configError("spool is not initialized");
   const config = parseConfig(readPrivateFile(configPath, MAX_CONFIG_BYTES));
-  return buildSpool(root, config, options);
+  return buildSpool(root, config, options, readOnly);
 }
 
 // ---------------------------------------------------------------- events
@@ -1113,7 +1141,7 @@ export function ackEvent(
   return consumerAck(spool, id);
 }
 
-function registeredConsumers(spool: InboxSpool): string[] {
+export function registeredConsumers(spool: InboxSpool): string[] {
   const ids: string[] = [];
   for (const entry of readdirSync(spool.consumersDir, { withFileTypes: true })) {
     if (entry.isSymbolicLink()) throw unsafeError("consumer entry must not be a symbolic link");

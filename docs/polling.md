@@ -67,8 +67,8 @@ atomic 0600 cursor replace                      after callback + confirmed recei
 ```
 
 - It polls **one project** with one credential. A cursor file is bound to that
-  project and the credential's speaker; reusing it with another project or speaker
-  fails closed.
+  project, the credential's speaker, and the server origin; reusing it with
+  another project, speaker, or origin fails closed.
 - Every response body — identity, list, **body fetch**, `mark_read` success, and error
   bodies — is streamed under a 1 MiB cap within the same 15-second request deadline; a
   stalled body is aborted. `Content-Length` is never trusted.
@@ -227,6 +227,7 @@ The cursor file is a small JSON object:
   "version": 1,
   "project_id": "proj_...",
   "speaker_id": "spk_...",
+  "base_url": "https://board.example",
   "after_seq": 42,
   "updated_at": "2026-11-06T12:00:00.000Z"
 }
@@ -235,9 +236,14 @@ The cursor file is a small JSON object:
 Each advance writes a new file next to the old one with mode `0600`, fsyncs it,
 renames it over the cursor, and fsyncs the directory. A reader sees either the old
 complete cursor or the new one, never a partial write. An existing cursor that is a
-symlink (POSIX `O_NOFOLLOW`), is group/world-accessible (POSIX mode), or names a
-different project or speaker is rejected. Use **one poller process per cursor file**;
-the client does not take a lock. Observation mode never writes the cursor file.
+symlink (POSIX `O_NOFOLLOW`), is group/world-accessible (POSIX mode), names a
+different project or speaker, or names a different server origin is rejected. The
+origin check was added with the supervised follower: a pre-origin cursor has no
+`base_url` and fails closed instead of being reused against an origin it was not
+written for. Restore/rebuild the cursor deliberately when changing origins. Use
+**one poller process per cursor file**; the client does not take a lock, while
+`scripts/inbox.ts run`/`supervise` adds one around the same cursor. Observation
+mode never writes the cursor file.
 
 ## Validation and fail-closed rules
 

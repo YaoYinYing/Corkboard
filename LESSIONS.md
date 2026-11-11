@@ -2165,3 +2165,22 @@ escaped the bounded-usage accounting.
   concurrent write cannot regress the watermark.
 - **Remove when:** the service itself owns delivery/ack state (it does not), or a
   multi-process lock replaces the documented single-writer startup assumption.
+
+## 2026-11-11 — a local lock is a protocol, not a file
+
+The inbox supervisor's first stale-lock reclaim read the record and then unlinked it. Two
+reclaimers could each read the same stale record; one installed a live lock and the other then
+deleted it, leaving two pollers on one cursor. A second round fixed the two-party case but still
+failed with three starters: a moved live record could be unlinked on a restore conflict. The
+fix is a guard (`mkdir`) around create/reclaim/release, identity-based stale decisions
+(PID+boot id+process start, age only when the owner record is missing/corrupt), move-then-verify
+reclaim, and quarantine instead of unlink on conflict.
+- **Rule:** a stale-lock decision needs the owner's identity, not an age. A paused live owner is
+  live; only a provably dead or unreadable-with-age owner is reclaimable.
+- **Rule:** never unlink a record whose instance you did not verify *after* moving it; quarantine
+  on conflict and fail closed.
+- **Rule:** serialize the acquire/reclaim/release critical section with an atomic guard, and
+  sweep crash residue (guard/tombstone) with the same dead-or-age rule.
+- **Remove when:** the host provides a kernel advisory lock held for the process lifetime
+  (documented as the upgrade path); the guard's residual missing/corrupt-owner window is the
+  reason to prefer it.

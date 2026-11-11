@@ -3784,3 +3784,34 @@ absence from diagnostics. Independent security and contract audits returned PASS
 supervised follower/fan-out on this contract. Residual: one bridge writer per spool (no
 inter-process lock), metadata-only still needs `receipt.write`, and Windows mode checks are
 skipped (POSIX-only guarantees documented).
+
+## Supervised inbox follower (2026-11-11) — issue #17
+
+Turns the #16 bridge into an operable follower: `docs/inbox-service.md` (contract),
+`src/inbox/supervisor.ts`, CLI `supervise`/`status`/`health`/`stop`, and
+`ops/systemd/corkboard-inbox-follower@.service`. One active poller per
+(origin, project, credential/speaker) is enforced by a canonical lock plus an atomic
+`mkdir` guard; stale decisions use PID + boot id + `/proc` start time, with age only for a
+missing/corrupt owner record. Reclaim moves the lock to a unique tombstone, verifies the
+moved instance, and deletes only on an exact match; a restore conflict quarantines and fails
+closed. The owner re-checks the canonical lock at pass boundaries and stops with
+`stop_reason: "lock-lost"` after bounded 10 ms re-reads. The cursor now carries and verifies
+`base_url` (pre-#17 cursors fail closed), so the same project/speaker cannot reuse a cursor
+across origins. `status`/`health` are read-only, report state/pid/counters/per-consumer
+ack/pending/backlog/lag/limits and heartbeat age (`stale_heartbeat`), and redact bodies,
+credentials and sender content. SIGINT/SIGTERM stop cleanly after durable state, including
+SIGTERM during the identity fetch. Backpressure and disk failures stop before `mark_read`
+or a cursor advance; expired tombstones remain consumable. The systemd template uses
+`%h/repo/Corkboard`, start limits, and `RestartPreventExitStatus=2 3`; no agent session is
+started or restarted.
+
+Tests cover concurrent/stale/live-paused/SIGKILL/reboot/PID-reuse lock cases, the
+three-party guard interleaving, restore-conflict quarantine, lose-must-not-sweep, origin
+binding, SIGTERM during identity, stale heartbeat, detach/reattach, reorder, disk failure,
+cursor-commit failure, revocation, and status redaction. Independent security and contract
+audits returned PASS on `4c532677c746514be6225b1374110e4aa6a484a8`; `npm run check` passes
+(865 tests). Issue #17 is closed by this checkpoint. Debt (P3): fixed (non-randomized) 10 ms
+lock-loss retries, `stop --force` does not re-validate a live record under the guard,
+`.quarantine-*` growth is operator-managed, and a fresh corrupt guard makes `--force` wait
+for its 30 s age. #18/#19 now add host adapters over this service; #20 proves the real
+two-agent exchange.

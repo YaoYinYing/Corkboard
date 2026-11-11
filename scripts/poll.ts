@@ -58,6 +58,8 @@ export interface CursorState {
   version: 1;
   project_id: string;
   speaker_id: string;
+  // The cursor is bound to one server origin as well as one project/speaker.
+  base_url: string;
   after_seq: number;
   updated_at: string;
 }
@@ -437,6 +439,7 @@ export function parseCursorState(
   text: string,
   projectId: string,
   speakerId: string,
+  baseUrl: string,
 ): CursorState {
   let parsed: unknown;
   try {
@@ -449,16 +452,20 @@ export function parseCursorState(
     parsed.version !== CURSOR_VERSION ||
     parsed.project_id !== projectId ||
     parsed.speaker_id !== speakerId ||
+    parsed.base_url !== baseUrl ||
     typeof parsed.after_seq !== "number" ||
     !Number.isSafeInteger(parsed.after_seq) ||
     parsed.after_seq < 0
   ) {
-    throw protocolError("cursor file does not match this project and credential speaker");
+    // A pre-origin cursor (no base_url) fails closed rather than being reused
+    // against an origin it was not written for.
+    throw protocolError("cursor file does not match this origin, project, and credential speaker");
   }
   return {
     version: CURSOR_VERSION,
     project_id: projectId,
     speaker_id: speakerId,
+    base_url: baseUrl,
     after_seq: parsed.after_seq,
     updated_at: typeof parsed.updated_at === "string" ? parsed.updated_at : "",
   };
@@ -512,6 +519,7 @@ export function loadCursorState(
   path: string,
   projectId: string,
   speakerId: string,
+  baseUrl: string,
   now: () => Date,
 ): CursorState {
   let fd: number;
@@ -523,6 +531,7 @@ export function loadCursorState(
         version: CURSOR_VERSION,
         project_id: projectId,
         speaker_id: speakerId,
+        base_url: baseUrl,
         after_seq: 0,
         updated_at: now().toISOString(),
       };
@@ -543,7 +552,7 @@ export function loadCursorState(
     } catch {
       throw protocolError("cursor file is not readable");
     }
-    return parseCursorState(text, projectId, speakerId);
+    return parseCursorState(text, projectId, speakerId, baseUrl);
   } finally {
     closeSync(fd);
   }
@@ -765,6 +774,7 @@ export async function pollPass(options: PollPassOptions): Promise<PollPassResult
     version: CURSOR_VERSION,
     project_id: options.projectId,
     speaker_id: options.speakerId,
+    base_url: options.baseUrl,
     after_seq: options.afterSeq,
     updated_at: now().toISOString(),
   };
@@ -942,7 +952,13 @@ export async function run(options: RunOptions): Promise<PollPassResult> {
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? defaultSleep;
   const speakerId = await fetchIdentity(options, options.baseUrl, options.token);
-  const state = loadCursorState(options.cursorPath, options.projectId, speakerId, now);
+  const state = loadCursorState(
+    options.cursorPath,
+    options.projectId,
+    speakerId,
+    options.baseUrl,
+    now,
+  );
 
   let afterSeq = state.after_seq;
   let processed = 0;

@@ -80,16 +80,21 @@ non-regular file, a symlink, or a file with any group/world permission bit.
 `spool.json` binds the directory to exactly one project and one plaintext mode.
 Opening the same directory for another project or flipping `--plaintext` fails
 closed. `cursor.json` remains the reference poller's file and is additionally
-bound to the credential's speaker.
+bound to the credential's speaker and the server origin; a cursor without the
+origin field (written before #17) fails closed rather than being reused.
 
 The bridge creates and chmods only the directories it creates. A pre-existing
 spool root or spool subdirectory must already be private (`0700`); it is verified
 and never re-chmodded, so passing a shared directory such as `/tmp` fails closed
 instead of silently changing that directory's mode.
 
-One bridge process may write to a spool. Multiple independent local consumers
-may read it concurrently. The bridge takes no lock; a second bridge writer is an
-operator error. Acknowledgement files are immutable per sequence, so a stale
+`scripts/inbox.ts run` takes an exclusive `supervisor.lock` for its lifetime and
+`scripts/inbox.ts supervise` holds the same lock across restarts, so one spool
+has one active poller. The lock is bound to PID, boot id, and process start
+time; a stale lock after a crash/reboot is recoverable and a live paused
+process still holds it. See [`inbox-service.md`](./inbox-service.md). Multiple
+independent local consumers may read the spool concurrently.
+Acknowledgement files are immutable per sequence, so a stale
 acknowledgement writer racing a newer one can add a lower file but can never
 regress the observed watermark (readers take the maximum). Bridge startup sweeps
 `consumers/<id>/acks/*.json.tmp-*` crash leftovers, so do not start the bridge
@@ -281,7 +286,18 @@ node scripts/inbox.ts ack --spool-dir <spool> --consumer claude-session --seq 42
 
 # Remove events acknowledged by every registered consumer.
 node scripts/inbox.ts prune --spool-dir <spool>
+
+# Supervised follower (exclusive lock, status, backoff), health and clean stop.
+node scripts/inbox.ts supervise --base-url <url> --project <projectId> \
+  --spool-dir <spool> --consumer claude-session --consumer codex-session
+node scripts/inbox.ts status --spool-dir <spool> [--json]
+node scripts/inbox.ts health --spool-dir <spool>
+node scripts/inbox.ts stop --spool-dir <spool>
 ```
+
+The supervision contract (one poller per cursor, session fan-out, recoverable
+locks, degraded/backpressure behavior, at-least-once framing, and the systemd
+unit) is in [`inbox-service.md`](./inbox-service.md).
 
 The credential is read from `CORKBOARD_APIKEY` or a `0600` `--token-file`,
 never from a positional argument. `run` reuses the poller's base-URL, credential,
@@ -319,6 +335,8 @@ body, digest, credential, or response text.
 | `INBOX_DISK` | 1 | Local write, fsync, rename, or disk-full failure; no complete event |
 | `INBOX_OUT_OF_ORDER` | 3 | Consumer acknowledgement would skip an unacknowledged seq |
 | `INBOX_NOT_FOUND` | 3 | Requested consumer/event does not exist |
+| `INBOX_LOCKED` | 1 | Another live supervisor holds this spool's cursor |
+| `INBOX_LOCK_CORRUPT` | 3 | Lock is malformed, symlinked, loose, or names another project |
 
 Poller failures (`PollError`) keep their documented exit codes. When the queue
 callback fails, the bridge surfaces the specific `InboxError` instead of the

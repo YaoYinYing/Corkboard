@@ -215,6 +215,7 @@ test("the cursor advances only after a confirmed mark_read and stays private", a
     version: 1,
     project_id: PROJECT,
     speaker_id: SPEAKER,
+    base_url: BASE,
     after_seq: 2,
     updated_at: "2026-11-03T12:00:00.000Z",
   });
@@ -317,7 +318,7 @@ test("an uncertain mark_read is retried with the same request and reprocesses on
   assert.equal(retried.length, 3);
   assert.equal(new Set(retried.map((call) => call.url.toString())).size, 1);
   assert.equal(retried[0]?.url.pathname.endsWith("/msg_1/read"), true);
-  assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+  assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
   assert.deepEqual(seen.map((message) => message.seq), [1]);
   assert.deepEqual(seenBodies, ["first body"]);
 
@@ -364,7 +365,7 @@ test("a foreign-project row fails closed before mark_read", async () => {
     },
   );
   assert.equal(calls.filter(readMessageUrl).length, 0);
-  assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+  assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
 });
 
 test("a malformed or inconsistent page fails closed", async () => {
@@ -395,6 +396,7 @@ test("a cursor from another speaker is rejected before polling", async () => {
       version: 1,
       project_id: PROJECT,
       speaker_id: "spk_other",
+      base_url: BASE,
       after_seq: 4,
       updated_at: "2026-11-03T12:00:00.000Z",
     })}\n`,
@@ -574,7 +576,7 @@ test("a stalled response body is aborted at the request deadline", async () => {
     isPoll(1, "TIMEOUT"),
   );
   assert.ok(Date.now() - started < 2_000);
-  assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+  assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
 });
 
 test("a signal during a body read stops the client without advancing", async () => {
@@ -747,7 +749,7 @@ test("a body GET 410 BODY_EXPIRED advances without a receipt while other body GE
         return true;
       },
     );
-    assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+    assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
     assert.equal(failure.calls.filter(readMessageUrl).length, 0);
   }
 });
@@ -808,7 +810,7 @@ test("mark_read success must name the requested message and speaker", async () =
       }),
       isPoll(3, "UNSAFE_RESPONSE"),
     );
-    assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+    assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
   }
 });
 
@@ -943,6 +945,7 @@ test("cursor reads refuse loose, symlinked, malformed, and wrong-project state",
     version: 1,
     project_id: PROJECT,
     speaker_id: SPEAKER,
+    base_url: BASE,
     after_seq: 3,
     updated_at: "2026-11-03T12:00:00.000Z",
   };
@@ -950,7 +953,7 @@ test("cursor reads refuse loose, symlinked, malformed, and wrong-project state",
   writeFileSync(loose, `${JSON.stringify(state)}\n`, { mode: 0o644 });
   chmodSync(loose, 0o644);
   assert.throws(
-    () => loadCursorState(loose, PROJECT, SPEAKER, () => new Date()),
+    () => loadCursorState(loose, PROJECT, SPEAKER, BASE, () => new Date()),
     isPoll(3, "UNSAFE_RESPONSE"),
   );
 
@@ -958,7 +961,7 @@ test("cursor reads refuse loose, symlinked, malformed, and wrong-project state",
   writeFileSync(malformed, "{not json", { mode: 0o600 });
   chmodSync(malformed, 0o600);
   assert.throws(
-    () => loadCursorState(malformed, PROJECT, SPEAKER, () => new Date()),
+    () => loadCursorState(malformed, PROJECT, SPEAKER, BASE, () => new Date()),
     isPoll(3, "UNSAFE_RESPONSE"),
   );
 
@@ -968,9 +971,39 @@ test("cursor reads refuse loose, symlinked, malformed, and wrong-project state",
   });
   chmodSync(wrongProject, 0o600);
   assert.throws(
-    () => loadCursorState(wrongProject, PROJECT, SPEAKER, () => new Date()),
+    () => loadCursorState(wrongProject, PROJECT, SPEAKER, BASE, () => new Date()),
     isPoll(3, "UNSAFE_RESPONSE"),
   );
+
+  const wrongOrigin = cursorPath("cursor-wrong-origin");
+  writeFileSync(
+    wrongOrigin,
+    `${JSON.stringify({ ...state, base_url: "http://other.example" })}\n`,
+    { mode: 0o600 },
+  );
+  chmodSync(wrongOrigin, 0o600);
+  assert.throws(
+    () => loadCursorState(wrongOrigin, PROJECT, SPEAKER, BASE, () => new Date()),
+    isPoll(3, "UNSAFE_RESPONSE"),
+  );
+
+  // A cursor written before the origin binding existed fails closed.
+  const preOrigin = cursorPath("cursor-pre-origin");
+  writeFileSync(
+    preOrigin,
+    `${JSON.stringify({ ...state, base_url: undefined })}\n`,
+    { mode: 0o600 },
+  );
+  chmodSync(preOrigin, 0o600);
+  assert.throws(
+    () => loadCursorState(preOrigin, PROJECT, SPEAKER, BASE, () => new Date()),
+    isPoll(3, "UNSAFE_RESPONSE"),
+  );
+
+  const valid = cursorPath("cursor-valid");
+  writeFileSync(valid, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  chmodSync(valid, 0o600);
+  assert.equal(loadCursorState(valid, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 3);
 
   if (process.platform !== "win32") {
     const real = cursorPath("cursor-real");
@@ -979,7 +1012,7 @@ test("cursor reads refuse loose, symlinked, malformed, and wrong-project state",
     const link = cursorPath("cursor-link");
     symlinkSync(real, link);
     assert.throws(
-      () => loadCursorState(link, PROJECT, SPEAKER, () => new Date()),
+      () => loadCursorState(link, PROJECT, SPEAKER, BASE, () => new Date()),
       isPoll(3, "UNSAFE_RESPONSE"),
     );
   }
@@ -1049,7 +1082,7 @@ test("a consumer processing failure leaves no acknowledgement and no cursor adva
   );
   assert.equal(calls.filter(bodyUrl).length, 1);
   assert.equal(calls.filter(readMessageUrl).length, 0);
-  assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+  assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
 });
 
 test("control and bidirectional summary characters are escaped in output", async () => {
@@ -1116,7 +1149,7 @@ test("an abort during mark_read retry backoff stops promptly", async () => {
   assert.ok(Date.now() - started < 1_000);
   assert.equal(markReadCalls, 1);
   assert.equal(
-    loadCursorState(cursorPath("abort-retry-backoff"), PROJECT, SPEAKER, () => new Date())
+    loadCursorState(cursorPath("abort-retry-backoff"), PROJECT, SPEAKER, BASE, () => new Date())
       .after_seq,
     0,
   );
@@ -1204,6 +1237,7 @@ test("the default CLI observes metadata without receipts or a cursor write", asy
       version: 1,
       project_id: PROJECT,
       speaker_id: SPEAKER,
+      base_url: BASE,
       after_seq: 0,
       updated_at: "2026-11-03T12:00:00.000Z",
     })}\n`,
@@ -1315,7 +1349,7 @@ test("a malformed body contract or digest mismatch fails closed without a receip
       isPoll(variant.exitCode, variant.code),
     );
     assert.equal(calls.filter(readMessageUrl).length, 0);
-    assert.equal(loadCursorState(path, PROJECT, SPEAKER, () => new Date()).after_seq, 0);
+    assert.equal(loadCursorState(path, PROJECT, SPEAKER, BASE, () => new Date()).after_seq, 0);
   }
 });
 
@@ -1340,7 +1374,7 @@ test("an oversized or stalled body response fails closed before any receipt", as
   );
   assert.equal(oversized.calls.filter(readMessageUrl).length, 0);
   assert.equal(
-    loadCursorState(cursorPath("body-cap"), PROJECT, SPEAKER, () => new Date()).after_seq,
+    loadCursorState(cursorPath("body-cap"), PROJECT, SPEAKER, BASE, () => new Date()).after_seq,
     0,
   );
 
@@ -1375,7 +1409,7 @@ test("an oversized or stalled body response fails closed before any receipt", as
   );
   assert.equal(stalled.calls.filter(readMessageUrl).length, 0);
   assert.equal(
-    loadCursorState(cursorPath("body-stall"), PROJECT, SPEAKER, () => new Date()).after_seq,
+    loadCursorState(cursorPath("body-stall"), PROJECT, SPEAKER, BASE, () => new Date()).after_seq,
     0,
   );
 
@@ -1420,7 +1454,7 @@ test("an oversized or stalled body response fails closed before any receipt", as
   assert.equal(stopped.afterSeq, 0);
   assert.equal(interrupted.calls.filter(readMessageUrl).length, 0);
   assert.equal(
-    loadCursorState(cursorPath("body-signal"), PROJECT, SPEAKER, () => new Date()).after_seq,
+    loadCursorState(cursorPath("body-signal"), PROJECT, SPEAKER, BASE, () => new Date()).after_seq,
     0,
   );
 });
